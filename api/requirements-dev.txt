@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.1.1
+# starlette 1.6 usa httpx2 no TestClient; httpx 0.x emite aviso de depreciacao.
+httpx2==2.12.0

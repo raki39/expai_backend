@@ -1,0 +1,294 @@
+"""Versionamento da configuracao do experimento (ADR 0008).
+
+Implementa o que a secao 10.2.3 exige: "Toda alteracao de configuracao e
+evento versionado no ledger, com autor, data, valor anterior e novo."
+
+Tres travas:
+
+1. Config **congela durante run ativo** - alterar parametro no meio de um
+   replay quebra reprodutibilidade.
+2. O teto operacional do banco **nao pode exceder** `LLM_MAX_USD_ABSOLUTE`
+   do ambiente (secao 12.1: o limite mora fora do codigo).
+3. Alteracao material e **marcada**, para o painel avisar que invalida
+   comparacao com runs anteriores.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from dataclasses import dataclass
+from decimal import Decimal
+
+from ..migrations import ESTADOS_ATIVOS
+from ..settings import Settings
+from .schema import ExperimentConfig, campo_material
+
+log = logging.getLogger(__name__)
+
+
+class ErroConfig(Exception):
+    """Base das recusas de alteracao de configuracao."""
+
+
+class ConfigCongelada(ErroConfig):
+    """Ha run ativo; alterar agora quebraria a reprodutibilidade dele."""
+
+
+class TetoExcedido(ErroConfig):
+    """A alteracao tentou ultrapassar o limite inviolavel do ambiente."""
+
+
+class SemMudanca(ErroConfig):
+    """A alteracao nao muda nenhum campo."""
+
+
+@dataclass(frozen=True)
+class VersaoConfig:
+    id: int
+    created_at: str
+    author: str
+    parent_version_id: int | None
+    config_hash: str
+    material: bool
+    note: str
+    config: ExperimentConfig
+
+
+# --------------------------------------------------------------- consultas
+
+
+def run_ativo(conn: sqlite3.Connection) -> int | None:
+    """Id do run ativo, se houver. Base da trava de congelamento."""
+    marcadores = ",".join("?" for _ in ESTADOS_ATIVOS)
+    linha = conn.execute(
+        f"SELECT id FROM run WHERE state IN ({marcadores}) LIMIT 1",
+        ESTADOS_ATIVOS,
+    ).fetchone()
+    return int(linha["id"]) if linha else None
+
+
+def _linha_para_versao(linha: sqlite3.Row) -> VersaoConfig:
+    return VersaoConfig(
+        id=int(linha["id"]),
+        created_at=linha["created_at"],
+        author=linha["author"],
+        parent_version_id=(
+            int(linha["parent_version_id"])
+            if linha["parent_version_id"] is not None
+            else None
+        ),
+        config_hash=linha["config_hash"],
+        material=bool(linha["material"]),
+        note=linha["note"] or "",
+        config=ExperimentConfig.model_validate_json(linha["payload_json"]),
+    )
+
+
+def versao_atual(conn: sqlite3.Connection) -> VersaoConfig | None:
+    linha = conn.execute(
+        "SELECT * FROM config_version ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return _linha_para_versao(linha) if linha else None
+
+
+def versao_por_id(conn: sqlite3.Connection, version_id: int) -> VersaoConfig | None:
+    linha = conn.execute(
+        "SELECT * FROM config_version WHERE id = ?", (version_id,)
+    ).fetchone()
+    return _linha_para_versao(linha) if linha else None
+
+
+def historico(conn: sqlite3.Connection, limite: int = 50) -> list[dict]:
+    """Versoes com os campos que mudaram em cada uma.
+
+    E o que a secao 10.2.3 pede que o painel mostre: autor, data, valor
+    anterior e valor novo.
+    """
+    versoes = conn.execute(
+        "SELECT * FROM config_version ORDER BY id DESC LIMIT ?", (limite,)
+    ).fetchall()
+
+    saida: list[dict] = []
+    for v in versoes:
+        mudancas = conn.execute(
+            "SELECT field, old_value_json, new_value_json, material"
+            " FROM config_change WHERE version_id = ? ORDER BY field",
+            (v["id"],),
+        ).fetchall()
+        saida.append(
+            {
+                "version_id": int(v["id"]),
+                "created_at": v["created_at"],
+                "author": v["author"],
+                "parent_version_id": v["parent_version_id"],
+                "config_hash": v["config_hash"],
+                "material": bool(v["material"]),
+                "note": v["note"] or "",
+                "changes": [
+                    {
+                        "field": m["field"],
+                        "old_value": (
+                            json.loads(m["old_value_json"])
+                            if m["old_value_json"] is not None
+                            else None
+                        ),
+                        "new_value": (
+                            json.loads(m["new_value_json"])
+                            if m["new_value_json"] is not None
+                            else None
+                        ),
+                        "material": bool(m["material"]),
+                    }
+                    for m in mudancas
+                ],
+            }
+        )
+    return saida
+
+
+# ----------------------------------------------------------------- travas
+
+
+def _checar_teto(config: ExperimentConfig, settings: Settings) -> None:
+    """Trava 2: o teto do banco nao pode exceder o limite do ambiente."""
+    limite_cents = int(
+        (settings.llm_max_usd_absolute * Decimal(100)).to_integral_value()
+    )
+    if config.max_llm_usd_per_run_cents > limite_cents:
+        raise TetoExcedido(
+            "max_llm_usd_per_run_cents="
+            f"{config.max_llm_usd_per_run_cents} excede o limite inviolavel "
+            f"LLM_MAX_USD_ABSOLUTE={settings.llm_max_usd_absolute} "
+            f"({limite_cents} centavos). O limite mora fora do codigo."
+        )
+
+
+# ------------------------------------------------------------- alteracao
+
+
+def _inserir_versao(
+    conn: sqlite3.Connection,
+    config: ExperimentConfig,
+    author: str,
+    parent_id: int | None,
+    mudancas: list[tuple[str, object, object]],
+    note: str,
+) -> VersaoConfig:
+    material = any(campo_material(campo) for campo, _, _ in mudancas)
+
+    conn.execute("BEGIN")
+    try:
+        cur = conn.execute(
+            "INSERT INTO config_version"
+            " (created_at, author, parent_version_id, payload_json,"
+            "  config_hash, material, note)"
+            " VALUES (datetime('now'), ?, ?, ?, ?, ?, ?)",
+            (
+                author,
+                parent_id,
+                config.model_dump_json(),
+                config.config_hash(),
+                1 if material else 0,
+                note,
+            ),
+        )
+        version_id = int(cur.lastrowid)
+
+        for campo, antes, depois in mudancas:
+            conn.execute(
+                "INSERT INTO config_change"
+                " (version_id, field, old_value_json, new_value_json, material)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    version_id,
+                    campo,
+                    None if antes is None else json.dumps(antes, ensure_ascii=False),
+                    None if depois is None else json.dumps(depois, ensure_ascii=False),
+                    1 if campo_material(campo) else 0,
+                ),
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    log.info(
+        "config.version_created",
+        extra={
+            "config_version": version_id,
+            "config_hash": config.config_hash(),
+            "author": author,
+            "material": material,
+            "changed_fields": [c for c, _, _ in mudancas],
+        },
+    )
+    versao = versao_por_id(conn, version_id)
+    assert versao is not None
+    return versao
+
+
+def bootstrap(conn: sqlite3.Connection, settings: Settings) -> VersaoConfig:
+    """Cria a versao 1 a partir dos defaults, se ainda nao existir.
+
+    A partir dai o ambiente e IGNORADO para os parametros do experimento.
+    """
+    atual = versao_atual(conn)
+    if atual is not None:
+        return atual
+
+    config = ExperimentConfig()
+    _checar_teto(config, settings)
+
+    campos = sorted(config.model_dump(mode="json").keys())
+    mudancas = [
+        (campo, None, config.model_dump(mode="json")[campo]) for campo in campos
+    ]
+    return _inserir_versao(
+        conn,
+        config,
+        author="bootstrap",
+        parent_id=None,
+        mudancas=mudancas,
+        note="versao inicial gerada dos defaults",
+    )
+
+
+def criar_versao(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    alteracoes: dict,
+    author: str,
+    note: str = "",
+) -> VersaoConfig:
+    """Aplica `alteracoes` sobre a versao vigente e grava uma nova.
+
+    Levanta `ConfigCongelada`, `TetoExcedido` ou `SemMudanca`.
+    """
+    atual = versao_atual(conn)
+    if atual is None:
+        raise ErroConfig("nao ha config_version; rode o bootstrap primeiro")
+
+    # Trava 1: congelamento durante run ativo.
+    ativo = run_ativo(conn)
+    if ativo is not None:
+        raise ConfigCongelada(
+            f"run {ativo} esta ativo; alterar configuracao agora quebraria a "
+            "reprodutibilidade dele"
+        )
+
+    base = atual.config.model_dump(mode="json")
+    base.update(alteracoes)
+    nova = ExperimentConfig.model_validate(base)  # valida coerencia
+
+    # Trava 2: limite inviolavel do ambiente.
+    _checar_teto(nova, settings)
+
+    mudancas = atual.config.diff(nova)
+    if not mudancas:
+        raise SemMudanca("a alteracao nao muda nenhum campo")
+
+    return _inserir_versao(
+        conn, nova, author=author, parent_id=atual.id, mudancas=mudancas, note=note
+    )

@@ -1,0 +1,7 @@
+# Fase 0A - servico `api`
+# Versoes fixadas por reprodutibilidade (regra 13 do CLAUDE.md).
+# Verificadas por instalacao real em 2026-09-01, Python 3.12.10.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+pydantic-settings==2.15.0
