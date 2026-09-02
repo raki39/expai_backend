@@ -453,10 +453,14 @@ def carteira(conn: sqlite3.Connection, *, run_id: int | None = None) -> dict:
             "caixa_minor": por_conta[contas.CAIXA_SIM]["balance_minor"],
             "posicao_btc_minor": por_conta[contas.POSICAO_BTC]["balance_minor"],
             "tesouraria_minor": por_conta[contas.TESOURARIA_SIM]["balance_minor"],
+            # As QUATRO contas de custo. `sim.despesa.spread` foi criada
+            # depois das outras tres e ficou de fora daqui, entao o painel
+            # vinha subnotificando o custo de execucao em silencio.
             "custo_execucao_minor": sum(
                 por_conta[c]["balance_minor"]
                 for c in (
                     contas.DESPESA_TAXA,
+                    contas.DESPESA_SPREAD,
                     contas.DESPESA_SLIPPAGE,
                     contas.DESPESA_PENALIDADE,
                 )

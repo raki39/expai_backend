@@ -553,3 +553,38 @@ def test_carteira_do_painel_e_a_do_run_ativo(
     carteira = client.get("/api/ledger").json()["carteira"]
     assert carteira["simulado_usd"]["caixa_minor"] == SEMENTE_USD
     assert carteira["simulado_usd"]["posicao_btc_minor"] == 0
+
+
+def test_custo_de_execucao_da_carteira_inclui_o_spread(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Regressao: `sim.despesa.spread` nasceu depois das outras tres contas de
+    custo e ficou de fora da soma, subnotificando o custo em silencio."""
+    from app.ledger.livro import carteira
+
+    run_id, dataset_id, cfg = cenario
+    e = comprar(conn, run_id=run_id, dataset_id=dataset_id,
+                decision_bar_ms=barra(0), config=cfg)
+    assert e.spread_cents > 0
+    c = carteira(conn, run_id=run_id)
+    assert c["simulado_usd"]["custo_execucao_minor"] == e.custo_total_cents
+
+
+def test_rota_simulador_mostra_o_ultimo_run_quando_nao_ha_ativo(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """"Nao ha run ativo" nao e "nao houve execucao nenhuma"."""
+    from app.ledger.livro import encerrar_run
+
+    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    dataset_id = criar_dataset(conn, [50_000] * 100)
+    comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
+            config=ExperimentConfig())
+    encerrar_run(conn, run_id, "concluido")
+
+    corpo = client.get("/api/simulador").json()
+    assert corpo["run_ativo"] is None
+    assert corpo["run_exibido"] == run_id
+    assert corpo["encerrado"] is True
+    assert corpo["execucoes"] == 1
+    assert corpo["custos_cents"]["total"] > 0

@@ -366,12 +366,28 @@ def simulador_estado(request: Request) -> dict[str, Any]:
     """
     conn = _conn(request)
     ativo = config_service.run_ativo(conn)
-    if ativo is None:
+    # Sem run ativo, mostra o ULTIMO que teve execucao. A tela ficava zerada
+    # com milhares de execucoes gravadas, porque a comparacao encerra os runs
+    # que ela abre - e "nao ha run ativo" nao e a mesma coisa que "nao houve
+    # execucao nenhuma".
+    alvo = ativo
+    if alvo is None:
+        linha = conn.execute(
+            "SELECT MAX(run_id) AS run_id FROM execution"
+        ).fetchone()
+        alvo = int(linha["run_id"]) if linha and linha["run_id"] else None
+    if alvo is None:
         return {
             "run_ativo": None,
+            "run_exibido": None,
             "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
         }
-    return {"run_ativo": ativo, **simulador.resumo(conn, ativo)}
+    return {
+        "run_ativo": ativo,
+        "run_exibido": alvo,
+        "encerrado": ativo is None,
+        **simulador.resumo(conn, alvo),
+    }
 
 
 @router.get("/execucoes")
