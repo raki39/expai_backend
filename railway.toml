@@ -6,12 +6,19 @@
 # docker-compose: o `backend/docker-compose.yml` existe apenas para rodar
 # localmente. Quem ativa o servico aqui e este arquivo + api/Dockerfile.
 #
-# ATENCAO: o arquivo de config da Railway NAO segue o root directory.
-# Informe o caminho absoluto nas configuracoes do servico: /api/railway.toml
+# Este arquivo fica na RAIZ do repositorio de proposito: o arquivo de config
+# da Railway nao segue o root directory, e a raiz e onde ela procura por
+# padrao. Assim nao ha caminho de config para configurar - um passo a menos
+# para esquecer.
+#
+# O Dockerfile, esse sim, e procurado dentro do root directory (/api).
 #
 # Configurar no painel da Railway:
 #   Repositorio ......: backend
-#   Root directory ...: /api
+#   Root directory ...: /api    <- OBRIGATORIO. Sem isso a Railway analisa a
+#                                  raiz do repo, nao acha Python nem Dockerfile,
+#                                  e falha com "Railpack could not determine
+#                                  how to build the app".
 #   Watch paths ......: nao e necessario (repositorio dedicado)
 #   Volume ...........: mount path /data
 #   Dominio publico ..: SIM - o painel roda na Vercel, que nao alcanca a rede
