@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 
 from ..config import service as config_service
 from ..config.service import ConfigCongelada, SemMudanca, TetoExcedido
+from ..dataset import ingest as dataset_ingest
+from ..dataset import loader as dataset_loader
+from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
+from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..security import exigir_token_de_servico
 from ..settings import Settings
 from ..store import versao_schema, volume_gravavel, volume_montado
@@ -141,6 +145,89 @@ def config_nova_versao(
             else ""
         ),
     }
+
+
+# ----------------------------------------------------------------- dataset
+
+
+class PedidoIngestao(BaseModel):
+    """Disparo da ingestao unica.
+
+    `aceitar_lacunas` e o "relatorio aceito" do criterio 3: a decisao de
+    prosseguir com serie incompleta e de uma pessoa, tem autor e fica no log.
+    Por isso o default e recusar.
+    """
+
+    author: str = Field(min_length=1, max_length=120)
+    aceitar_lacunas: bool = False
+
+
+@router.get("/dataset")
+def dataset_atual(request: Request) -> dict[str, Any]:
+    meta = dataset_loader.dataset_vigente(_conn(request))
+    if meta is None:
+        return {"existe": False, "aviso": "dataset ainda nao ingerido"}
+    return {"existe": True, **dataset_loader.resumo(_conn(request), meta.id)}
+
+
+@router.post("/dataset/ingest", status_code=status.HTTP_201_CREATED)
+def dataset_ingerir(
+    request: Request, pedido: PedidoIngestao = Body(...)
+) -> dict[str, Any]:
+    """Ingestao unica e idempotente da janela decidida.
+
+    Sincrona de proposito: acontece uma vez, e quem dispara precisa ver o
+    relatorio de integridade para aceita-lo ou nao. Baixar ~25 arquivos leva
+    dezenas de segundos; a rota e `def`, entao roda no threadpool e nao trava
+    o laco de eventos.
+    """
+    conn = _conn(request)
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+
+    log.info("dataset.ingestao_pedida", extra={"author": pedido.author})
+
+    try:
+        resultado = dataset_ingest.ingerir(
+            conn, atual.config, aceitar_lacunas=pedido.aceitar_lacunas
+        )
+    except LacunasNaoAceitas as e:
+        # 409, e nao 422: o pedido esta correto, o estado dos dados e que
+        # exige uma decisao humana.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "erro": "lacunas_nao_aceitas",
+                "mensagem": str(e),
+                "relatorio_integridade": e.relatorio.como_dict(),
+                "como_prosseguir": (
+                    "reenvie com aceitar_lacunas=true para aceitar o relatorio, "
+                    "ou ajuste data_start/data_end na configuracao"
+                ),
+            },
+        )
+    except DivergenciaNaReingestao as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except BloqueioPorJurisdicao as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "erro": "bloqueio_por_jurisdicao",
+                "mensagem": str(e),
+                "referencia": "ADR 0012",
+            },
+        )
+    # DadosInconsistentes ANTES de ErroDeFonte: e subclasse dela, e na ordem
+    # inversa este ramo seria inalcancavel.
+    except DadosInconsistentes as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+    except ErroDeFonte as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    return resultado.como_dict()
 
 
 # --------------------------------------------------------------- sentinela

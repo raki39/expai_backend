@@ -108,6 +108,138 @@ MIGRACOES: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        2,
+        "incremento 1: dataset imutavel, barras e a reserva carvada no SQL",
+        """
+        -- ------------------------------------------------------------------
+        -- Dataset ingerido uma vez e fixado.
+        --
+        -- `reserved_from_ms` nao e metadado decorativo: e o corte que a VIEW
+        -- abaixo aplica. Carvar agora custa uma clausula WHERE; carvar depois
+        -- significa que a janela ja foi vista e o reservado nasce contaminado
+        -- (D11, secao 14.2).
+        -- ------------------------------------------------------------------
+        CREATE TABLE dataset (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            venue             TEXT    NOT NULL,
+            symbol            TEXT    NOT NULL,
+            timeframe         TEXT    NOT NULL,
+            interval_ms       INTEGER NOT NULL CHECK (interval_ms > 0),
+
+            -- Sempre em MILISSEGUNDOS. Os dumps da Binance mudam de ms para
+            -- microssegundos em 2025-01, no meio da janela decidida; a
+            -- ingestao normaliza e o banco guarda uma unidade so.
+            start_ms          INTEGER NOT NULL,
+            end_ms            INTEGER NOT NULL,
+            reserved_from_ms  INTEGER NOT NULL,
+
+            bars              INTEGER NOT NULL CHECK (bars > 0),
+
+            -- Hash dos DADOS normalizados, nao dos bytes baixados. E o que
+            -- torna a reingestao verificavel: recompactacao na origem mudaria
+            -- o hash do zip sem mudar uma barra sequer.
+            sha256            TEXT    NOT NULL,
+
+            source            TEXT    NOT NULL,
+            source_files_json TEXT    NOT NULL,
+            fetched_at        TEXT    NOT NULL,
+
+            -- Declarado aqui e propagado a todo resultado (secao 8.4.1.1).
+            fidelity_level    INTEGER NOT NULL CHECK (fidelity_level >= 1),
+
+            -- Expoente decimal dos inteiros de preco e volume. Sem isto,
+            -- inteiro de precisao fixa vira numero sem unidade.
+            price_scale_exp   INTEGER NOT NULL,
+            volume_scale_exp  INTEGER NOT NULL,
+
+            CHECK (start_ms < end_ms),
+            CHECK (reserved_from_ms > start_ms
+                   AND reserved_from_ms <= end_ms),
+            UNIQUE (venue, symbol, timeframe, start_ms, end_ms)
+        );
+
+        -- ------------------------------------------------------------------
+        -- Barras OHLCV.
+        --
+        -- Todos os valores em INTEIRO de precisao fixa (regra 5). Os dumps
+        -- entregam preco como string decimal, entao a conversao vai direto
+        -- para inteiro sem passar por ponto flutuante em momento algum.
+        -- ------------------------------------------------------------------
+        CREATE TABLE bar (
+            dataset_id   INTEGER NOT NULL REFERENCES dataset(id),
+            open_time_ms INTEGER NOT NULL,
+            open         INTEGER NOT NULL,
+            high         INTEGER NOT NULL,
+            low          INTEGER NOT NULL,
+            close        INTEGER NOT NULL,
+            volume       INTEGER NOT NULL CHECK (volume >= 0),
+            quote_volume INTEGER NOT NULL CHECK (quote_volume >= 0),
+            trades       INTEGER NOT NULL CHECK (trades >= 0),
+
+            CHECK (high >= low),
+            CHECK (high >= open AND high >= close),
+            CHECK (low  <= open AND low  <= close),
+
+            PRIMARY KEY (dataset_id, open_time_ms)
+        ) WITHOUT ROWID;
+
+        -- ------------------------------------------------------------------
+        -- Imutabilidade imposta pelo banco, como no ledger: um dataset fixado
+        -- que pode ser editado nao esta fixado. Reingestao correta e no-op;
+        -- reingestao divergente e erro, nunca sobrescrita silenciosa.
+        -- ------------------------------------------------------------------
+        CREATE TRIGGER dataset_sem_update
+        BEFORE UPDATE ON dataset
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset e imutavel apos a ingestao');
+        END;
+
+        CREATE TRIGGER dataset_sem_delete
+        BEFORE DELETE ON dataset
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset e append-only');
+        END;
+
+        CREATE TRIGGER bar_sem_update
+        BEFORE UPDATE ON bar
+        BEGIN
+            SELECT RAISE(ABORT, 'bar e imutavel');
+        END;
+
+        CREATE TRIGGER bar_sem_delete
+        BEFORE DELETE ON bar
+        BEGIN
+            SELECT RAISE(ABORT, 'bar e append-only');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- A RESERVA, CARVADA NO SQL.
+        --
+        -- Criterio 4 do incremento 1: "a restricao esta no SQL do loader, nao
+        -- em uma checagem que o chamador poderia esquecer" (secao 8.4.1.2).
+        --
+        -- Esta view NAO CONSEGUE devolver barra reservada. Nao ha parametro,
+        -- flag nem argumento que a faca devolver: o corte e parte da sua
+        -- definicao. O loader do experimento le daqui e nunca de `bar`.
+        -- ------------------------------------------------------------------
+        CREATE VIEW bar_experimento AS
+        SELECT
+            b.dataset_id,
+            b.open_time_ms,
+            b.open,
+            b.high,
+            b.low,
+            b.close,
+            b.volume,
+            b.quote_volume,
+            b.trades,
+            b.open_time_ms + d.interval_ms AS close_time_ms
+        FROM bar b
+        JOIN dataset d ON d.id = b.dataset_id
+        WHERE b.open_time_ms < d.reserved_from_ms;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
