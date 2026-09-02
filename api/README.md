@@ -87,8 +87,12 @@ app/
 
 ## Docker
 
+O `Dockerfile` e o `docker-compose.yml` ficam na **raiz do repositório**, não
+aqui: é assim que a Railway os encontra sem precisar de Root Directory
+configurado. O contexto de build é a raiz, e o código Python vive em `api/`.
+
 ```bash
-cd ..                          # repositorio backend
+cd ..                          # raiz do repositorio backend
 docker compose up --build      # api em http://localhost:8000
 docker compose down            # para, preservando o volume
 docker compose down -v         # apaga o banco

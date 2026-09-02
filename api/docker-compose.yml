@@ -1,22 +1,25 @@
 # Fase 0A - servico `api`, desenvolvimento LOCAL.
 #
 # A Railway NAO usa este arquivo. Ela constroi um servico a partir do
-# Dockerfile (api/Dockerfile) conforme api/railway.toml. Compose nao e
-# orquestrado pela Railway.
+# Dockerfile desta pasta, conforme railway.toml. Compose nao e orquestrado
+# pela Railway.
 #
 #   docker compose up --build      sobe a api em http://localhost:8000
 #   docker compose logs -f api     log JSON estruturado
 #   docker compose down            para, PRESERVANDO o volume
 #   docker compose down -v         para e APAGA o banco
 #
-# Requer api/.env preenchido (copie de api/.env.example).
+# Requer .env preenchido nesta pasta (copie de .env.example).
 
 services:
   api:
     build:
-      context: ./api
+      # Mesmo contexto do build da Railway (Root Directory = /api). Se local e
+      # producao construissem diferente, um dos dois deixaria de ser testado.
+      context: .
+      dockerfile: Dockerfile
     env_file:
-      - ./api/.env
+      - ./.env
     environment:
       # Sobrepoe o .env: dentro do container os caminhos apontam para o volume.
       APP_ENV: local

@@ -1,12 +1,15 @@
 # Fase 0A - servico `api`
 #
-# Build determinístico: versao de Python e dependencias fixadas, sem depender
-# da deteccao automatica da plataforma.
+# Este servico e auto-contido: Dockerfile, compose e railway.toml vivem aqui,
+# nao na raiz do repositorio. O repositorio `backend` abriga mais de um
+# servico, e cada um constroi o seu.
+#
+# Contexto de build: esta pasta (api/).
 
 FROM python:3.12-slim AS base
 
-# PYTHONUNBUFFERED: sem isso o log JSON fica preso no buffer e a Railway
-# mostra as linhas fora de ordem (ou nao mostra ate o processo morrer).
+# PYTHONUNBUFFERED: sem isso o log JSON fica preso no buffer e as linhas
+# aparecem fora de ordem, ou so quando o processo morre.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -21,31 +24,24 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY pytest.ini ./
 
-# Diretorio do volume. Em producao a Railway monta o volume aqui e o conteudo
-# desta linha e substituido; ela existe para o container funcionar tambem sem
-# volume (compose local, teste rapido).
+# Diretorio do volume. Em producao a Railway monta o volume aqui e substitui
+# o conteudo; existe para o container tambem funcionar sem volume.
 RUN mkdir -p /data/datasets
 
 # ---------------------------------------------------------------------------
 # ATENCAO - rodamos como ROOT, de proposito.
 #
-# A documentacao da Railway e explicita: "Docker images that run as a non-root
-# UID by default will have permissions issues" com volumes. Como o SQLite do
-# experimento vive no volume montado em /data, um usuario nao-root quebraria a
-# escrita - e o incremento 0 inteiro existe para provar que essa escrita
-# persiste.
-#
-# E um desvio consciente da boa pratica de container, forcado pela plataforma.
-# Revisitar se a Railway passar a mapear o UID do volume.
+# A documentacao da Railway e explicita: imagens que rodam como UID nao-root
+# tem problema de permissao com volumes. O SQLite do experimento vive no
+# volume montado em /data, e o incremento 0 inteiro existe para provar que
+# essa escrita persiste. Desvio consciente, forcado pela plataforma.
 # ---------------------------------------------------------------------------
 
 EXPOSE 8000
 
 # Forma shell (nao exec) para que ${PORT} seja expandido.
-# O bind em "::" e dual-stack: atende IPv4 e IPv6 sem custo.
+# Bind em "::" e dual-stack: atende IPv4 e IPv6.
 #
-# NAO defina `startCommand` no railway.toml quando houver Dockerfile: naquele
-# caso o start command sobrescreve o ENTRYPOINT em forma exec, e variaveis de
-# ambiente deixam de ser expandidas a menos que voce embrulhe em shell. Um
-# lugar so evita a armadilha.
+# NAO defina `startCommand` no railway.toml: com Dockerfile ele sobrescreve o
+# ENTRYPOINT em forma exec e ${PORT} deixa de ser expandido.
 CMD uvicorn app.main:app --host :: --port ${PORT:-8000}

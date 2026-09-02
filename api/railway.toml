@@ -1,0 +1,57 @@
+# Servico `api` da Fase 0A - Railway.
+#
+# O repositorio `backend` abriga mais de um servico. Cada servico e
+# auto-contido: Dockerfile, compose e este arquivo vivem na pasta do servico.
+# Na Railway, cada servico aponta para a sua pasta via Root Directory.
+#
+# A Railway constroi UM servico a partir do Dockerfile. Ela NAO orquestra
+# docker-compose: o docker-compose.yml aqui e so para desenvolvimento local.
+#
+# ===========================================================================
+# CONFIGURACAO NO PAINEL DA RAILWAY - os dois campos abaixo sao OBRIGATORIOS
+# ===========================================================================
+#
+#   Settings > Source > Root Directory .............. /api
+#   Settings > Config-as-code > Railway Config File .. /api/railway.toml
+#
+# O Root Directory define o contexto de build. Sem ele, a Railway analisa a
+# raiz do repositorio, nao encontra Python nem Dockerfile, e falha com
+# "Railpack could not determine how to build the app".
+#
+# O caminho do config NAO segue o Root Directory - precisa ser absoluto a
+# partir da raiz do repositorio.
+#
+# Como confirmar que pegou: no log de build, a arvore de arquivos analisada
+# deve mostrar `app/`, `requirements.txt` e `Dockerfile` - e NAO `api/`.
+#
+# ---------------------------------------------------------------------------
+#   Volume ...........: mount path /data
+#   Dominio publico ..: SIM - o painel roda na Vercel, que nao alcanca a rede
+#                       privada da Railway (ADR 0010). Com a api exposta, o
+#                       API_SERVICE_TOKEN e a UNICA tranca: 32 bytes url-safe.
+#
+# Variaveis (ver .env.example):
+#   APP_ENV=railway                     OBRIGATORIO - sem isso o servico
+#                                       recusa subir (evita gravar em disco
+#                                       efemero e perder o banco no redeploy)
+#   DB_PATH=/data/fase0a.sqlite3        CAMINHO ABSOLUTO
+#   DATA_DIR=/data/datasets             CAMINHO ABSOLUTO
+#   API_SERVICE_TOKEN=...               o mesmo valor configurado na Vercel
+#   LLM_MAX_USD_ABSOLUTE=5.00           teto que a config do banco nao excede
+#   CORS_ALLOWED_ORIGINS=               vazio: o painel faz proxy no servidor
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY  so a partir do incremento 5
+#
+# NAO defina PORT: a Railway injeta, e o CMD do Dockerfile usa ${PORT}.
+
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+# SEM `startCommand` de proposito.
+#
+# Com Dockerfile, o start command da Railway sobrescreve o ENTRYPOINT em forma
+# EXEC - e ai `${PORT}` deixa de ser expandido, a menos que voce embrulhe tudo
+# em shell. O `CMD` do Dockerfile ja esta em forma shell e resolve isso.
+# Um lugar so, sem armadilha.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

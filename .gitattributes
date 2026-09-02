@@ -1,0 +1,10 @@
+# Terminadores de linha normalizados em LF no repositorio e no checkout.
+# Dockerfile, entrypoint e scripts com CRLF quebram dentro do container Linux.
+* text=auto eol=lf
+
+# Binarios: nunca converter.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
