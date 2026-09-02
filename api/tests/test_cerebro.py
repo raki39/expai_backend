@@ -589,8 +589,12 @@ def test_o_teto_e_lido_do_ledger_e_nao_de_contador(
 ) -> None:
     """Um processo reiniciado nao pode zerar a contagem do run."""
     dataset_id, cfg = cenario
-    _rodar_ciclo(conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]))
-    run_id = conn.execute("SELECT MAX(id) AS id FROM run").fetchone()["id"]
+    # O run do ciclo, e nao "o ultimo run": desde que o ciclo produz seu
+    # proprio B1 casado, o maior id e o do controle, nao o do agente.
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    run_id = resultado.run_id
 
     # Consulta feita "do zero", sem nenhum estado em memoria do run anterior.
     veredito = tetos.consultar(
@@ -1246,3 +1250,82 @@ def test_nenhuma_rota_expoe_a_chave_do_provedor(client, conn, settings) -> None:
     segredo = settings.anthropic_api_key.get_secret_value()
     for rota in ("/api/health", "/api/agente", "/api/config", "/api/ledger"):
         assert segredo not in client.get(rota).text
+
+
+# ===========================================================================
+# B1 casado com o giro do agente (D19 aplicada ao agente)
+# ===========================================================================
+
+
+def test_o_ciclo_produz_o_b1_casado_com_o_proprio_giro(
+    conn: sqlite3.Connection, cenario, settings
+) -> None:
+    """Cada ida e volta paga pedagio fixo e o acaso nao tem vantagem nenhuma.
+
+    Um B1 que gire mais que o agente perde por atrito, e o agente pareceria
+    bom por ter operado menos. Casar o giro e o que faz a comparacao medir
+    escolha de momento em vez de custo.
+    """
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    assert resultado.b1_casado is not None
+    assert resultado.b1_casado["operacoes_alvo"] == resultado.execucao["operacoes"]
+    assert resultado.b1_casado["p5"] <= resultado.b1_casado["p50"]
+    assert resultado.b1_casado["p50"] <= resultado.b1_casado["p95"]
+
+    corpo = resultado.como_dict()
+    # Regra 14: desempenho como excesso sobre baseline, nunca absoluto.
+    assert corpo["excesso_sobre_b1_p50_cents"] == (
+        resultado.patrimonio_final_cents - resultado.b1_casado["p50"]
+    )
+
+
+def test_o_b1_do_agente_nao_contamina_o_b1_da_comparacao(
+    conn: sqlite3.Connection, cenario, settings
+) -> None:
+    """Dois B1 coexistem, com giros diferentes, e nao podem se misturar.
+
+    Antes do filtro por marcador, `resumo_comparacao` pegava "o ultimo B1 que
+    existe" - e passaria a mostrar a distribuicao casada com o agente ao lado
+    de um B3 com outro giro, em silencio.
+    """
+    from app.maos_rapidas import baselines
+
+    dataset_id, cfg = cenario
+    comparacao = baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1, semente=42
+    )
+    giro_do_b3 = comparacao["B1"]["operacoes_alvo"]
+
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+
+    resumo = baselines.resumo_comparacao(conn)
+    assert resumo["B1"]["operacoes_alvo"] == giro_do_b3
+
+    do_agente = baselines.b1_do_agente(conn)
+    assert do_agente["operacoes_alvo"] == resultado.execucao["operacoes"]
+    assert do_agente["run_id"] != resumo["B1"].get("run_id", -1)
+
+
+def test_sem_operacao_nao_ha_b1_para_casar(
+    conn: sqlite3.Connection, settings
+) -> None:
+    """Zero operacoes nao tem controle possivel, e o campo diz isso com None.
+
+    Serie estritamente crescente: a media rapida NASCE acima da lenta e nunca
+    cruza. O sinal e evento, nao estado - entao nao ha entrada nenhuma, e
+    casar o acaso com zero operacoes seria sortear zero pares.
+    """
+    dataset_id = criar_dataset(conn, list(range(50_000, 52_500)))
+    cfg = ExperimentConfig().model_copy(update={"max_llm_calls_per_run": 0})
+
+    resultado = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([]),
+    )
+    assert resultado.execucao["operacoes"] == 0
+    assert resultado.b1_casado is None
+    assert resultado.como_dict()["excesso_sobre_b1_p50_cents"] is None

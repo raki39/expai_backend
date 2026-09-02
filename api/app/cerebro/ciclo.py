@@ -24,7 +24,7 @@ from typing import Any
 
 from ..config.schema import ExperimentConfig
 from ..ledger import livro
-from ..maos_rapidas import executor
+from ..maos_rapidas import baselines, executor
 from ..regra import registro as registro_de_regra
 from ..regra.schema import Regra
 from ..settings import Settings
@@ -53,6 +53,11 @@ class ResultadoDoCiclo:
     # que a comparacao com os baselines responde.
     patrimonio_final_cents: int
     custos: dict
+    # A distribuicao do acaso com o MESMO giro deste run. Produzida aqui, e
+    # nao num passo a parte, porque um controle que pode ficar dessincronizado
+    # do que ele controla nao e controle nenhum - e foi exatamente assim que
+    # o primeiro run do agente saiu, ao lado de um B1 casado com o B3.
+    b1_casado: dict | None
     gasto: dict
     sobreposicao: dict
     condicoes_validade: str
@@ -72,6 +77,11 @@ class ResultadoDoCiclo:
             "execucao": self.execucao,
             "patrimonio_final_cents": self.patrimonio_final_cents,
             "custos_cents": self.custos,
+            "b1_casado_com_este_run": self.b1_casado,
+            "excesso_sobre_b1_p50_cents": (
+                self.patrimonio_final_cents - self.b1_casado["p50"]
+                if self.b1_casado else None
+            ),
             "gasto": self.gasto,
             "sobreposicao_amostral": self.sobreposicao,
             "condicoes_validade": self.condicoes_validade,
@@ -125,6 +135,29 @@ def rodar(
     )
     livro.encerrar_run(conn, run_id, "concluido")
 
+    # O controle do acaso, casado com o giro DESTE run (D19, ADR 0014).
+    # Cada ida e volta paga um pedagio fixo e entrada aleatoria nao tem
+    # vantagem nenhuma - entao um B1 que gire mais que o agente perde por
+    # atrito, e o agente pareceria bom por ter operado menos. Produzido aqui
+    # para que os dois numeros nunca existam separados.
+    b1_casado = None
+    if resultado.operacoes > 0:
+        try:
+            b1_casado = baselines.b1_casado_com(
+                conn,
+                dataset_id=dataset_id,
+                config=config,
+                config_version_id=config_version_id,
+                operacoes_alvo=resultado.operacoes,
+                semente=config.default_seed,
+                barras=barras,
+            )
+        except ValueError as erro:
+            # Janela curta demais para sortear tantos pares, por exemplo.
+            # O run do agente ja terminou e continua valido; o que falta e o
+            # controle, e isso precisa ficar dito em vez de sumir.
+            log.warning("cerebro.b1_casado_falhou", extra={"motivo": str(erro)})
+
     reflexoes = int(
         conn.execute(
             "SELECT COUNT(*) AS n FROM agent_event"
@@ -156,6 +189,7 @@ def rodar(
             "posicao_aberta_minor": carteira["simulado_usd"]["posicao_btc_minor"],
             "reflexao_total": carteira["simulado_usd"]["tesouraria_minor"],
         },
+        b1_casado=b1_casado,
         gasto=livro.gasto_com_reflexao(conn, run_id),
         sobreposicao=propostas.sobreposicao_amostral(conn, run_id),
         condicoes_validade=condicoes_do_run(conn, run_id),

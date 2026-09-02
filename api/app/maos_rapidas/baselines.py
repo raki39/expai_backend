@@ -503,6 +503,94 @@ def rodar_comparacao(
     return resultado
 
 
+def b1_casado_com(
+    conn: sqlite3.Connection,
+    *,
+    dataset_id: int,
+    config: ExperimentConfig,
+    config_version_id: int,
+    operacoes_alvo: int,
+    semente: int,
+    repeticoes: int | None = None,
+    barras: Sequence[BarraCarregada] | None = None,
+) -> dict:
+    """A distribuicao do acaso com o MESMO giro de quem esta sendo comparado.
+
+    A D19 (ADR 0014) fixou isto para o B3, e a razao vale identica para o
+    agente: cada ida e volta paga um pedagio fixo, entrada aleatoria nao tem
+    vantagem nenhuma, e portanto **quem opera menos ganha do B1
+    automaticamente** - sem acertar nada, so pagando menos pedagio.
+
+    O agente fez 389 operacoes no primeiro run de producao e o B1 da tela
+    fazia 654, casado com o B3. Comparar os dois mediria giro, nao escolha de
+    momento - exatamente o que a D19 existe para impedir, aplicado ao agente
+    em vez de ao B3.
+
+    Roda no seu proprio run: sao historias economicas independentes.
+    """
+    from ..ledger.livro import abrir_run, encerrar_run
+
+    barras = list(barras) if barras is not None else executor.carregar_janela(
+        conn, dataset_id
+    )
+    run_id, _ = abrir_run(
+        conn, config_version_id=config_version_id,
+        seed_capital_usd_cents=config.seed_capital_usd_cents,
+        agent_id="baseline-B1-agente",
+    )
+    distribuicao = rodar_b1(
+        conn, run_id=run_id, dataset_id=dataset_id, config=config,
+        operacoes_alvo=max(1, operacoes_alvo), semente=semente,
+        repeticoes=repeticoes, barras=barras,
+    )
+    encerrar_run(conn, run_id, "concluido")
+    log.info(
+        "baselines.b1_casado_com_o_agente",
+        extra={"run_id": run_id, "operacoes_alvo": operacoes_alvo,
+               "p50": distribuicao["p50"]},
+    )
+    return {**distribuicao, "run_id": run_id}
+
+
+def b1_do_agente(conn: sqlite3.Connection) -> dict | None:
+    """A ultima distribuicao de B1 casada com o giro do agente.
+
+    Derivada do run marcado, e nao guardada num campo: filtrar pelo ULTIMO
+    run e o que impede que duas comparacoes distintas sejam agregadas num p50
+    que nao corresponde a experimento nenhum - o mesmo defeito que o
+    incremento 4 ja corrigiu uma vez.
+    """
+    linha = conn.execute(
+        "SELECT MAX(id) AS id FROM run WHERE agent_id = 'baseline-B1-agente'"
+    ).fetchone()
+    if not linha or not linha["id"]:
+        return None
+    run_id = int(linha["id"])
+    equities = [
+        int(l["equity_final_cents"])
+        for l in conn.execute(
+            "SELECT equity_final_cents FROM baseline_result"
+            " WHERE baseline = 'B1' AND run_id = ?",
+            (run_id,),
+        )
+    ]
+    if not equities:
+        return None
+    alvo = conn.execute(
+        "SELECT MAX(operacoes) AS n FROM baseline_result"
+        " WHERE baseline = 'B1' AND run_id = ?",
+        (run_id,),
+    ).fetchone()["n"]
+    return {
+        "run_id": run_id,
+        "repeticoes": len(equities),
+        "operacoes_alvo": int(alvo or 0),
+        "p5": percentil(equities, 5),
+        "p50": percentil(equities, 50),
+        "p95": percentil(equities, 95),
+    }
+
+
 def resumo_comparacao(conn: sqlite3.Connection) -> dict:
     """Le de volta a ultima comparacao. Nada e guardado em duplicata.
 
@@ -551,8 +639,16 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
     # SO a ultima comparacao. Agregar todas as linhas de B1 do banco misturaria
     # comparacoes distintas, e o p50 passaria a descrever a soma de duas
     # distribuicoes - um numero que nao corresponde a experimento nenhum.
+    # PELO MARCADOR do run, e nao pelo maior id: desde que o ciclo do agente
+    # passou a produzir seu proprio B1 casado, "o ultimo B1 que existe" deixou
+    # de significar "o B1 desta comparacao". Sem este filtro a tabela da
+    # comparacao passaria a mostrar, em silencio, a distribuicao casada com o
+    # agente ao lado de um B3 com outro giro - que e precisamente o erro que
+    # a D19 existe para impedir.
     ultimo_b1 = conn.execute(
-        "SELECT MAX(run_id) AS run_id FROM baseline_result WHERE baseline = 'B1'"
+        "SELECT MAX(b.run_id) AS run_id FROM baseline_result b"
+        " JOIN run r ON r.id = b.run_id"
+        " WHERE b.baseline = 'B1' AND r.agent_id = 'baseline-B1-rep'"
     ).fetchone()
     linha = conn.execute(
         "SELECT COUNT(*) AS n, MIN(equity_final_cents) AS minimo,"

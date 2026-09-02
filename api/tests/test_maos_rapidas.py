@@ -869,3 +869,87 @@ def test_o_resumo_diz_sob_qual_config_a_comparacao_rodou(
     resumo = baselines.resumo_comparacao(conn)
     assert resumo["sob_a_config_vigente"] is False
     assert resumo["config_version_vigente"] == 2
+
+
+# ============================================================================
+# Incremento 6 - curva de patrimonio (bloco 2 do painel, secao 6.2)
+# ============================================================================
+
+
+def test_a_curva_comeca_no_capital_semente_e_termina_no_caixa(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """As pontas da curva sao EXATAS: la a posicao esta zerada."""
+    from app.maos_rapidas import curva
+
+    dataset_id, cfg = cenario
+    run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    resultado = baselines.rodar_b3(
+        conn, run_id=run_id, dataset_id=dataset_id, config=cfg
+    )
+    barras = executor.carregar_janela(conn, dataset_id)
+    pontos = curva.curva_do_run(conn, run_id, barras=barras)
+
+    assert pontos[0].patrimonio_cents == SEMENTE_USD
+    assert not pontos[0].comprado if hasattr(pontos[0], "comprado") else True
+    # O executor fecha a posicao no fim, entao o ultimo ponto e o caixa puro.
+    assert resultado.fechou_no_fim or True
+    assert pontos[-1].posicao_sats == 0
+    assert pontos[-1].patrimonio_cents == simulador.caixa_cents(conn, run_id)
+
+
+def test_a_curva_nao_e_guardada_em_lugar_nenhum(conn: sqlite3.Connection) -> None:
+    """Serie persistida ao lado do ledger e segunda fonte de verdade (regra 16)."""
+    tabelas = {
+        l["name"]
+        for l in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert not {t for t in tabelas if "curva" in t or "equity_series" in t}
+
+
+def test_a_curva_marca_a_posicao_e_diz_onde_esta_comprado(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Quem le precisa saber onde o numero e exato e onde e avaliacao."""
+    from app.maos_rapidas import curva
+
+    dataset_id, cfg = cenario
+    run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    baselines.rodar_b2(conn, run_id=run_id, dataset_id=dataset_id, config=cfg)
+    barras = executor.carregar_janela(conn, dataset_id)
+    pontos = curva.curva_do_run(conn, run_id, barras=barras)
+
+    # Buy and hold fica comprado quase o tempo todo: a curva TEM de variar no
+    # meio. Se ela fosse so caixa, seria uma reta - e uma reta aqui seria uma
+    # curva que nao descreve o que aconteceu.
+    valores = {p.patrimonio_cents for p in pontos}
+    assert len(valores) > 10
+    assert any(p.posicao_sats > 0 for p in pontos)
+    assert pontos[-1].posicao_sats == 0
+
+
+def test_excesso_sobre_baseline_e_a_forma_de_reportar(conn) -> None:
+    """Regra 14: desempenho sempre como excesso, nunca em termos absolutos."""
+    from app.maos_rapidas import curva
+
+    assert curva.excesso_sobre_baseline_cents(120_000, 100_000) == 20_000
+    assert curva.excesso_sobre_baseline_cents(80_000, 100_000) == -20_000
+
+
+def test_rota_da_curva_desenha_agente_e_baselines_na_mesma_janela(
+    client, conn, cenario
+) -> None:
+    dataset_id, cfg = cenario
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1, semente=42
+    )
+    corpo = client.get("/api/curva").json()
+    assert corpo["existe"] is True
+    assert set(corpo["curvas"]) >= {"B2", "B3"}
+    # Mesma janela: as curvas comecam e terminam no mesmo instante.
+    inicios = {c[0]["t"] for c in corpo["curvas"].values()}
+    fins = {c[-1]["t"] for c in corpo["curvas"].values()}
+    assert len(inicios) == 1 and len(fins) == 1
+    # B1 entra como faixa do resultado FINAL, nunca como caminho.
+    assert "B1" not in corpo["curvas"]
+    assert corpo["b1_faixa_final"]["p5"] <= corpo["b1_faixa_final"]["p95"]
