@@ -27,6 +27,7 @@ from ..dataset import loader as dataset_loader
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..ledger import livro
+from ..maos_rapidas import baselines
 from ..simulador import execucao as simulador
 from ..security import exigir_token_de_servico
 from ..settings import Settings
@@ -387,6 +388,65 @@ def execucoes_listar(request: Request, limite: int = 50) -> dict[str, Any]:
         "items": [dict(l) for l in linhas],
         "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
     }
+
+
+# ------------------------------------------------------------- comparacao
+
+
+class PedidoComparacao(BaseModel):
+    author: str = Field(min_length=1, max_length=120)
+    # Semente diferente reexecuta legitimamente com o MESMO config_hash
+    # (secao 14.4.1). `None` usa a da configuracao.
+    semente: int | None = None
+
+
+@router.get("/comparacao")
+def comparacao_atual(request: Request) -> dict[str, Any]:
+    return baselines.resumo_comparacao(_conn(request))
+
+
+@router.post("/comparacao", status_code=status.HTTP_201_CREATED)
+def comparacao_rodar(
+    request: Request, pedido: PedidoComparacao = Body(...)
+) -> dict[str, Any]:
+    """Roda B1, B2 e B3 sobre a mesma janela, mesmo simulador, mesmo custo.
+
+    Nenhum LLM e envolvido. Se o encanamento nao fecha sem o modelo, o
+    problema nao e o modelo.
+    """
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="encerre o run ativo antes de rodar a comparacao",
+        )
+    try:
+        config_service.exigir_hash_integro(conn)
+    except SchemaDivergente as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    meta = dataset_loader.dataset_vigente(conn)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ingira o dataset antes de rodar a comparacao",
+        )
+
+    semente = pedido.semente if pedido.semente is not None else atual.config.default_seed
+    log.info("comparacao.pedida",
+             extra={"author": pedido.author, "semente": semente})
+    try:
+        return baselines.rodar_comparacao(
+            conn, dataset_id=meta.id, config=atual.config,
+            config_version_id=atual.id, semente=semente,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
 
 
 # --------------------------------------------------------------- sentinela

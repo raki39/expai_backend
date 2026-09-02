@@ -641,6 +641,131 @@ MIGRACOES: list[tuple[int, str, str]] = [
         GROUP BY t.run_id, a.id;
         """,
     ),
+    (
+        6,
+        "incremento 4: regra com hash, vinculo com a execucao e resultado dos baselines",
+        """
+        -- ==================================================================
+        -- A regra que autorizou cada execucao.
+        --
+        -- Criterio 7 (R25.5): partindo de uma execucao qualquer, tem de ser
+        -- possivel chegar a regra que a autorizou. Por isso TODA execucao
+        -- aponta para uma linha daqui - inclusive as dos baselines, que
+        -- tambem sao decisoes tomadas por alguma regra, ainda que trivial.
+        --
+        -- `kind` separa duas coisas que nao devem ser confundidas:
+        --   catalogo  - familia do catalogo fechado da D5, que e o que o
+        --               cerebro lento tem permissao de produzir
+        --   baseline  - buy and hold e aleatorio, que nao vem do catalogo e
+        --               nunca poderiam vir: nao sao hipoteses, sao controles
+        --
+        -- `params_json` e canonico (chaves ordenadas, sem espaco), porque o
+        -- hash e do CONTEUDO. Duas regras iguais escritas em ordem diferente
+        -- precisam ter o mesmo id.
+        -- ==================================================================
+        CREATE TABLE rule (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash         TEXT    NOT NULL UNIQUE,
+            kind         TEXT    NOT NULL CHECK (kind IN ('catalogo','baseline')),
+            family       TEXT    NOT NULL,
+            params_json  TEXT    NOT NULL,
+
+            -- Procedencia embrionaria (D5): mercado, instrumento, timeframe e
+            -- fidelidade sob os quais a regra vale. Uma regra sem isso e uma
+            -- afirmacao sem condicoes de validade.
+            condicoes_validade_json TEXT NOT NULL,
+
+            created_at   TEXT    NOT NULL,
+
+            -- B3 e CONGELADO antes do primeiro run do agente (criterio 5,
+            -- D4). Sem timestamp de congelamento, "congelado" e so intencao.
+            frozen_at    TEXT
+        );
+
+        CREATE INDEX idx_rule_family ON rule(family);
+
+        CREATE TRIGGER rule_sem_update
+        BEFORE UPDATE ON rule
+        BEGIN
+            SELECT CASE
+                -- Congelar e a UNICA alteracao permitida, e so uma vez.
+                -- Retunar parametro depois de ver o resultado destroi o grupo
+                -- de controle, e e exatamente isso que o trigger impede.
+                WHEN OLD.frozen_at IS NOT NULL THEN
+                    RAISE(ABORT, 'regra congelada e imutavel')
+                WHEN NEW.hash <> OLD.hash
+                  OR NEW.params_json <> OLD.params_json
+                  OR NEW.family <> OLD.family THEN
+                    RAISE(ABORT, 'so o congelamento pode ser alterado numa regra')
+            END;
+        END;
+
+        CREATE TRIGGER rule_sem_delete
+        BEFORE DELETE ON rule
+        BEGIN
+            SELECT RAISE(ABORT, 'rule e apenas por acrescimo');
+        END;
+
+        -- Vinculo execucao -> regra (criterio 7). Coluna nova em tabela
+        -- existente: aditivo, e as execucoes do incremento 3 ficam com NULL,
+        -- que e a verdade sobre elas - nao houve regra, foram chamadas
+        -- diretas do simulador em teste.
+        ALTER TABLE execution ADD COLUMN rule_id INTEGER REFERENCES rule(id);
+
+        CREATE INDEX idx_execution_rule ON execution(rule_id);
+
+        -- ==================================================================
+        -- Resultado de uma repeticao de baseline.
+        --
+        -- Existe porque B1 precisa de mil repeticoes (secao 14.3) e mil
+        -- historias completas no ledger seriam milhoes de lancamentos
+        -- imutaveis para produzir tres numeros: p5, p50 e p95.
+        --
+        -- O que NAO muda: as mil repeticoes passam pelo MESMO nucleo de
+        -- precificacao do simulador, com as mesmas taxas e o mesmo
+        -- dimensionamento (criterio 6). O que muda e so onde o resultado e
+        -- guardado. Uma repeticao representativa roda o caminho persistido
+        -- inteiro, e um teste exige que os dois produzam o mesmo numero.
+        -- ==================================================================
+        CREATE TABLE baseline_result (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id         INTEGER NOT NULL REFERENCES run(id),
+            baseline       TEXT    NOT NULL CHECK (baseline IN ('B1','B2','B3')),
+            repeticao      INTEGER NOT NULL,
+
+            -- Derivada deterministicamente da semente do run (criterio 4):
+            -- a distribuicao inteira e reproduzivel a partir dela.
+            seed           INTEGER NOT NULL,
+
+            operacoes      INTEGER NOT NULL CHECK (operacoes >= 0),
+            equity_final_cents INTEGER NOT NULL,
+            fee_cents      INTEGER NOT NULL CHECK (fee_cents >= 0),
+            spread_cents   INTEGER NOT NULL CHECK (spread_cents >= 0),
+            slippage_cents INTEGER NOT NULL CHECK (slippage_cents >= 0),
+            penalty_cents  INTEGER NOT NULL CHECK (penalty_cents >= 0),
+
+            rule_id        INTEGER REFERENCES rule(id),
+            fidelity_level INTEGER NOT NULL CHECK (fidelity_level >= 1),
+            created_at     TEXT    NOT NULL,
+
+            UNIQUE (run_id, baseline, repeticao)
+        );
+
+        CREATE INDEX idx_baseline_run ON baseline_result(run_id, baseline);
+
+        CREATE TRIGGER baseline_result_sem_update
+        BEFORE UPDATE ON baseline_result
+        BEGIN
+            SELECT RAISE(ABORT, 'resultado de baseline e imutavel');
+        END;
+
+        CREATE TRIGGER baseline_result_sem_delete
+        BEFORE DELETE ON baseline_result
+        BEGIN
+            SELECT RAISE(ABORT, 'baseline_result e apenas por acrescimo');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

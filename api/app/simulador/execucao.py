@@ -89,6 +89,7 @@ class Execucao:
     penalty_cents: int
     fidelity_level: int
     ledger_transaction_id: int
+    rule_id: int | None = None
 
     @property
     def custo_total_cents(self) -> int:
@@ -174,6 +175,69 @@ def preco_executado(price_ref: int, lado: Lado, config: ExperimentConfig) -> int
     return int(alvo.to_integral_value(rounding=ROUND_FLOOR))
 
 
+# ---------------------------------------------------------------------------
+# NUCLEO PURO DE PRECIFICACAO
+#
+# Sem banco, sem estado. Existe para que o caminho persistido (uma execucao
+# gravada no ledger) e o caminho em memoria (as mil repeticoes do B1) usem
+# exatamente o MESMO calculo.
+#
+# Se cada um tivesse a sua copia, "os baselines usam o mesmo simulador"
+# (criterio 6 do incremento 4) dependeria de as duas copias continuarem
+# iguais - e elas nao continuariam. Assim a paridade e por construcao.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Custos:
+    """Os quatro custos, sempre separados (criterio 3 do incremento 3)."""
+
+    fee: int
+    spread: int
+    slippage: int
+    penalty: int
+
+    @property
+    def de_preco(self) -> int:
+        """Os que estao embutidos no preco executado, e nao no caixa a parte."""
+        return self.spread + self.slippage + self.penalty
+
+    @property
+    def total(self) -> int:
+        return self.fee + self.de_preco
+
+
+def dimensionar(orcamento_cents: int, price_exec: int, config: ExperimentConfig) -> int:
+    """Quantos satoshis cabem no orcamento, ja contando a taxa.
+
+    Para BAIXO: comprar de menos e conservador, comprar de mais estouraria o
+    caixa - e caixa negativo significaria comprar fiado.
+    """
+    fator_taxa = 1 + config.taker_fee_bps / BPS
+    teto_nocional = int(Decimal(orcamento_cents) / fator_taxa)
+    return teto_nocional * DIVISOR_NOCIONAL // price_exec
+
+
+def custear(
+    quantity_sats: int,
+    price_ref: int,
+    price_exec: int,
+    lado: Lado,
+    config: ExperimentConfig,
+) -> tuple[int, Custos]:
+    """Nocional de referencia e a decomposicao dos custos."""
+    comprando = lado == "compra"
+    nocional_ref = notional_cents(quantity_sats, price_ref, para_cima=comprando)
+    nocional_exec = notional_cents(quantity_sats, price_exec, para_cima=comprando)
+    return nocional_ref, Custos(
+        # A taxa incide sobre o que foi de fato negociado.
+        fee=_bps_sobre(nocional_exec, config.taker_fee_bps),
+        spread=_bps_sobre(nocional_ref, config.spread_bps / 2),
+        slippage=_bps_sobre(nocional_ref, config.slippage_bps),
+        penalty=_bps_sobre(nocional_ref, config.penalty_bps),
+    )
+
+
 # ------------------------------------------------------------------ estado
 
 
@@ -225,6 +289,7 @@ def comprar(
     decision_bar_ms: int,
     config: ExperimentConfig,
     fracao_do_caixa: Decimal = Decimal("1.0"),
+    rule_id: int | None = None,
 ) -> Execucao:
     """Entra comprado. D1 fixou long/flat: so entra quem esta zerado."""
     if posicao_sats(conn, run_id) != 0:
@@ -241,11 +306,7 @@ def comprar(
     if orcamento <= 0:
         raise CaixaInsuficiente("caixa insuficiente para comprar")
 
-    # Quantos satoshis cabem no orcamento, ja contando a taxa. Para BAIXO:
-    # comprar de menos e conservador; comprar de mais estouraria o caixa.
-    fator_taxa = 1 + config.taker_fee_bps / BPS
-    teto_nocional = int(Decimal(orcamento) / fator_taxa)
-    quantity_sats = teto_nocional * DIVISOR_NOCIONAL // price_exec
+    quantity_sats = dimensionar(orcamento, price_exec, config)
     if quantity_sats <= 0:
         raise CaixaInsuficiente(
             f"caixa de {disponivel} centavos nao compra nem 1 satoshi ao "
@@ -263,6 +324,7 @@ def comprar(
         price_ref=price_ref,
         price_exec=price_exec,
         config=config,
+        rule_id=rule_id,
     )
 
 
@@ -273,6 +335,7 @@ def vender(
     dataset_id: int,
     decision_bar_ms: int,
     config: ExperimentConfig,
+    rule_id: int | None = None,
 ) -> Execucao:
     """Zera a posicao. Long/flat nao tem saida parcial nem venda a descoberto."""
     quantity_sats = posicao_sats(conn, run_id)
@@ -294,6 +357,7 @@ def vender(
         price_ref=price_ref,
         price_exec=price_exec,
         config=config,
+        rule_id=rule_id,
     )
 
 
@@ -309,6 +373,7 @@ def _registrar(
     price_ref: int,
     price_exec: int,
     config: ExperimentConfig,
+    rule_id: int | None = None,
 ) -> Execucao:
     """Decompoe os custos e lanca no ledger. Cada custo, uma linha (criterio 3).
 
@@ -319,16 +384,15 @@ def _registrar(
     satisfeito - um campo "custo" agregado e o que sobraria.
     """
     comprando = lado == "compra"
-    nocional_ref = notional_cents(quantity_sats, price_ref, para_cima=comprando)
-
-    spread_cents = _bps_sobre(nocional_ref, config.spread_bps / 2)
-    slippage_cents = _bps_sobre(nocional_ref, config.slippage_bps)
-    penalty_cents = _bps_sobre(nocional_ref, config.penalty_bps)
-    custos_de_preco = spread_cents + slippage_cents + penalty_cents
-
-    # A taxa incide sobre o que foi de fato negociado.
-    nocional_exec = notional_cents(quantity_sats, price_exec, para_cima=comprando)
-    fee_cents = _bps_sobre(nocional_exec, config.taker_fee_bps)
+    # MESMO nucleo que o B1 usa em memoria. Nao ha segunda formula.
+    nocional_ref, custos = custear(
+        quantity_sats, price_ref, price_exec, lado, config
+    )
+    fee_cents = custos.fee
+    spread_cents = custos.spread
+    slippage_cents = custos.slippage
+    penalty_cents = custos.penalty
+    custos_de_preco = custos.de_preco
 
     despesas = [
         Lancamento(contas.DESPESA_TAXA, fee_cents, "taxa taker"),
@@ -376,13 +440,13 @@ def _registrar(
             "INSERT INTO execution (run_id, dataset_id, decision_bar_ms,"
             " execution_bar_ms, side, quantity_sats, price_ref, price_exec,"
             " notional_ref_cents, fee_cents, spread_cents, slippage_cents,"
-            " penalty_cents, fidelity_level, ledger_transaction_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " penalty_cents, fidelity_level, ledger_transaction_id, rule_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 run_id, dataset_id, decision_bar_ms, barra.open_time_ms, lado,
                 quantity_sats, price_ref, price_exec, nocional_ref, fee_cents,
                 spread_cents, slippage_cents, penalty_cents,
-                config.fidelity_level, tx_id,
+                config.fidelity_level, tx_id, rule_id,
             ),
         )
         execution_id = int(cur.lastrowid)
@@ -414,6 +478,7 @@ def _registrar(
         penalty_cents=penalty_cents,
         fidelity_level=config.fidelity_level,
         ledger_transaction_id=tx_id,
+        rule_id=rule_id,
     )
 
 
