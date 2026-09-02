@@ -1,8 +1,12 @@
 # Fase 0A — serviço `api`
 
 Backend do experimento: agente, simulador, carteira, ledger e baselines.
-**Um agente, um processo.** Sem domínio público — só o serviço `web` o alcança,
-pela rede privada da Railway.
+**Um agente, um processo.**
+
+Tem domínio público, porque o painel roda na Vercel e ela não alcança a rede
+privada da Railway (ADR 0010). Por isso o `API_SERVICE_TOKEN` é **a única
+tranca** entre a internet e estes endpoints — não é opcional e não é
+defesa em profundidade.
 
 Estado: **incremento 0 — substrato**. Ainda não há dataset, ledger, simulador
 nem agente. O que existe é o que sustenta tudo isso.
@@ -18,9 +22,7 @@ cp .env.example .env        # preencha API_SERVICE_TOKEN
 python -m uvicorn app.main:app --host :: --port 8000
 ```
 
-O bind em `::` não é detalhe: a rede privada da Railway resolve para IPv6 além
-de IPv4, e ligar só em `0.0.0.0` produz falha de conectividade que parece bug
-de aplicação.
+O bind em `::` é dual-stack: atende IPv4 e IPv6 sem custo.
 
 ## Testes
 
@@ -53,7 +55,7 @@ a ser ignorado** para esses campos.
 ## Endpoints
 
 Todos exigem `Authorization: Bearer <API_SERVICE_TOKEN>`. Sem exceção —
-`/api/health` inclusive.
+`/api/health` inclusive. Com a api pública, isto é o que a protege.
 
 | Método | Rota | Função |
 |---|---|---|
@@ -83,9 +85,38 @@ app/
 └── main.py           boot
 ```
 
+## Docker
+
+```bash
+cd ..                          # repositorio backend
+docker compose up --build      # api em http://localhost:8000
+docker compose down            # para, preservando o volume
+docker compose down -v         # apaga o banco
+```
+
+O compose serve **apenas para desenvolvimento local**. A Railway não orquestra
+compose: ela constrói um serviço a partir do `Dockerfile`, conforme
+`railway.toml`.
+
+**O container roda como root, de propósito.** A documentação da Railway avisa
+que imagens rodando como UID não-root têm problema de permissão com volumes —
+e o SQLite do experimento vive no volume. É desvio consciente da boa prática,
+forçado pela plataforma, comentado no `Dockerfile`.
+
 ## Deploy
 
-Ver `railway.toml` e `.docs/adr/0007-topologia-dois-servicos.md`.
+Ver `railway.toml` e `.docs/adr/0010-frontend-na-vercel.md`.
 
 O volume é montado no **start** do container, nunca no build — por isso a
 migração roda no boot da aplicação.
+
+## CORS
+
+Desligado por padrão, e é o correto: o painel faz proxy no servidor, então o
+navegador nunca chama esta api direto, e requisição servidor-para-servidor não
+passa por CORS.
+
+`CORS_ALLOWED_ORIGINS` existe para destravar chamada direta do navegador sem
+mudança de código. Allowlist explícita, nunca `*`. E vale lembrar: **CORS não
+autentica** — é política do navegador sobre *ler* a resposta. `curl` e qualquer
+script a ignoram. O que protege esta api é o token.

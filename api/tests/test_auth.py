@@ -58,3 +58,81 @@ def test_sem_documentacao_publica(client: TestClient) -> None:
     """Superficie minima: uma coisa a menos para proteger."""
     for rota in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(rota).status_code == 404, rota
+
+
+# ------------------------------------------------------------------- CORS
+
+
+def test_cors_desligado_por_padrao(client: TestClient) -> None:
+    """Sem CORS_ALLOWED_ORIGINS, nenhuma origem e liberada.
+
+    Com o proxy no servidor, o navegador nao chama a api direto e isto nunca
+    e exercitado. O default fechado garante que ligar CORS seja um ato
+    explicito, nunca um acidente.
+    """
+    r = client.get("/api/health", headers={"Origin": "https://qualquer.app"})
+    assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+    assert client.get("/api/health").json()["cors_allowed_origins"] == []
+
+
+def test_cors_libera_apenas_origem_da_lista(
+    ambiente, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv(
+        "CORS_ALLOWED_ORIGINS",
+        "https://painel.vercel.app, http://localhost:3000",
+    )
+    get_settings.cache_clear()
+
+    with TestClient(criar_app()) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+        permitida = c.get(
+            "/api/health", headers={"Origin": "https://painel.vercel.app"}
+        )
+        assert permitida.headers["access-control-allow-origin"] == (
+            "https://painel.vercel.app"
+        )
+
+        outra = c.get("/api/health", headers={"Origin": "http://localhost:3000"})
+        assert outra.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+        negada = c.get("/api/health", headers={"Origin": "https://invasor.app"})
+        assert "access-control-allow-origin" not in {
+            k.lower() for k in negada.headers
+        }
+
+
+def test_cors_nunca_usa_curinga(ambiente, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Curinga com credencial e invalido no protocolo e desleixado na pratica."""
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://painel.vercel.app")
+    get_settings.cache_clear()
+
+    with TestClient(criar_app()) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        r = c.get("/api/health", headers={"Origin": "https://painel.vercel.app"})
+        assert r.headers["access-control-allow-origin"] != "*"
+
+
+def test_cors_nao_substitui_autenticacao(
+    ambiente, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Origem liberada continua precisando de credencial.
+
+    CORS e politica do navegador sobre LER resposta; nao autoriza ninguem.
+    """
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://painel.vercel.app")
+    get_settings.cache_clear()
+
+    with TestClient(criar_app()) as c:
+        r = c.get("/api/health", headers={"Origin": "https://painel.vercel.app"})
+        assert r.status_code == 401

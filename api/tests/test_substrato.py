@@ -251,3 +251,67 @@ def test_todas_as_migracoes_sao_divisiveis() -> None:
 
     for versao, _, sql in MIGRACOES:
         assert dividir_statements(sql), f"migracao {versao} nao produziu statements"
+
+
+# ------------------------------- rede de seguranca de ambiente de producao
+
+
+def test_railway_com_app_env_local_falha_alto(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A falha mais cara possivel: rodar na Railway gravando em disco efemero.
+
+    Sem esta trava o servico sobe normalmente, grava em ./var e o banco some
+    no redeploy seguinte - sem erro, sem aviso.
+    """
+    from app.settings import Settings
+
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("APP_ENV", "local")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValueError, match="filesystem efemero"):
+        Settings()
+
+
+def test_railway_com_app_env_correto_passa(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.settings import Settings
+
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("APP_ENV", "railway")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "d" / "fase0a.sqlite3"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "d" / "datasets"))
+    get_settings.cache_clear()
+
+    s = Settings()
+    assert s.app_env == "railway"
+
+
+def test_producao_exige_caminho_absoluto(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.settings import Settings
+
+    monkeypatch.setenv("APP_ENV", "railway")
+    monkeypatch.setenv("DB_PATH", "./var/fase0a.sqlite3")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValueError, match="caminho absoluto"):
+        Settings()
+
+
+def test_producao_exige_token(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.settings import Settings
+
+    monkeypatch.setenv("APP_ENV", "railway")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "d.sqlite3"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "ds"))
+    monkeypatch.setenv("API_SERVICE_TOKEN", "")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValueError, match="API_SERVICE_TOKEN"):
+        Settings()

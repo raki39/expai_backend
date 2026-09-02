@@ -15,6 +15,7 @@ faz nada disso.
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -53,6 +54,18 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
 
+    # ------------------------------------------------------------- CORS
+    # Lista separada por virgula. Vazio = nenhuma origem liberada.
+    #
+    # Guardado como str de proposito: pydantic-settings tenta interpretar
+    # campo `list` no ambiente como JSON, e uma virgula simples quebraria.
+    #
+    # Com o padrao de proxy atual o navegador nao chama a api direto, entao
+    # isto nao e exercitado. Existe para destravar chamada direta do browser
+    # sem mudanca de codigo. NUNCA use "*": a api exige credencial, e curinga
+    # com credencial e invalido no protocolo e desleixado na pratica.
+    cors_allowed_origins: str = ""
+
     # ------------------------------------------------- limite inviolavel
     # Secao 12.1: "um teto definido em variavel de configuracao e um teto que
     # um bug, um prompt malicioso ou um agente criativo pode contornar".
@@ -67,6 +80,21 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_producao(self) -> "Settings":
+        # Rede de seguranca contra a falha mais cara possivel: rodar na Railway
+        # com APP_ENV=local. Nesse caso o servico SOBE NORMALMENTE e grava em
+        # ./var, no filesystem efemero - e a perda so aparece no redeploy
+        # seguinte, quando o banco some sem aviso.
+        #
+        # A Railway injeta RAILWAY_ENVIRONMENT em todo deploy. Se ela existe e
+        # APP_ENV nao e "railway", falhamos alto no boot.
+        if os.getenv("RAILWAY_ENVIRONMENT") and self.app_env != "railway":
+            raise ValueError(
+                "detectada execucao na Railway (RAILWAY_ENVIRONMENT presente) "
+                f"com APP_ENV={self.app_env!r}. Defina APP_ENV=railway: sem "
+                "isso o banco seria gravado no filesystem efemero e perdido "
+                "no proximo deploy."
+            )
+
         if self.app_env != "railway":
             return self
 
@@ -88,6 +116,11 @@ class Settings(BaseSettings):
                 )
 
         return self
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Origens liberadas, ja limpas. Lista vazia = CORS desligado."""
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     def redigir(self, texto: str) -> str:
         """Substitui qualquer valor de segredo que apareca no texto.

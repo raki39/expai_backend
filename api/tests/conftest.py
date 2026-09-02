@@ -33,9 +33,11 @@ def ambiente(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def client(ambiente: Path) -> Iterator[TestClient]:
-    from app.main import app
+    # Fabrica, e nao o objeto de modulo: a app precisa ser construida com o
+    # ambiente DESTE teste (a lista de origens do CORS e fixada na construcao).
+    from app.main import criar_app
 
-    with TestClient(app) as c:
+    with TestClient(criar_app()) as c:
         c.headers.update({"Authorization": f"Bearer {TOKEN}"})
         yield c
 

@@ -1,0 +1,35 @@
+# Fase 0A - servico `api`, desenvolvimento LOCAL.
+#
+# A Railway NAO usa este arquivo. Ela constroi um servico a partir do
+# Dockerfile (api/Dockerfile) conforme api/railway.toml. Compose nao e
+# orquestrado pela Railway.
+#
+#   docker compose up --build      sobe a api em http://localhost:8000
+#   docker compose logs -f api     log JSON estruturado
+#   docker compose down            para, PRESERVANDO o volume
+#   docker compose down -v         para e APAGA o banco
+#
+# Requer api/.env preenchido (copie de api/.env.example).
+
+services:
+  api:
+    build:
+      context: ./api
+    env_file:
+      - ./api/.env
+    environment:
+      # Sobrepoe o .env: dentro do container os caminhos apontam para o volume.
+      APP_ENV: local
+      PORT: "8000"
+      DB_PATH: /data/fase0a.sqlite3
+      DATA_DIR: /data/datasets
+    volumes:
+      # Equivale ao volume da Railway montado em /data. E o que faz o banco
+      # sobreviver a `docker compose down` e a rebuild da imagem.
+      - dados_api:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  dados_api:

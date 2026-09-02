@@ -56,6 +56,8 @@ def health(request: Request) -> dict[str, Any]:
         "config_version": atual.id if atual else None,
         "config_hash": atual.config_hash if atual else None,
         "run_ativo": config_service.run_ativo(conn),
+        # Nao e segredo: e configuracao publica de politica de origem.
+        "cors_allowed_origins": settings.cors_origins,
         # Presenca das credenciais, nunca o valor (secao 10.2.4).
         "credenciais_configuradas": {
             "anthropic": bool(settings.anthropic_api_key.get_secret_value()),
