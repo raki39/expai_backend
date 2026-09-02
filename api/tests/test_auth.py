@@ -54,6 +54,32 @@ def test_health_nao_e_excecao(client: TestClient) -> None:
     assert client.get("/api/health", headers={"Authorization": ""}).status_code == 401
 
 
+def test_liveness_responde_sem_credencial(client: TestClient) -> None:
+    """A unica rota aberta. Existe para diagnosticar deploy.
+
+    Sem ela, "container morto" e "auth funcionando" sao indistinguiveis.
+    """
+    r = client.get("/", headers={"Authorization": ""})
+    assert r.status_code == 200
+    assert r.json() == {"status": "alive", "service": "fase0a-api", "fase": "0A"}
+
+
+def test_liveness_nao_vaza_nada(client: TestClient) -> None:
+    """Ela diz que o processo respondeu, e so isso."""
+    corpo = client.get("/", headers={"Authorization": ""}).json()
+    proibidos = {
+        "schema_version", "config_version", "config_hash", "db_path",
+        "credenciais_configuradas", "volume_gravavel", "cors_allowed_origins",
+        "app_env", "build",
+    }
+    assert proibidos & set(corpo) == set()
+
+
+def test_dados_reais_continuam_exigindo_token(client: TestClient) -> None:
+    """Liveness aberta nao afrouxa nada: /api/health segue fechado."""
+    assert client.get("/api/health", headers={"Authorization": ""}).status_code == 401
+
+
 def test_sem_documentacao_publica(client: TestClient) -> None:
     """Superficie minima: uma coisa a menos para proteger."""
     for rota in ("/docs", "/redoc", "/openapi.json"):

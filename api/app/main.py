@@ -1,7 +1,9 @@
 """Aplicacao FastAPI do servico `api`.
 
-Um agente, um processo. O painel e um servico separado (`web`) que fala com
-este por rede privada; este servico nao tem dominio publico.
+Um agente, um processo. O painel e um servico separado, hospedado na Vercel,
+que fala com este pela internet - por isso a api tem dominio publico e todo
+endpoint exige token (ADR 0010). A unica excecao e a rota de liveness `/`,
+que nao expoe dado nenhum e existe para diagnosticar deploy.
 
 Sequencia de boot:
   1. carrega o ambiente (segredos + bootstrap)
@@ -129,6 +131,21 @@ def criar_app() -> FastAPI:
             max_age=600,
         )
         log.info("cors.enabled", extra={"origins": origens})
+
+    # ------------------------------------------------------------------
+    # Liveness: a UNICA rota sem autenticacao, e de proposito.
+    #
+    # Sem ela e impossivel distinguir "container morto" de "autenticacao
+    # funcionando": as duas situacoes dao erro no navegador. Isso torna o
+    # diagnostico de deploy adivinhacao.
+    #
+    # Nao expoe NADA: nem versao de schema, nem config, nem presenca de
+    # credencial, nem caminho de banco. So diz que o processo respondeu.
+    # Todo dado real continua atras do token, em /api/health.
+    # ------------------------------------------------------------------
+    @app.get("/")
+    def liveness() -> dict[str, str]:
+        return {"status": "alive", "service": "fase0a-api", "fase": "0A"}
 
     app.include_router(router)
     return app
