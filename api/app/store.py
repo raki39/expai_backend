@@ -58,6 +58,14 @@ def volume_gravavel(caminho: Path) -> bool:
         return False
 
 
+def devices_do_caminho(caminho: Path) -> tuple[int | None, int | None]:
+    """Device do caminho e device de "/". Evidencia crua, para o log."""
+    try:
+        return caminho.stat().st_dev, Path("/").stat().st_dev
+    except OSError:
+        return None, None
+
+
 def volume_montado(caminho: Path) -> bool | None:
     """O caminho esta num volume montado, ou e diretorio da imagem?
 

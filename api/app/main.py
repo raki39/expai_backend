@@ -25,7 +25,13 @@ from .api.routes import router
 from .config import service as config_service
 from .logging_setup import configurar_logging
 from .settings import SECRET_FIELDS, get_settings
-from .store import conectar, migrar, volume_gravavel, volume_montado
+from .store import (
+    conectar,
+    devices_do_caminho,
+    migrar,
+    volume_gravavel,
+    volume_montado,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,12 +72,33 @@ async def lifespan(app: FastAPI):
     # o diretorio do banco esteja num volume DE VERDADE - senao o servico
     # sobe, grava, e perde tudo no proximo deploy sem avisar.
     montado = volume_montado(settings.db_path.parent)
+    dev_dados, dev_raiz = devices_do_caminho(settings.db_path.parent)
+
+    # A evidencia vai para o log ANTES da decisao, sempre. Se algum dia esta
+    # checagem der falso positivo, o log ja tera o que precisamos para saber.
+    log.info(
+        "volume.check",
+        extra={
+            "db_dir": str(settings.db_path.parent),
+            "device_db_dir": dev_dados,
+            "device_raiz": dev_raiz,
+            "montado": montado,
+            "gravavel": True,
+        },
+    )
+
     if settings.app_env == "railway" and montado is False:
         raise RuntimeError(
-            f"{settings.db_path.parent} NAO esta num volume montado - e um "
-            "diretorio da propria imagem, e o banco seria perdido no proximo "
-            "deploy. Na Railway: Settings > Volumes, monte um volume com "
-            "mount path exatamente /data."
+            f"VOLUME AUSENTE: {settings.db_path.parent} esta no MESMO "
+            f"dispositivo que a raiz (device={dev_dados}). Isso significa que "
+            "e um diretorio da propria imagem, e nao um volume - o banco "
+            "seria gravado normalmente e PERDIDO no proximo deploy.
+"
+            "  Correcao: Railway > servico api > Settings > Volumes > "
+            "Add Volume, com mount path exatamente /data
+"
+            "  Depois disso, device_db_dir e device_raiz devem ser diferentes "
+            "no log volume.check."
         )
 
     conn = conectar(settings.db_path)
