@@ -304,3 +304,109 @@ def test_run_e_recusado_sob_hash_divergente(client) -> None:
     assert resposta.status_code == 409
     assert "schema da configuracao mudou" in resposta.json()["detail"]
     assert client.get("/api/health").json()["config_hash_confere"] is False
+
+
+# ============================================================================
+# Reancoragem: a saida do estado de deriva de schema
+#
+# Acrescentar campo a ExperimentConfig muda o hash de toda versao ja gravada.
+# `exigir_hash_integro` recusa abrir run nesse estado, e com razao - mas
+# `criar_versao` nao e a saida, porque devolveria SemMudanca: a config EFETIVA
+# nao mudou, so o hash.
+# ============================================================================
+
+
+def _versao_de_schema_antigo(conn, sem_campo: str = "execution_reference") -> int:
+    """Grava uma versao como se tivesse sido escrita antes de `sem_campo` existir."""
+    import json
+
+    from app.config import service as cs
+
+    atual = cs.versao_atual(conn)
+    payload = json.loads(atual.config.model_dump_json())
+    payload.pop(sem_campo, None)
+    cur = conn.execute(
+        "INSERT INTO config_version (created_at, author, parent_version_id,"
+        " payload_json, config_hash, material, note)"
+        " VALUES ('2026-01-01','antes-do-campo',?,?,'hash-da-epoca-antiga',1,'')",
+        (atual.id, json.dumps(payload)),
+    )
+    return int(cur.lastrowid)
+
+
+def test_reancorar_recusa_quando_nao_ha_deriva(conn, ambiente) -> None:
+    """Reancorar sem deriva criaria versao sem motivo nenhum."""
+    from app.config import service as cs
+    from app.settings import get_settings
+
+    with pytest.raises(cs.SemDeriva, match="hash integro"):
+        cs.reancorar(conn, get_settings(), author="teste")
+
+
+def test_reancorar_corrige_o_hash_sem_mudar_valor(conn, ambiente) -> None:
+    from app.config import service as cs
+    from app.settings import get_settings
+
+    _versao_de_schema_antigo(conn)
+    antes = cs.versao_atual(conn)
+    assert cs.conferir_hash(antes) is not None, "deveria haver deriva"
+
+    nova = cs.reancorar(conn, get_settings(), author="teste")
+
+    assert cs.conferir_hash(nova) is None, "o hash tem de passar a conferir"
+    # Nenhum valor muda: a config efetiva e a mesma de antes.
+    assert nova.config == antes.config
+    assert nova.parent_version_id == antes.id
+
+
+def test_reancorar_registra_a_mudanca_de_SCHEMA_campo_por_campo(
+    conn, ambiente
+) -> None:
+    """O que fica no historico nao e "nada mudou": e o campo que apareceu."""
+    from app.config import service as cs
+    from app.settings import get_settings
+
+    _versao_de_schema_antigo(conn)
+    nova = cs.reancorar(conn, get_settings(), author="teste")
+
+    mudancas = conn.execute(
+        "SELECT field, old_value_json, new_value_json FROM config_change"
+        " WHERE version_id = ?", (nova.id,)
+    ).fetchall()
+    campos = {l["field"]: (l["old_value_json"], l["new_value_json"]) for l in mudancas}
+    assert "execution_reference" in campos
+    antes, depois = campos["execution_reference"]
+    assert antes is None, "o campo nao existia na versao gravada"
+    assert "abertura" in depois
+
+
+def test_run_volta_a_ser_permitido_depois_de_reancorar(client) -> None:
+    """A saida do estado travado funciona de ponta a ponta."""
+    from app.config import service as cs
+
+    conn = client.app.state.conn
+    _versao_de_schema_antigo(conn)
+
+    assert client.post("/api/run", json={"author": "t"}).status_code == 409
+    assert client.get("/api/health").json()["config_hash_confere"] is False
+
+    resposta = client.post("/api/config/reancorar", json={"author": "t"})
+    assert resposta.status_code == 201
+    assert "invalida" in resposta.json()["aviso"]
+
+    assert client.get("/api/health").json()["config_hash_confere"] is True
+    assert client.post("/api/run", json={"author": "t"}).status_code == 201
+
+
+def test_rota_de_reancoragem_recusa_sem_deriva(client) -> None:
+    resposta = client.post("/api/config/reancorar", json={"author": "t"})
+    assert resposta.status_code == 400
+    assert "integro" in resposta.json()["detail"]
+
+
+def test_reancorar_recusa_com_run_ativo(client) -> None:
+    conn = client.app.state.conn
+    client.post("/api/run", json={"author": "t"})
+    _versao_de_schema_antigo(conn)
+    resposta = client.post("/api/config/reancorar", json={"author": "t"})
+    assert resposta.status_code == 409

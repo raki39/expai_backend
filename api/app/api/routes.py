@@ -19,6 +19,7 @@ from ..config import service as config_service
 from ..config.service import (
     ConfigCongelada,
     SchemaDivergente,
+    SemDeriva,
     SemMudanca,
     TetoExcedido,
 )
@@ -156,6 +157,44 @@ def config_nova_versao(
             "Alteracao material: invalida comparacao com runs anteriores."
             if nova.material
             else ""
+        ),
+    }
+
+
+class PedidoReancoragem(BaseModel):
+    author: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=500)
+
+
+@router.post("/config/reancorar", status_code=status.HTTP_201_CREATED)
+def config_reancorar(
+    request: Request, pedido: PedidoReancoragem = Body(...)
+) -> dict[str, Any]:
+    """Regrava a config vigente sob o hash correto, apos mudanca de schema.
+
+    Nao altera valor nenhum. Existe porque `criar_versao` devolveria
+    `SemMudanca` neste caso - a configuracao efetiva nao mudou, so o hash.
+    """
+    try:
+        nova = config_service.reancorar(
+            _conn(request), _settings(request),
+            author=pedido.author, note=pedido.note,
+        )
+    except SemDeriva as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ConfigCongelada as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except TetoExcedido as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+    return {
+        "version_id": nova.id,
+        "config_hash": nova.config_hash,
+        "material": nova.material,
+        "aviso": (
+            "Configuracao reancorada. O schema mudou: toda comparacao que "
+            "atravesse esta versao e invalida."
         ),
     }
 

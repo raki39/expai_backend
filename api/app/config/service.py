@@ -275,6 +275,92 @@ def _inserir_versao(
     return versao
 
 
+class SemDeriva(ErroConfig):
+    """Nao ha o que reancorar: o hash gravado ainda descreve a configuracao."""
+
+
+def reancorar(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    author: str,
+    note: str = "",
+) -> VersaoConfig:
+    """Grava uma versao nova com a config vigente e o hash CORRETO.
+
+    Existe porque acrescentar campo a `ExperimentConfig` muda o hash de toda
+    versao ja gravada: o `payload_json` continua o mesmo, mas reconstrui-lo
+    passa a produzir um objeto diferente. `exigir_hash_integro` recusa abrir
+    run nesse estado, e com razao - e o caminho de saida nao pode ser
+    `criar_versao`, que devolveria `SemMudanca` porque a config EFETIVA nao
+    mudou. So o hash mudou.
+
+    O que fica registrado nao e um valor alterado: e a **mudanca de schema**,
+    campo por campo, com o valor que cada campo novo assumiu. Isso importa
+    porque o campo novo passa a fazer parte do experimento a partir daqui, e
+    quem comparar runs atraves desta versao precisa saber disso.
+
+    Nao muda nenhum valor. Para tambem alterar algo, use `criar_versao` depois.
+    """
+    linha = conn.execute(
+        "SELECT * FROM config_version ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if linha is None:
+        raise ErroConfig("nao ha config_version; rode o bootstrap primeiro")
+
+    atual = _linha_para_versao(linha)
+    if conferir_hash(atual) is None:
+        raise SemDeriva(
+            f"a versao {atual.id} tem hash integro; nao ha o que reancorar"
+        )
+
+    ativo = run_ativo(conn)
+    if ativo is not None:
+        raise ConfigCongelada(
+            f"run {ativo} esta ativo; encerre-o antes de reancorar a "
+            "configuracao"
+        )
+
+    _checar_teto(atual.config, settings)
+
+    # A "mudanca" e a diferenca entre o payload GRAVADO e o reconstruido -
+    # ou seja, exatamente os campos que o schema ganhou ou perdeu.
+    gravado = json.loads(linha["payload_json"])
+    reconstruido = atual.config.model_dump(mode="json")
+    campos = sorted(set(gravado) | set(reconstruido))
+    mudancas = [
+        (campo, gravado.get(campo), reconstruido.get(campo))
+        for campo in campos
+        if gravado.get(campo) != reconstruido.get(campo)
+    ]
+    if not mudancas:
+        # Hash divergente sem diferenca de payload significaria que a propria
+        # funcao de hash mudou. E possivel, e precisa ficar registrado como
+        # tal em vez de virar uma lista de mudancas vazia.
+        mudancas = [("__hash__", atual.config_hash, atual.config.config_hash())]
+
+    log.warning(
+        "config.reancorada",
+        extra={
+            "versao_anterior": atual.id,
+            "hash_anterior": atual.config_hash,
+            "hash_novo": atual.config.config_hash(),
+            "campos": [c for c, _, _ in mudancas],
+        },
+    )
+    return _inserir_versao(
+        conn,
+        atual.config,
+        author=author,
+        parent_id=atual.id,
+        mudancas=mudancas,
+        note=note or (
+            "reancoragem: o schema da configuracao mudou e o hash gravado "
+            "deixou de descrever a config"
+        ),
+    )
+
+
 def bootstrap(conn: sqlite3.Connection, settings: Settings) -> VersaoConfig:
     """Cria a versao 1 a partir dos defaults, se ainda nao existir.
 
