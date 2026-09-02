@@ -24,6 +24,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY pytest.ini ./
 
+# chmod aqui, e nao via bit de permissao do git: repositorio desenvolvido no
+# Windows nao preserva o bit executavel de forma confiavel.
+COPY start-backend.sh ./
+RUN chmod +x ./start-backend.sh
+
 # Diretorio do volume. Em producao a Railway monta o volume aqui e substitui
 # o conteudo; existe para o container tambem funcionar sem volume.
 RUN mkdir -p /data/datasets
@@ -39,9 +44,11 @@ RUN mkdir -p /data/datasets
 
 EXPOSE 8000
 
-# Forma shell (nao exec) para que ${PORT} seja expandido.
-# Bind em "::" e dual-stack: atende IPv4 e IPv6.
+# Forma exec, chamando o script. O script faz o pre-voo (volume montado e
+# gravavel?) e termina com `exec uvicorn`, de modo que o uvicorn vire PID 1 e
+# receba SIGTERM no redeploy - fechando o SQLite graciosamente em vez de
+# levar SIGKILL depois do timeout.
 #
-# NAO defina `startCommand` no railway.toml: com Dockerfile ele sobrescreve o
-# ENTRYPOINT em forma exec e ${PORT} deixa de ser expandido.
-CMD uvicorn app.main:app --host :: --port ${PORT:-8000}
+# NAO defina `startCommand` no railway.toml: com Dockerfile ele sobrescreve
+# este CMD, e o pre-voo deixaria de rodar.
+CMD ["./start-backend.sh"]

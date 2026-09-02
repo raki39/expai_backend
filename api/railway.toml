@@ -14,6 +14,9 @@
 #   Settings > Source > Root Directory .............. /api
 #   Settings > Config-as-code > Railway Config File .. /api/railway.toml
 #
+# Watch Paths ja vem deste arquivo (watchPatterns, abaixo). Se preferir pela
+# interface: Settings > Source > Watch Paths = /api/**
+#
 # O Root Directory define o contexto de build. Sem ele, a Railway analisa a
 # raiz do repositorio, nao encontra Python nem Dockerfile, e falha com
 # "Railpack could not determine how to build the app".
@@ -45,6 +48,15 @@
 
 [build]
 builder = "DOCKERFILE"
+
+# Watch paths: padroes estilo gitignore, RELATIVOS A RAIZ DO REPOSITORIO
+# (nao ao Root Directory). Decidem se um push dispara redeploy - nada a ver
+# com iniciar o servico.
+#
+# Sao necessarios porque o repositorio `backend` abriga mais de um servico:
+# sem isto, mexer em qualquer outro servico redeploya a `api`, e redeploy com
+# volume derruba run em andamento.
+watchPatterns = ["/api/**"]
 
 [deploy]
 # SEM `startCommand` de proposito.
