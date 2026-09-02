@@ -16,7 +16,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..config import service as config_service
-from ..config.service import ConfigCongelada, SemMudanca, TetoExcedido
+from ..config.service import (
+    ConfigCongelada,
+    SchemaDivergente,
+    SemMudanca,
+    TetoExcedido,
+)
 from ..dataset import ingest as dataset_ingest
 from ..dataset import loader as dataset_loader
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
@@ -64,6 +69,11 @@ def health(request: Request) -> dict[str, Any]:
         "schema_version": versao_schema(conn),
         "config_version": atual.id if atual else None,
         "config_hash": atual.config_hash if atual else None,
+        # O hash gravado ainda descreve esta configuracao? Se nao, ele parou
+        # de identificar o que diz identificar - e o painel precisa gritar.
+        "config_hash_confere": (
+            config_service.conferir_hash(atual) is None if atual else None
+        ),
         "run_ativo": config_service.run_ativo(conn),
         # Nao e segredo: e configuracao publica de politica de origem.
         "cors_allowed_origins": settings.cors_origins,
@@ -306,6 +316,13 @@ def run_abrir(request: Request, pedido: PedidoRun = Body(...)) -> dict[str, Any]
     atual = config_service.versao_atual(conn)
     if atual is None:
         raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+
+    # O hash e a IDENTIDADE da config do run. Se ele nao descreve mais a
+    # configuracao, nenhum resultado produzido aqui pode ser comparado.
+    try:
+        config_service.exigir_hash_integro(conn)
+    except SchemaDivergente as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
     log.info("run.abertura_pedida", extra={"author": pedido.author})
     run_id, tx_id = livro.abrir_run(

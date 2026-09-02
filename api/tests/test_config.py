@@ -247,3 +247,60 @@ def test_versao_atual_reflete_a_ultima(
     assert atual is not None
     assert atual.id == 2
     assert atual.config.default_seed == 7
+
+
+# ============================================================================
+# Deriva de schema: o hash gravado ainda descreve a config que ele identifica?
+#
+# `config_hash` e a identidade da configuracao de um run. Se `ExperimentConfig`
+# ganhar um campo, o `payload_json` gravado continua o mesmo mas reconstrui-lo
+# passa a produzir outro objeto - e outro hash. Sem esta conferencia, dois runs
+# reportariam o mesmo hash tendo rodado com configuracoes diferentes, e a
+# comparacao entre eles mentiria sem nada acusar.
+# ============================================================================
+
+
+def test_hash_confere_no_estado_normal(conn) -> None:
+    from app.config import service as cs
+
+    atual = cs.versao_atual(conn)
+    assert cs.conferir_hash(atual) is None
+
+
+def test_deriva_de_schema_e_detectada(conn) -> None:
+    """Simula o payload de uma versao gravada antes de um campo existir."""
+    import json
+
+    from app.config import service as cs
+
+    atual = cs.versao_atual(conn)
+    payload = json.loads(atual.config.model_dump_json())
+    payload.pop("note", None)  # como se o campo tivesse sido acrescentado depois
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, parent_version_id,"
+        " payload_json, config_hash, material, note)"
+        " VALUES ('x','teste',?,?,'hash-de-outra-epoca',1,'')",
+        (atual.id, json.dumps(payload)),
+    )
+    nova = cs.versao_atual(conn)
+    assert cs.conferir_hash(nova) is not None
+
+
+def test_run_e_recusado_sob_hash_divergente(client) -> None:
+    """Nao se produz resultado sob um hash que identifica outra coisa."""
+    import json
+
+    from app.config import service as cs
+
+    conn = client.app.state.conn
+    atual = cs.versao_atual(conn)
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, parent_version_id,"
+        " payload_json, config_hash, material, note)"
+        " VALUES ('x','teste',?,?,'hash-que-nao-descreve-mais',1,'')",
+        (atual.id, atual.config.model_dump_json()),
+    )
+    resposta = client.post("/api/run", json={"author": "teste"})
+    assert resposta.status_code == 409
+    assert "schema da configuracao mudou" in resposta.json()["detail"]
+    assert client.get("/api/health").json()["config_hash_confere"] is False

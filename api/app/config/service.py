@@ -44,6 +44,19 @@ class SemMudanca(ErroConfig):
     """A alteracao nao muda nenhum campo."""
 
 
+class SchemaDivergente(ErroConfig):
+    """O hash gravado nao descreve mais a configuracao que ele identifica.
+
+    Acontece quando `ExperimentConfig` ganha ou perde um campo depois que uma
+    versao foi gravada: o `payload_json` continua o mesmo, mas reconstrui-lo
+    produz um objeto diferente do que produzia antes, e portanto outro hash.
+
+    Isso importa porque `config_hash` e a IDENTIDADE da configuracao de um
+    run. Dois runs poderiam reportar o mesmo hash tendo rodado com configs
+    diferentes - e ai a comparacao entre eles mente sem que nada acuse.
+    """
+
+
 @dataclass(frozen=True)
 class VersaoConfig:
     id: int
@@ -86,11 +99,44 @@ def _linha_para_versao(linha: sqlite3.Row) -> VersaoConfig:
     )
 
 
+def conferir_hash(versao: VersaoConfig) -> str | None:
+    """O hash gravado ainda descreve esta configuracao? Devolve o recalculado
+    quando NAO bate, e None quando bate.
+
+    Barato de rodar e a unica coisa que separa "o hash identifica a config" de
+    "o hash identificava a config quando foi escrito".
+    """
+    recalculado = versao.config.config_hash()
+    return None if recalculado == versao.config_hash else recalculado
+
+
 def versao_atual(conn: sqlite3.Connection) -> VersaoConfig | None:
     linha = conn.execute(
         "SELECT * FROM config_version ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return _linha_para_versao(linha) if linha else None
+
+
+def exigir_hash_integro(conn: sqlite3.Connection) -> None:
+    """Recusa seguir se o hash da configuracao vigente nao a descreve mais.
+
+    Chamado antes de ABRIR RUN, e nao no boot: derrubar o servico deixaria o
+    painel inacessivel justamente quando e preciso olhar a configuracao para
+    resolver. O que nao pode acontecer e produzir RESULTADO sob um hash que
+    identifica outra coisa.
+    """
+    atual = versao_atual(conn)
+    if atual is None:
+        return
+    recalculado = conferir_hash(atual)
+    if recalculado is not None:
+        raise SchemaDivergente(
+            f"a versao {atual.id} foi gravada com config_hash "
+            f"{atual.config_hash}, mas reconstrui-la hoje produz "
+            f"{recalculado}. O schema da configuracao mudou desde entao. "
+            "Crie uma nova versao antes de abrir run: rodar assim faria dois "
+            "runs reportarem o mesmo hash com configuracoes diferentes."
+        )
 
 
 def versao_por_id(conn: sqlite3.Connection, version_id: int) -> VersaoConfig | None:
