@@ -70,10 +70,16 @@ class AdaptadorAnthropic:
                     {"role": papel, "content": texto}
                     for papel, texto in pedido.mensagens
                 ],
+                # SEM `name` aqui. A OpenAI exige nome no `json_schema`; esta
+                # API recusa o campo com 400 ("Extra inputs are not
+                # permitted"). O `schema_nome` do pedido segue existindo -
+                # o outro adaptador precisa dele, e ele entra na chave do
+                # cache -, so nao viaja nesta requisicao. E a diferenca de
+                # forma que um wrapper generico teria escondido ate a
+                # primeira chamada real.
                 output_config={
                     "format": {
                         "type": "json_schema",
-                        "name": pedido.schema_nome,
                         "schema": pedido.schema,
                     }
                 },
@@ -84,6 +90,19 @@ class AdaptadorAnthropic:
         texto = "".join(
             bloco.text for bloco in resposta.content if bloco.type == "text"
         )
+        if not texto:
+            # Sem isto a resposta vazia chega a validacao e vira "Invalid JSON
+            # at column 0", que manda procurar erro de schema quando o
+            # problema e outro: o pensamento adaptativo consumiu `max_tokens`
+            # antes de sair uma linha de texto. A causa esta no `stop_reason`,
+            # e e ele que precisa aparecer.
+            raise ErroDoProvedor(
+                "anthropic: resposta sem bloco de texto"
+                f" (stop_reason={getattr(resposta, 'stop_reason', None)!r},"
+                f" blocos={[b.type for b in resposta.content]}). Com"
+                " stop_reason='max_tokens', o limite de saida acabou antes de"
+                " o modelo escrever a resposta - o pensamento conta nele."
+            )
         uso_bruto = resposta.usage
 
         return Resposta(

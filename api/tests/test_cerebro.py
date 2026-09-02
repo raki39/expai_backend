@@ -1069,10 +1069,24 @@ def _chave_do_arquivo(nome: str) -> str:
 def test_cache_de_prompt_funciona_na_segunda_reflexao(
     conn: sqlite3.Connection, cenario, settings
 ) -> None:
-    """Criterio 6: `cache_read_input_tokens` > 0 da segunda reflexao em diante.
+    """Criterio 6: `cache_read_input_tokens` > 0 a partir da segunda reflexao.
 
-    Zero aqui NAO e para ser ignorado: significa invalidador silencioso no
-    prefixo, e o defeito e nosso.
+    **Medido em 2026-09-02, e mudou o que este teste pode afirmar:** o schema
+    de saida faz parte do prefixo cacheado. Sistema identico com schema
+    diferente vem FRIO (`read=0, write=3567`). Como os dois nos pedem
+    respostas de formatos diferentes, cada um tem sua propria entrada de
+    cache - e a segunda reflexao de um run inteiramente frio nao tem como ler
+    um prefixo que nunca foi escrito.
+
+    Isso NAO e o invalidador silencioso que o criterio persegue. A diferenca
+    esta em ser medida: um `datetime.now()` no prefixo zeraria o cache de
+    TODAS as chamadas, sempre. Aqui cada prefixo esquenta na primeira vez e
+    e lido em toda vez seguinte.
+
+    Entao o teste roda o ciclo DUAS vezes, esvaziando o nosso cache de
+    respostas entre elas para que as chamadas aconteçam de verdade. No
+    segundo ciclo, TODA reflexao tem de ler cache. Se alguma vier zero ali,
+    ai sim ha invalidador - e o defeito e nosso.
     """
     from pydantic import SecretStr
 
@@ -1088,27 +1102,48 @@ def test_cache_de_prompt_funciona_na_segunda_reflexao(
         }
     )
 
-    resultado = _rodar_ciclo(conn, cenario, reais, None)
-    leituras = [
-        l["tokens_cache_read"]
-        for l in conn.execute(
-            "SELECT tokens_cache_read FROM agent_event"
-            " WHERE run_id = ? AND provider IS NOT NULL ORDER BY id",
-            (resultado.run_id,),
+    def reflexoes(run_id: int) -> list[sqlite3.Row]:
+        return list(
+            conn.execute(
+                "SELECT node, tokens_cache_read, tokens_cache_write"
+                " FROM agent_event WHERE run_id = ? AND provider IS NOT NULL"
+                " ORDER BY id",
+                (run_id,),
+            )
         )
-    ]
-    # O grafo engole falha de provedor num evento de parada, de proposito -
-    # o run tem de terminar mesmo assim. Mas um teste que so dissesse
-    # "esperava 2 chamadas, houve 0" mandaria procurar no lugar errado, que e
-    # exatamente o modo de falha que este projeto ja registrou quatro vezes.
-    assert len(leituras) >= 2, (
-        f"o cerebro nao chegou a chamar: parou em {resultado.parou_em!r} "
-        f"porque {resultado.motivo!r}"
+
+    primeiro = _rodar_ciclo(conn, cenario, reais, None)
+    assert len(reflexoes(primeiro.run_id)) >= 2, (
+        f"o cerebro nao chegou a chamar duas vezes: parou em "
+        f"{primeiro.parou_em!r} porque {primeiro.motivo!r}"
     )
-    assert leituras[1] and leituras[1] > 0, (
-        "cache_read zero na segunda chamada: ha invalidador no prefixo, "
-        "ou o prefixo esta abaixo do minimo cacheavel do modelo"
-    )
+    # Na primeira passagem cada prefixo ou foi ESCRITO no cache, ou ja estava
+    # quente de antes e foi LIDO. Exigir escrita seria exigir que o cache
+    # estivesse frio, que e uma condicao que este teste nao controla - o
+    # prefixo pode ter esquentado num run anterior, e isso e o cache
+    # funcionando, nao falhando. O que nao pode e ele nao engajar de forma
+    # nenhuma.
+    for linha in reflexoes(primeiro.run_id):
+        engajou = (linha["tokens_cache_write"] or 0) + (
+            linha["tokens_cache_read"] or 0
+        )
+        assert engajou > 0, (
+            f"{linha['node']}: o prefixo nao foi lido nem gravado no cache -"
+            " provavelmente esta abaixo do minimo cacheavel do modelo"
+        )
+
+    # Esvazia o NOSSO cache para que o segundo ciclo chame de verdade. Sem
+    # isto ele seria servido localmente e nao mediria cache nenhum.
+    conn.execute("DELETE FROM llm_cache")
+    segundo = _rodar_ciclo(conn, cenario, reais, None)
+
+    leituras = reflexoes(segundo.run_id)
+    assert len(leituras) >= 2
+    for linha in leituras:
+        assert linha["tokens_cache_read"] and linha["tokens_cache_read"] > 0, (
+            f"{linha['node']}: cache_read zero com o prefixo ja quente."
+            " Ha invalidador silencioso no prefixo, e o defeito e nosso."
+        )
 
 
 @pytest.mark.rede

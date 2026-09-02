@@ -46,8 +46,14 @@ from .provedores.base import ErroDoProvedor
 
 log = logging.getLogger(__name__)
 
-MAX_TOKENS_INTERPRETAR = 2_000
-MAX_TOKENS_PROPOR = 2_000
+# Teto de SAIDA por chamada. Nao e orcamento: cobra-se o que foi consumido,
+# e o cap e barreira contra resposta desgovernada. Precisa ser folgado porque
+# **o pensamento do modelo conta neste limite** - com 2.000 o pensamento
+# consumiu tudo e a resposta voltou vazia, o que chegava a validacao disfarcado
+# de "JSON invalido". A reserva do teto de gasto usa este numero como limite
+# superior, entao aumenta-lo torna o teto mais conservador, nunca menos.
+MAX_TOKENS_INTERPRETAR = 8_000
+MAX_TOKENS_PROPOR = 8_000
 TIER = "padrao"
 
 
@@ -211,7 +217,11 @@ def no_interpretar(estado: Estado, dep: Dependencias) -> dict:
             {**estado, "eventos": eventos},
             dep,
             "interpretar",
-            f"interpretacao fora do schema: {erro.error_count()} erro(s)",
+            # O motivo legivel, e nao a contagem: "1 erro(s)" manda procurar
+            # no lugar errado, que e o modo de falha que este projeto ja
+            # registrou quatro vezes. O que custa caro nao e falhar, e falhar
+            # sem dizer onde.
+            _motivo_legivel(erro),
         )
     return {"interpretacao": leitura, "eventos": eventos}
 
@@ -384,4 +394,4 @@ def _motivo_legivel(erro: ValidationError) -> str:
         f"{'.'.join(str(p) for p in e['loc']) or '(raiz)'}: {e['msg']}"
         for e in erro.errors()[:5]
     ]
-    return "resposta fora do schema da regra -- " + "; ".join(partes)
+    return "resposta fora do schema -- " + "; ".join(partes)

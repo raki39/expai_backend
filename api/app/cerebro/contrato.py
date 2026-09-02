@@ -43,6 +43,24 @@ from ..regra.schema import (
 
 FAMILIAS = ("cruzamento_medias", "banda_desvio", "breakout_canal")
 
+# Limites de texto livre. Existem como GUARDA contra resposta desgovernada,
+# nao como regra de estilo - e a diferenca importa: a primeira chamada real
+# foi recusada por um diagnostico de 812 caracteres, um texto perfeitamente
+# bom descartado por doze caracteres.
+#
+# `maxLength` no schema enviado e conselho, nao imposicao: o provedor nao
+# garante que respeita. Quem decide e a validacao daqui - entao o numero
+# precisa ser folgado o bastante para que passar dele signifique mesmo que
+# algo saiu do lugar. O teto duro de verdade e `max_tokens`.
+#
+# **Um numero so, usado nos tres lugares**: no modelo que valida, no schema
+# que vai ao provedor, e no texto que o modelo le. Dois numeros para o mesmo
+# campo e como este projeto ja se enganou cinco vezes - antes o prompt pedia
+# "no maximo 5 frases" e o schema exigia 800 caracteres, que nao sao a mesma
+# afirmacao.
+MAX_CHARS_DIAGNOSTICO = 2_000
+MAX_CHARS_EXPECTATIVA = 1_200
+
 # Campos que cada familia usa. O que nao esta na lista precisa vir NULO -
 # nao ignorado. Um parametro de outra familia chegando junto significa que o
 # modelo nao decidiu qual familia esta propondo, e adivinhar por ele seria
@@ -69,7 +87,7 @@ class Interpretacao(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     regime: Literal["tendencia", "reversao", "indefinido"]
-    diagnostico: str = Field(min_length=1, max_length=800)
+    diagnostico: str = Field(min_length=1, max_length=MAX_CHARS_DIAGNOSTICO)
     familia_recomendada: Literal[
         "cruzamento_medias", "banda_desvio", "breakout_canal", "nenhuma"
     ]
@@ -86,10 +104,11 @@ SCHEMA_INTERPRETACAO: dict = {
         },
         "diagnostico": {
             "type": "string",
-            "maxLength": 800,
+            "maxLength": MAX_CHARS_DIAGNOSTICO,
             "description": (
-                "Leitura do periodo em no maximo 5 frases, citando os numeros"
-                " do resumo que sustentam a leitura."
+                "Leitura do periodo, citando os numeros do resumo que a"
+                f" sustentam. No maximo {MAX_CHARS_DIAGNOSTICO} caracteres -"
+                " passar disso faz a resposta inteira ser rejeitada."
             ),
         },
         "familia_recomendada": {
@@ -120,7 +139,7 @@ class PropostaBruta(BaseModel):
     position_fraction_bps: int
     stop_loss_bps: int | None = None
 
-    expectativa: str = Field(min_length=1, max_length=600)
+    expectativa: str = Field(min_length=1, max_length=MAX_CHARS_EXPECTATIVA)
     confianca_ppm: int
 
     @model_validator(mode="after")
@@ -201,9 +220,11 @@ SCHEMA_PROPOSTA: dict = {
         },
         "expectativa": {
             "type": "string",
-            "maxLength": 600,
+            "maxLength": MAX_CHARS_EXPECTATIVA,
             "description": "o que se espera desta regra, declarado ANTES de"
-            " qualquer execucao, e por que.",
+            " qualquer execucao, e por que. No maximo"
+            f" {MAX_CHARS_EXPECTATIVA} caracteres - passar disso faz a"
+            " proposta inteira ser rejeitada.",
         },
         "confianca_ppm": {
             "type": "integer",
