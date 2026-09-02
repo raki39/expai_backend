@@ -125,6 +125,13 @@ def config_atual(request: Request) -> dict[str, Any]:
         "note": atual.note,
         "config": atual.config.model_dump(mode="json"),
         "congelada": config_service.run_ativo(_conn(request)) is not None,
+        # Campos de catalogo em que o banco discorda do catalogo verificado.
+        # Nao e "o banco esta errado": o banco e a autoridade (regra 20). E a
+        # constatacao de que existe diferenca, para que ela seja resolvida por
+        # ato humano registrado em vez de passar despercebida.
+        "catalogo_desatualizado": config_service.catalogo_desatualizado(
+            _conn(request)
+        ),
     }
 
 
@@ -171,6 +178,40 @@ def config_nova_versao(
 class PedidoReancoragem(BaseModel):
     author: str = Field(min_length=1, max_length=120)
     note: str = Field(default="", max_length=500)
+
+
+@router.post("/config/catalogo", status_code=status.HTTP_201_CREATED)
+def config_adotar_catalogo(
+    request: Request, pedido: PedidoReancoragem = Body(...)
+) -> dict[str, Any]:
+    """Adota o catalogo de provedores verificado: tiers e tabela de precos.
+
+    Toca APENAS esses campos, e cria uma `config_version` como qualquer outra
+    alteracao, com autor, data, valor anterior e novo. E material: preco
+    alimenta o teto, e o teto decide quantas reflexoes cabem num run.
+    """
+    try:
+        nova = config_service.adotar_catalogo_de_provedores(
+            _conn(request), _settings(request),
+            author=pedido.author, note=pedido.note,
+        )
+    except ConfigCongelada as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except SemMudanca as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except TetoExcedido as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+    return {
+        "version_id": nova.id,
+        "config_hash": nova.config_hash,
+        "material": nova.material,
+        "aviso": (
+            "Alteracao material: invalida comparacao com runs anteriores."
+            if nova.material else ""
+        ),
+    }
 
 
 @router.post("/config/reancorar", status_code=status.HTTP_201_CREATED)

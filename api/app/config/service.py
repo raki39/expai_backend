@@ -279,6 +279,68 @@ class SemDeriva(ErroConfig):
     """Nao ha o que reancorar: o hash gravado ainda descreve a configuracao."""
 
 
+# Campos que descrevem o CATALOGO DE PROVEDORES: quais tiers existem, para
+# que modelo cada um aponta, e quanto cada modelo custa. Sao os unicos campos
+# da config que descrevem o mundo la fora em vez de uma escolha do
+# experimento - e o mundo la fora muda sozinho (a secao 3.9 exige
+# reprecificacao periodica).
+CAMPOS_DO_CATALOGO = ("tiers", "price_table", "price_table_version")
+
+
+def catalogo_desatualizado(conn: sqlite3.Connection) -> list[str]:
+    """Campos de catalogo em que o banco discorda do catalogo verificado.
+
+    Lista vazia significa que estao iguais. Nao e "o codigo esta certo e o
+    banco errado": o banco e a autoridade sobre o experimento (regra 20). E
+    so a constatacao de que existe uma diferenca, para que ela possa ser
+    resolvida por um ato humano registrado em vez de passar despercebida.
+    """
+    atual = versao_atual(conn)
+    if atual is None:
+        return []
+    verificado = ExperimentConfig()
+    gravado = atual.config.model_dump(mode="json")
+    novo = verificado.model_dump(mode="json")
+    return [c for c in CAMPOS_DO_CATALOGO if gravado[c] != novo[c]]
+
+
+def adotar_catalogo_de_provedores(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    author: str,
+    note: str = "",
+) -> VersaoConfig:
+    """Grava uma versao nova adotando o catalogo de provedores verificado.
+
+    Nao e um atalho para "sincronizar com o codigo", e nao pode virar um: ele
+    toca **apenas** os tres campos de catalogo, cria uma `config_version` como
+    qualquer outra alteracao, e registra autor, data, valor anterior e novo
+    (secao 10.2.3). Nenhum parametro do experimento passa por aqui.
+
+    Existe porque a alternativa e colar uma tabela de precos a mao num campo
+    MATERIAL - e um digito errado ali vira custo errado, teto errado e um
+    numero de "custo por decisao" que ninguem consegue conferir depois. Um
+    valor que alguem digita e um valor que alguem digita errado.
+
+    **E mudanca material**, como qualquer alteracao de preco: o custo alimenta
+    o teto de gasto, e o teto decide quantas reflexoes cabem num run.
+    """
+    campos = catalogo_desatualizado(conn)
+    if not campos:
+        raise SemMudanca(
+            "o catalogo de provedores do banco ja e o catalogo verificado"
+        )
+    verificado = ExperimentConfig().model_dump(mode="json")
+    return criar_versao(
+        conn,
+        settings,
+        alteracoes={c: verificado[c] for c in campos},
+        author=author,
+        note=note or "adocao do catalogo de provedores verificado",
+    )
+
+
 def reancorar(
     conn: sqlite3.Connection,
     settings: Settings,

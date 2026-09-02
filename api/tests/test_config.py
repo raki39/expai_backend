@@ -410,3 +410,71 @@ def test_reancorar_recusa_com_run_ativo(client) -> None:
     _versao_de_schema_antigo(conn)
     resposta = client.post("/api/config/reancorar", json={"author": "t"})
     assert resposta.status_code == 409
+
+
+# ===========================================================================
+# Catalogo de provedores: adocao registrada, nunca sincronizacao silenciosa
+# ===========================================================================
+
+
+def test_catalogo_desatualizado_lista_so_o_que_difere(conn) -> None:
+    from app.config import service
+
+    # Versao 1 nasce dos defaults: nada difere.
+    assert service.catalogo_desatualizado(conn) == []
+
+    # Um preco diferente no banco passa a divergir do catalogo verificado.
+    service.criar_versao(
+        conn, get_settings(),
+        alteracoes={"price_table_version": "2020-01-01"},
+        author="teste",
+    )
+    assert service.catalogo_desatualizado(conn) == ["price_table_version"]
+
+
+def test_adotar_catalogo_cria_versao_com_autor_e_diff(conn) -> None:
+    """Nao e sincronizacao com o codigo: e alteracao versionada como as outras."""
+    from app.config import service
+
+    service.criar_versao(
+        conn, get_settings(),
+        alteracoes={"price_table_version": "2020-01-01"},
+        author="teste",
+    )
+    nova = service.adotar_catalogo_de_provedores(
+        conn, get_settings(), author="operador", note="precos reconferidos"
+    )
+    assert nova.author == "operador"
+    assert nova.material is True          # preco alimenta o teto
+    assert service.catalogo_desatualizado(conn) == []
+
+    historico = service.historico(conn, limite=5)
+    campos = {m["field"] for v in historico for m in v.get("changes", [])}
+    assert "price_table_version" in campos
+
+
+def test_adotar_catalogo_nao_toca_parametro_do_experimento(conn) -> None:
+    """A porta e estreita de proposito: so tiers, precos e a versao deles."""
+    from app.config import service
+
+    antes = service.versao_atual(conn).config
+    service.criar_versao(
+        conn, get_settings(),
+        alteracoes={"price_table_version": "2020-01-01", "taker_fee_bps": "50"},
+        author="teste",
+    )
+    service.adotar_catalogo_de_provedores(conn, get_settings(), author="operador")
+    depois = service.versao_atual(conn).config
+
+    # O catalogo voltou ao verificado...
+    assert depois.price_table_version == antes.price_table_version
+    # ...e a taxa alterada a mao continua alterada. Adotar catalogo nao e
+    # desfazer decisao de experimento.
+    assert depois.taker_fee_bps != antes.taker_fee_bps
+
+
+def test_adotar_catalogo_sem_diferenca_e_recusado(conn) -> None:
+    from app.config import service
+
+    with pytest.raises(service.SemMudanca):
+        service.adotar_catalogo_de_provedores(conn, get_settings(), author="x")
