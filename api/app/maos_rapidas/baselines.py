@@ -358,7 +358,7 @@ def rodar_b1(
         "minimo": min(equities),
         "maximo": max(equities),
         "fidelity_level": config.fidelity_level,
-        "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
+        "condicoes_validade": simulador.condicoes_de_validade(config),
     }
     log.info("baseline.b1", extra={k: v for k, v in resumo.items()
                                   if k != "condicoes_validade"})
@@ -573,7 +573,13 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
             "maximo": int(linha["maximo"]),
         }
 
-    saida["condicoes_validade"] = simulador.CONDICOES_DE_VALIDADE
+    # Do run do B3, e nao da config vigente: o resumo descreve o que FOI
+    # rodado. Se a config mudar depois, o resultado antigo continua contando
+    # as condicoes dele.
+    if "B3" in saida:
+        saida["condicoes_validade"] = simulador.condicoes_do_run(
+            conn, saida["B3"]["run_id"]
+        )
     saida["aviso"] = (
         "Comparacao produzida SEM nenhum LLM envolvido. Fase 0A: nenhuma "
         "conclusao estatistica, nenhum conhecimento promovido."

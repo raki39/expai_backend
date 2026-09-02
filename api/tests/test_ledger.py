@@ -749,3 +749,33 @@ def test_transacao_sem_run_nao_entra_em_run_nenhum(conn: sqlite3.Connection) -> 
     )
     assert saldo_da_conta(conn, contas.CAIXA_SIM, run_id=run_id) == SEMENTE_USD
     assert saldo_da_conta(conn, contas.CAIXA_SIM) == SEMENTE_USD - 5_000
+
+
+def test_a_rota_declara_QUAL_carteira_esta_mostrando(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """Sem run ativo vem o livro inteiro, e isso tem de estar dito.
+
+    Regressao de leitura: depois de duas comparacoes, o "caixa da carteira"
+    global era a soma de sete runs. Numero legitimo, rotulo enganoso.
+    """
+    corpo = client.get("/api/ledger").json()
+    assert corpo["escopo"] == "livro_inteiro"
+
+    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    corpo = client.get("/api/ledger").json()
+    assert corpo["escopo"] == "run"
+    assert corpo["runs_somados"] == 1
+    assert corpo["carteira"]["simulado_usd"]["caixa_minor"] == SEMENTE_USD
+
+    from app.ledger.livro import encerrar_run
+
+    encerrar_run(conn, run_id, "concluido")
+    abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    encerrar_run(conn, 2, "concluido")
+
+    corpo = client.get("/api/ledger").json()
+    assert corpo["escopo"] == "livro_inteiro"
+    assert corpo["runs_somados"] == 2
+    # O livro inteiro soma os dois: e o que "livro_inteiro" quer dizer.
+    assert corpo["carteira"]["simulado_usd"]["caixa_minor"] == 2 * SEMENTE_USD

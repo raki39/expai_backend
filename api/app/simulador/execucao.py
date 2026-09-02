@@ -505,12 +505,57 @@ def _registrar(
 # Texto obrigatorio em todo resultado agregado. Existe para que ninguem olhe
 # um numero desta simulacao e conclua algo que a fidelidade 1 nao sustenta
 # (secao 8.4.1, secao 14).
-CONDICOES_DE_VALIDADE = (
-    "Fidelidade 1 (barras OHLCV). Execucao sempre taker, ao limite adverso da "
-    "barra, com spread, slippage e penalidade por cima. NAO ha afirmacao "
-    "possivel sobre spread real de book, posicao em fila ou preenchimento "
-    "maker. Nenhuma conclusao estatistica."
-)
+#
+# E DERIVADO DA CONFIG, e nunca constante. Ja foi constante, e a D20 (ADR
+# 0015) mostrou o preco disso: quando a referencia da execucao passou de
+# limite adverso para abertura, o texto continuou dizendo "limite adverso" e
+# passou a MENTIR sobre o modelo que produziu os numeros que ele acompanhava.
+#
+# Um campo cuja unica funcao e declarar as condicoes de validade de um
+# resultado nao pode ser a coisa que mais facilmente envelhece.
+
+REFERENCIA_EM_TEXTO = {
+    "abertura": (
+        "referencia = abertura da barra de execucao, o preco no instante em "
+        "que a ordem entra"
+    ),
+    "limite_adverso": (
+        "referencia = limite adverso da barra (maxima na compra, minima na "
+        "venda)"
+    ),
+}
+
+
+def condicoes_de_validade(config: ExperimentConfig) -> str:
+    """As condicoes sob as quais um resultado desta config vale."""
+    return (
+        f"Fidelidade {config.fidelity_level} (barras OHLCV). Execucao sempre "
+        f"taker, {REFERENCIA_EM_TEXTO[config.execution_reference]}, com "
+        f"spread, slippage e penalidade por cima, e latencia de "
+        f"{config.latency_bars} barra(s). NAO ha afirmacao possivel sobre "
+        "spread real de book, posicao em fila ou preenchimento maker. "
+        "Nenhuma conclusao estatistica."
+    )
+
+
+def condicoes_do_run(conn: sqlite3.Connection, run_id: int) -> str:
+    """As condicoes do run, lidas da config sob a qual ELE foi aberto.
+
+    Da config do run, e nao da vigente: um run antigo tem de reportar as
+    condicoes em que rodou, nao as de hoje. E o que torna um resultado
+    comparavel muito depois de ter sido produzido.
+    """
+    from ..config.schema import ExperimentConfig as _EC
+
+    linha = conn.execute(
+        "SELECT cv.payload_json AS payload FROM run r"
+        " JOIN config_version cv ON cv.id = r.config_version_id"
+        " WHERE r.id = ?",
+        (run_id,),
+    ).fetchone()
+    if linha is None:
+        raise ValueError(f"run {run_id} nao existe ou nao tem config_version")
+    return condicoes_de_validade(_EC.model_validate_json(linha["payload"]))
 
 
 def resumo(conn: sqlite3.Connection, run_id: int) -> dict:
@@ -553,5 +598,5 @@ def resumo(conn: sqlite3.Connection, run_id: int) -> dict:
         ),
         # Vazio conta como homogeneo: nao ha divergencia entre zero coisas.
         "fidelidade_homogenea": vazio or linha["fid_min"] == linha["fid_max"],
-        "condicoes_validade": CONDICOES_DE_VALIDADE,
+        "condicoes_validade": condicoes_do_run(conn, run_id),
     }

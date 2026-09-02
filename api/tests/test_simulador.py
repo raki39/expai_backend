@@ -626,3 +626,76 @@ def test_rota_simulador_mostra_o_ultimo_run_quando_nao_ha_ativo(
     assert corpo["encerrado"] is True
     assert corpo["execucoes"] == 1
     assert corpo["custos_cents"]["total"] > 0
+
+
+# ============================================================================
+# As condicoes de validade nao podem envelhecer
+#
+# Regressao da D20: `condicoes_validade` era constante e dizia "limite adverso
+# da barra". Quando o modelo passou a ser `abertura`, o texto continuou o
+# mesmo e passou a MENTIR sobre o modelo que produziu os numeros que ele
+# acompanhava. Um campo cuja unica funcao e declarar sob que condicoes um
+# resultado vale nao pode ser a coisa que mais facilmente envelhece.
+# ============================================================================
+
+
+def test_condicoes_descrevem_o_modelo_de_execucao_vigente() -> None:
+    abertura = sim.condicoes_de_validade(
+        ExperimentConfig(execution_reference="abertura")
+    )
+    adverso = sim.condicoes_de_validade(
+        ExperimentConfig(execution_reference="limite_adverso")
+    )
+    assert "abertura da barra" in abertura
+    assert "limite adverso" not in abertura
+    assert "limite adverso" in adverso
+    assert abertura != adverso
+
+
+def test_condicoes_declaram_fidelidade_e_latencia() -> None:
+    texto = sim.condicoes_de_validade(
+        ExperimentConfig(fidelity_level=1, latency_bars=3)
+    )
+    assert "Fidelidade 1" in texto
+    assert "3 barra" in texto
+    assert "book" in texto and "fila" in texto and "maker" in texto
+    assert "Nenhuma conclusao estatistica" in texto
+
+
+def test_condicoes_do_run_vem_da_config_DELE_e_nao_da_vigente(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """Um run antigo reporta as condicoes em que rodou, nao as de hoje.
+
+    E o que torna um resultado comparavel muito depois de produzido - e o que
+    impede que mudar a config reescreva o significado do que ja foi medido.
+    """
+    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    dataset_id = criar_dataset(conn, [50_000] * 100)
+    comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
+            config=ExperimentConfig())
+
+    antes = sim.condicoes_do_run(conn, run_id)
+    assert "abertura da barra" in antes
+
+    # Muda a config para o outro modelo, DEPOIS do run.
+    from app.ledger.livro import encerrar_run
+
+    encerrar_run(conn, run_id, "concluido")
+    assert client.post(
+        "/api/config",
+        json={"author": "t", "changes": {"execution_reference": "limite_adverso"}},
+    ).status_code == 201
+
+    # O run antigo continua contando a verdade sobre si mesmo.
+    assert sim.condicoes_do_run(conn, run_id) == antes
+    assert "abertura da barra" in sim.condicoes_do_run(conn, run_id)
+
+
+def test_resumo_carrega_as_condicoes_do_proprio_run(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    run_id, dataset_id, cfg = cenario
+    comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
+            config=cfg)
+    assert "abertura da barra" in resumo(conn, run_id)["condicoes_validade"]

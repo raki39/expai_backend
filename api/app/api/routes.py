@@ -304,8 +304,16 @@ def ledger_estado(request: Request) -> dict[str, Any]:
 
     return {
         "run_ativo": ativo,
-        # Carteira DO RUN ativo: contas sao globais e somam a historia toda,
-        # o que responderia outra pergunta.
+        # Sem run ativo, o que vem e o LIVRO INTEIRO - a soma de todos os runs
+        # que ja existiram. E um numero legitimo ("quanto ja passou por esta
+        # conta"), mas responde outra pergunta que "quanto este run tem", e o
+        # painel precisa dizer qual das duas esta mostrando. Rotulo errado
+        # aqui faz somar duas comparacoes e ler o total como carteira.
+        "escopo": "run" if ativo else "livro_inteiro",
+        "runs_somados": (
+            1 if ativo
+            else conn.execute("SELECT COUNT(*) AS n FROM run").fetchone()["n"]
+        ),
         "carteira": livro.carteira(conn, run_id=ativo),
         "contas": livro.saldos(conn, run_id=ativo) if ativo else livro.saldos(conn),
         "conferencias": {
@@ -416,10 +424,13 @@ def simulador_estado(request: Request) -> dict[str, Any]:
         ).fetchone()
         alvo = int(linha["run_id"]) if linha and linha["run_id"] else None
     if alvo is None:
+        atual = config_service.versao_atual(conn)
         return {
             "run_ativo": None,
             "run_exibido": None,
-            "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
+            "condicoes_validade": (
+                simulador.condicoes_de_validade(atual.config) if atual else ""
+            ),
         }
     return {
         "run_ativo": ativo,
@@ -438,10 +449,13 @@ def execucoes_listar(request: Request, limite: int = 50) -> dict[str, Any]:
         " ledger_transaction_id FROM execution ORDER BY id DESC LIMIT ?",
         (limite,),
     ).fetchall()
+    atual = config_service.versao_atual(_conn(request))
     return {
         "total": len(linhas),
         "items": [dict(l) for l in linhas],
-        "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
+        "condicoes_validade": (
+            simulador.condicoes_de_validade(atual.config) if atual else ""
+        ),
     }
 
 
