@@ -119,9 +119,14 @@ class ExperimentConfig(BaseModel):
         default_factory=lambda: {
             "padrao": ModeloTier(provider="anthropic", model="claude-sonnet-5"),
             "topo": ModeloTier(provider="anthropic", model="claude-opus-5"),
-            # Segundo provedor exigido pela secao 3.9. Ids e precos da OpenAI
-            # NAO foram verificados: preencher e datar antes de usar.
-            "padrao_alt": ModeloTier(provider="openai", model=""),
+            # Segundo provedor exigido pela secao 3.9, escolhido em 2026-09-02.
+            # Existe para PROVAR que a troca de provedor e viavel (criterio
+            # 7b), nao para rodar o experimento - por isso o degrau barato.
+            "padrao_alt": ModeloTier(provider="openai", model="gpt-5.6-luna"),
+            # Sem modelo ainda: um tier de topo alternativo so faria sentido
+            # se o experimento fosse rodar no segundo provedor, e nao vai.
+            # Deixar vazio e a verdade; preencher "por simetria" seria
+            # declarar um preco que ninguem conferiu.
             "topo_alt": ModeloTier(provider="openai", model=""),
         }
     )
@@ -151,6 +156,20 @@ class ExperimentConfig(BaseModel):
                 output_usd_per_mtok=Decimal("25.00"),
                 cache_read_usd_per_mtok=Decimal("0.50"),
                 cache_write_usd_per_mtok=Decimal("6.25"),
+                verified_at="2026-09-02",
+            ),
+            PrecoModelo(
+                provider="openai",
+                model="gpt-5.6-luna",
+                input_usd_per_mtok=Decimal("0.20"),
+                output_usd_per_mtok=Decimal("1.20"),
+                cache_read_usd_per_mtok=Decimal("0.02"),
+                # NULO de proposito, e o par coerente: este provedor nao cobra
+                # escrita de cache e nao reporta o token dela. Preencher com
+                # zero afirmaria que nada foi escrito, que e coisa diferente
+                # de nao haver preco - e e exatamente o caso que o criterio 7c
+                # existe para testar.
+                cache_write_usd_per_mtok=None,
                 verified_at="2026-09-02",
             ),
         ]

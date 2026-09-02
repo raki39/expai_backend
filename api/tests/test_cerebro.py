@@ -261,9 +261,14 @@ def test_tier_resolve_para_provedor_e_modelo(cenario) -> None:
     with pytest.raises(reflexao.TierNaoConfigurado):
         reflexao.resolver_tier(cfg, "inexistente")
     with pytest.raises(reflexao.TierNaoConfigurado):
-        # `padrao_alt` existe e aponta para um modelo vazio: nao configurado
-        # nao e o mesmo que inexistente, e os dois precisam recusar.
-        reflexao.resolver_tier(cfg, "padrao_alt")
+        # `topo_alt` existe e aponta para um modelo vazio: "nao configurado"
+        # nao e o mesmo que "inexistente", e os dois precisam recusar.
+        reflexao.resolver_tier(cfg, "topo_alt")
+
+    # E o segundo provedor resolve de verdade, com preco datado (ADR 0009).
+    provedor_alt, modelo_alt = reflexao.resolver_tier(cfg, "padrao_alt")
+    assert provedor_alt != provider
+    assert custo.preco_de(cfg, provedor_alt, modelo_alt).verified_at
 
 
 # ===========================================================================
