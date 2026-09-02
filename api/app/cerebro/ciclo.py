@@ -149,6 +149,10 @@ def rodar(
                 config=config,
                 config_version_id=config_version_id,
                 operacoes_alvo=resultado.operacoes,
+                # O MESMO tamanho de posicao da regra executada (secao 14.3).
+                # Casar o giro e nao casar o tamanho mede dimensionamento em
+                # vez de timing - o mesmo erro da D19, um nivel abaixo.
+                fracao_bps=regra.position_fraction_bps,
                 semente=config.default_seed,
                 barras=barras,
             )

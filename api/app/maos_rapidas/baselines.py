@@ -29,6 +29,7 @@ ganharia de B1 simplesmente operando menos.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import random
 import sqlite3
@@ -287,11 +288,27 @@ def rodar_b1(
     config: ExperimentConfig,
     operacoes_alvo: int,
     semente: int,
+    fracao_bps: int = 10_000,
     repeticoes: int | None = None,
     barras: Sequence[BarraCarregada] | None = None,
     persistir: bool = True,
 ) -> dict:
-    """Distribuicao de B1. Um numero unico nao satisfaz a secao 14.3."""
+    """Distribuicao de B1. Um numero unico nao satisfaz a secao 14.3.
+
+    **`fracao_bps` tem de ser a mesma de quem esta sendo comparado.** A secao
+    14.3 define B1 como "entra e sai em momentos aleatorios, com o MESMO
+    TAMANHO DE POSICAO e as mesmas taxas" - e tamanho de posicao estava
+    fixado em 100% aqui enquanto a regra do agente operava com 30%.
+
+    O efeito nao e pequeno e nao e sutil: o custo de cada ida e volta e
+    proporcional ao nocional, entao operar com 30% do caixa paga 30% do
+    pedagio por operacao. Com 389 idas e voltas a 27 bps, o acaso termina em
+    US$ 349 com fracao cheia e em US$ 730 com 30% - e a diferenca inteira e
+    tamanho de posicao, sem uma unica escolha de momento.
+
+    E o mesmo erro da D19 um nivel abaixo: casar o giro e nao casar o
+    tamanho mede dimensionamento em vez de timing.
+    """
     repeticoes = repeticoes if repeticoes is not None else max(
         MIN_REPETICOES, config.b1_repetitions
     )
@@ -312,7 +329,8 @@ def rodar_b1(
             "operacoes_alvo": operacoes_alvo,
             "repeticoes": repeticoes,
             "semente_base": semente,
-            "casamento": "numero de operacoes do B3 (D19)",
+            "fracao_bps": fracao_bps,
+            "casamento": "numero de operacoes e tamanho de posicao (D19, secao 14.3)",
         },
         condicoes(config),
     )
@@ -326,7 +344,7 @@ def rodar_b1(
             barras, pares,
             caixa_inicial_cents=config.seed_capital_usd_cents,
             config=config,
-            fracao_bps=10_000,
+            fracao_bps=fracao_bps,
         )
         equities.append(r.equity_final_cents)
         linhas.append(
@@ -470,10 +488,13 @@ def rodar_comparacao(
         conn, config_version_id=config_version_id,
         seed_capital_usd_cents=semente_cents, agent_id="baseline-B1-rep",
     )
+    # Explicito, e nao herdado do default: o B3 opera com o caixa cheio, e a
+    # fracao do controle tem de vir de quem ele controla, sempre.
     distribuicao = rodar_b1(
         conn, run_id=run_b1, dataset_id=dataset_id, config=config,
-        operacoes_alvo=operacoes_alvo, semente=semente,
-        repeticoes=repeticoes, barras=barras,
+        operacoes_alvo=operacoes_alvo,
+        fracao_bps=regra_b3(config).position_fraction_bps,
+        semente=semente, repeticoes=repeticoes, barras=barras,
     )
     representativa = rodar_b1_representativa(
         conn, run_id=run_b1, dataset_id=dataset_id, config=config,
@@ -510,11 +531,12 @@ def b1_casado_com(
     config: ExperimentConfig,
     config_version_id: int,
     operacoes_alvo: int,
+    fracao_bps: int,
     semente: int,
     repeticoes: int | None = None,
     barras: Sequence[BarraCarregada] | None = None,
 ) -> dict:
-    """A distribuicao do acaso com o MESMO giro de quem esta sendo comparado.
+    """A distribuicao do acaso com o mesmo giro E o mesmo tamanho de posicao.
 
     A D19 (ADR 0014) fixou isto para o B3, e a razao vale identica para o
     agente: cada ida e volta paga um pedagio fixo, entrada aleatoria nao tem
@@ -540,16 +562,16 @@ def b1_casado_com(
     )
     distribuicao = rodar_b1(
         conn, run_id=run_id, dataset_id=dataset_id, config=config,
-        operacoes_alvo=max(1, operacoes_alvo), semente=semente,
-        repeticoes=repeticoes, barras=barras,
+        operacoes_alvo=max(1, operacoes_alvo), fracao_bps=fracao_bps,
+        semente=semente, repeticoes=repeticoes, barras=barras,
     )
     encerrar_run(conn, run_id, "concluido")
     log.info(
         "baselines.b1_casado_com_o_agente",
         extra={"run_id": run_id, "operacoes_alvo": operacoes_alvo,
-               "p50": distribuicao["p50"]},
+               "fracao_bps": fracao_bps, "p50": distribuicao["p50"]},
     )
-    return {**distribuicao, "run_id": run_id}
+    return {**distribuicao, "run_id": run_id, "fracao_bps": fracao_bps}
 
 
 def b1_do_agente(conn: sqlite3.Connection) -> dict | None:
@@ -581,10 +603,24 @@ def b1_do_agente(conn: sqlite3.Connection) -> dict | None:
         " WHERE baseline = 'B1' AND run_id = ?",
         (run_id,),
     ).fetchone()["n"]
+    # A fracao vem da regra do baseline, gravada quando ele rodou. Sem ela na
+    # tela, dois B1 com dimensionamentos diferentes sao indistinguiveis - e a
+    # diferenca entre eles e maior que qualquer efeito de timing.
+    regra = conn.execute(
+        "SELECT r.params_json FROM baseline_result b"
+        " JOIN rule r ON r.id = b.rule_id"
+        " WHERE b.run_id = ? LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    fracao = None
+    if regra:
+        fracao = json.loads(regra["params_json"]).get("fracao_bps")
+
     return {
         "run_id": run_id,
         "repeticoes": len(equities),
         "operacoes_alvo": int(alvo or 0),
+        "fracao_bps": fracao,
         "p5": percentil(equities, 5),
         "p50": percentil(equities, 50),
         "p95": percentil(equities, 95),

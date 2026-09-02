@@ -1329,3 +1329,61 @@ def test_sem_operacao_nao_ha_b1_para_casar(
     assert resultado.execucao["operacoes"] == 0
     assert resultado.b1_casado is None
     assert resultado.como_dict()["excesso_sobre_b1_p50_cents"] is None
+
+
+def test_o_b1_casado_usa_o_mesmo_tamanho_de_posicao_da_regra(
+    conn: sqlite3.Connection, cenario, settings
+) -> None:
+    """Secao 14.3: "mesmo tamanho de posicao e as mesmas taxas".
+
+    Casar o giro e nao casar o tamanho mede DIMENSIONAMENTO em vez de timing,
+    que e o mesmo erro da D19 um nivel abaixo. O custo de cada ida e volta e
+    proporcional ao nocional: operar com 30% do caixa paga 30% do pedagio por
+    operacao, e com centenas de operacoes isso domina qualquer efeito de
+    escolha de momento.
+
+    Foi assim que o primeiro resultado do agente em producao apareceu "acima
+    do p95" de um acaso que operava com o caixa inteiro contra uma regra que
+    operava com 30%.
+    """
+    proposta_com_fracao = json.dumps(
+        {
+            "familia": "banda_desvio", "rapida": None, "lenta": None,
+            "periodo": 50, "desvios_milesimos": 2500,
+            "position_fraction_bps": 3000, "stop_loss_bps": 800,
+            "expectativa": "poucas operacoes, fracao pequena",
+            "confianca_ppm": 300_000,
+        }
+    )
+    resultado = _rodar_ciclo(
+        conn, cenario, settings,
+        AdaptadorFalso([INTERPRETACAO_OK, proposta_com_fracao]),
+    )
+    assert resultado.b1_casado is not None
+    assert resultado.b1_casado["fracao_bps"] == 3000
+
+    from app.maos_rapidas import baselines
+
+    assert baselines.b1_do_agente(conn)["fracao_bps"] == 3000
+
+
+def test_fracao_menor_faz_o_acaso_perder_menos(conn: sqlite3.Connection, cenario) -> None:
+    """A prova de que o casamento importa: se nao importasse, nao precisaria.
+
+    Mesma semente, mesmo giro, mesma janela - so o tamanho da posicao muda.
+    Se as duas distribuicoes fossem parecidas, casar o tamanho seria
+    preciosismo. Elas nao sao.
+    """
+    from app.maos_rapidas import baselines
+
+    dataset_id, cfg = cenario
+    barras = executor.carregar_janela(conn, dataset_id)
+    cheio = baselines.b1_casado_com(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        operacoes_alvo=60, fracao_bps=10_000, semente=42, barras=barras,
+    )
+    parcial = baselines.b1_casado_com(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        operacoes_alvo=60, fracao_bps=3_000, semente=42, barras=barras,
+    )
+    assert parcial["p50"] > cheio["p50"]
