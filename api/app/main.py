@@ -92,11 +92,9 @@ async def lifespan(app: FastAPI):
             f"VOLUME AUSENTE: {settings.db_path.parent} esta no MESMO "
             f"dispositivo que a raiz (device={dev_dados}). Isso significa que "
             "e um diretorio da propria imagem, e nao um volume - o banco "
-            "seria gravado normalmente e PERDIDO no proximo deploy.
-"
-            "  Correcao: Railway > servico api > Settings > Volumes > "
-            "Add Volume, com mount path exatamente /data
-"
+            "seria gravado normalmente e PERDIDO no proximo deploy. "
+            "Correcao: Railway > servico api > Settings > Volumes > "
+            "Add Volume, com mount path exatamente /data. "
             "  Depois disso, device_db_dir e device_raiz devem ser diferentes "
             "no log volume.check."
         )

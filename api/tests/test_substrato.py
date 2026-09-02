@@ -364,7 +364,7 @@ def test_producao_recusa_subir_sem_volume(
     monkeypatch.setattr(store, "volume_montado", lambda _: False)
     monkeypatch.setattr("app.main.volume_montado", lambda _: False)
 
-    with pytest.raises(RuntimeError, match="volume montado"):
+    with pytest.raises(RuntimeError, match="VOLUME AUSENTE"):
         with TestClient(criar_app()):
             pass
 
