@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
 from .config import service as config_service
+from .ledger import contas as ledger_contas
 from .logging_setup import configurar_logging
 from .settings import SECRET_FIELDS, get_settings
 from .store import (
@@ -102,6 +103,8 @@ async def lifespan(app: FastAPI):
     conn = conectar(settings.db_path)
     schema_version = migrar(conn)
     versao_config = config_service.bootstrap(conn, settings)
+    # Idempotente: cria so o que faltar, nunca altera conta existente.
+    ledger_contas.garantir_plano(conn)
 
     app.state.settings = settings
     app.state.conn = conn

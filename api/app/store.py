@@ -13,7 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from .migrations import MIGRACOES
 
@@ -40,6 +42,29 @@ def conectar(db_path: Path) -> sqlite3.Connection:
     for pragma in _PRAGMAS:
         conn.execute(pragma)
     return conn
+
+
+@contextmanager
+def bloco_atomico(conn: sqlite3.Connection, nome: str = "bloco") -> Iterator[None]:
+    """Tudo ou nada, aninhavel.
+
+    SAVEPOINT em vez de BEGIN porque este bloco pode rodar dentro de outro que
+    ja abriu transacao - e um `BEGIN` aninhado falha com "cannot start a
+    transaction within a transaction". Em autocommit, o SAVEPOINT abre a
+    transacao sozinho.
+
+    Importa no ledger: uma transacao contabil que grave metade dos lancamentos
+    e quebre no meio deixaria o livro desequilibrado, que e exatamente o que a
+    conferencia de partidas dobradas existe para tornar impossivel.
+    """
+    conn.execute(f"SAVEPOINT {nome}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO {nome}")
+        conn.execute(f"RELEASE {nome}")
+        raise
+    conn.execute(f"RELEASE {nome}")
 
 
 def volume_gravavel(caminho: Path) -> bool:

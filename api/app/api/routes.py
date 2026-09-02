@@ -21,6 +21,7 @@ from ..dataset import ingest as dataset_ingest
 from ..dataset import loader as dataset_loader
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
+from ..ledger import livro
 from ..security import exigir_token_de_servico
 from ..settings import Settings
 from ..store import versao_schema, volume_gravavel, volume_montado
@@ -228,6 +229,106 @@ def dataset_ingerir(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
     return resultado.como_dict()
+
+
+# ------------------------------------------------------------------ ledger
+
+
+class PedidoRun(BaseModel):
+    author: str = Field(min_length=1, max_length=120)
+
+
+@router.get("/ledger")
+def ledger_estado(request: Request) -> dict[str, Any]:
+    """Saldos derivados e o resultado das conferencias.
+
+    As conferencias vao junto do saldo de proposito: um numero de dinheiro sem
+    a prova de que o livro fecha e so um numero.
+    """
+    conn = _conn(request)
+    violacoes = livro.conferir_partidas_dobradas(conn)
+    divergencias = livro.reconciliar(conn)
+    vinculos = livro.conferir_vinculo_inferencia(conn)
+
+    return {
+        "run_ativo": config_service.run_ativo(conn),
+        "carteira": livro.carteira(conn),
+        "contas": livro.saldos(conn),
+        "conferencias": {
+            "partidas_dobradas_ok": not violacoes,
+            "violacoes": violacoes,
+            "saldo_reconciliado_ok": not divergencias,
+            "divergencias": divergencias,
+            "vinculos_ok": not any(vinculos.values()),
+            "vinculos": vinculos,
+            "sem_ponto_flutuante": livro.colunas_em_ponto_flutuante(conn) == [],
+        },
+        "eventos": conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_event"
+        ).fetchone()["n"],
+        "transacoes": conn.execute(
+            "SELECT COUNT(*) AS n FROM ledger_transaction"
+        ).fetchone()["n"],
+    }
+
+
+@router.get("/ledger/transacoes")
+def ledger_transacoes(request: Request, limite: int = 50) -> dict[str, Any]:
+    """Historico. Estorno e original aparecem os dois - nada e apagado."""
+    linhas = _conn(request).execute(
+        """
+        SELECT t.id, t.kind, t.occurred_at, t.posted_at, t.run_id,
+               t.fx_rate_micro, t.fx_rate_date, t.agent_event_id,
+               t.reverses_transaction_id, t.memo,
+               (SELECT COUNT(*) FROM ledger_entry WHERE transaction_id = t.id)
+                   AS lancamentos
+        FROM ledger_transaction t
+        ORDER BY t.id DESC LIMIT ?
+        """,
+        (limite,),
+    ).fetchall()
+    return {"total": len(linhas), "items": [dict(l) for l in linhas]}
+
+
+@router.post("/run", status_code=status.HTTP_201_CREATED)
+def run_abrir(request: Request, pedido: PedidoRun = Body(...)) -> dict[str, Any]:
+    """Abre um run e credita o capital semente como lancamento (criterio 7)."""
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ja existe run ativo; encerre antes de abrir outro",
+        )
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+
+    log.info("run.abertura_pedida", extra={"author": pedido.author})
+    run_id, tx_id = livro.abrir_run(
+        conn,
+        config_version_id=atual.id,
+        seed_capital_usd_cents=atual.config.seed_capital_usd_cents,
+    )
+    return {
+        "run_id": run_id,
+        "transaction_id": tx_id,
+        "config_version_id": atual.id,
+        "seed_capital_usd_cents": atual.config.seed_capital_usd_cents,
+        "aviso": "a configuracao esta congelada enquanto o run estiver ativo",
+    }
+
+
+@router.post("/run/{run_id}/encerrar")
+def run_encerrar(
+    request: Request, run_id: int, estado: str = Body(embed=True)
+) -> dict[str, Any]:
+    try:
+        livro.encerrar_run(_conn(request), run_id, estado)
+    except livro.TransacaoInvalida as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+    return {"run_id": run_id, "state": estado}
 
 
 # --------------------------------------------------------------- sentinela
