@@ -424,9 +424,10 @@ def test_avaliacao_posterior_e_evento_FILHO_e_nao_edicao(
         expectation="deve superar B3", confidence_ppm=700_000,
     )
     avaliacao, _ = registrar_custo_reflexao(
-        conn, run_id=run, node="avaliacao", kind="avaliacao",
+        conn, run_id=run, node="avaliar_resultado", kind="avaliacao",
         custo_usd_minor=0, fx_rate_micro=FX, fx_rate_date=DATA_FX,
         parent_event_id=decisao,
+        evaluation_json='{"realizado": {"patrimonio_final_cents": 1}}',
     )
     linha = conn.execute(
         "SELECT parent_event_id FROM agent_event WHERE id = ?", (avaliacao,)
@@ -588,7 +589,7 @@ def test_custo_zero_nao_cria_transacao_nenhuma(
     """
     antes = conn.execute("SELECT COUNT(*) AS n FROM ledger_transaction").fetchone()["n"]
     event_id, tx = registrar_custo_reflexao(
-        conn, run_id=run, node="avaliacao", kind="avaliacao",
+        conn, run_id=run, node="observar", kind="observacao",
         custo_usd_minor=0, fx_rate_micro=FX, fx_rate_date=DATA_FX,
     )
     assert tx is None
@@ -614,7 +615,7 @@ def test_nao_sobra_transacao_aberta_depois_de_operar(
         custo_usd_minor=42, fx_rate_micro=FX, fx_rate_date=DATA_FX,
     )
     registrar_custo_reflexao(
-        conn, run_id=run, node="n", kind="avaliacao",
+        conn, run_id=run, node="n", kind="observacao",
         custo_usd_minor=0, fx_rate_micro=FX, fx_rate_date=DATA_FX,
     )
     tx = registrar(

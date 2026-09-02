@@ -676,12 +676,20 @@ def test_um_evento_por_no_com_pai_encadeado(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
     caminho = ciclo.caminho_percorrido(conn, resultado.run_id)
-    assert [e["node"] for e in caminho] == [
+
+    # Os quatro NOS DO GRAFO, nesta ordem. A separacao importa: o quinto
+    # evento e a avaliacao posterior, que nao e no do grafo nenhum - ela roda
+    # depois das maos rapidas, e as maos rapidas nao sao nos (regra 3).
+    nos_do_grafo = [e["node"] for e in caminho if e["kind"] != "avaliacao"]
+    assert nos_do_grafo == [
         "observar", "interpretar", "propor_regra", "registrar_intencao"
     ]
-    # Encadeados: do ultimo se chega ao primeiro subindo por parent_event_id.
+    assert [e["node"] for e in caminho][-1] == "avaliar_resultado"
+
+    # Encadeados: do ultimo NO se chega ao primeiro subindo por
+    # parent_event_id.
     por_id = {e["id"]: e for e in caminho}
-    atual = caminho[-1]
+    atual = [e for e in caminho if e["node"] == "registrar_intencao"][-1]
     subidas = 0
     while atual["parent_event_id"] is not None:
         atual = por_id[atual["parent_event_id"]]
@@ -1230,8 +1238,11 @@ def test_a_rota_do_agente_mostra_o_caminho_percorrido(
         adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
     )
     corpo = client.get("/api/agente").json()
+    # Cinco eventos: os quatro nos do grafo e a avaliacao posterior, que nao e
+    # no de grafo nenhum - ela roda depois das maos rapidas (regra 3).
     assert [e["node"] for e in corpo["caminho"]] == [
-        "observar", "interpretar", "propor_regra", "registrar_intencao"
+        "observar", "interpretar", "propor_regra", "registrar_intencao",
+        "avaliar_resultado",
     ]
     assert corpo["regra_ativa"]["expectation"]
     assert corpo["gasto"]["gasto_cents"] > 0

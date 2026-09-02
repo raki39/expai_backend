@@ -912,6 +912,53 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        8,
+        "incremento 7: avaliacao posterior como evento filho da decisao",
+        """
+        -- ==================================================================
+        -- A avaliacao posterior e EVENTO NOVO (R25.3, regra 17).
+        --
+        -- Expectativa e confianca sao declaradas ANTES da execucao e ficam na
+        -- decisao. Comparar depois o esperado com o realizado e informacao
+        -- nova - e informacao nova nao entra editando o passado: entra como
+        -- evento filho. `agent_event` ja recusa UPDATE e DELETE por gatilho
+        -- desde a migracao 3, entao a alternativa nem esta disponivel.
+        --
+        -- Coluna propria, e nao `usage_bruto_json`: aquele campo descreve o
+        -- consumo que o provedor informou. Guardar avaliacao dentro dele
+        -- poria um valor a descrever coisa diferente do seu nome, que e a
+        -- forma exata como este projeto ja se enganou cinco vezes.
+        -- ==================================================================
+        ALTER TABLE agent_event ADD COLUMN evaluation_json TEXT;
+
+        -- As duas metades da invariante do R25.3, impostas pelo BANCO.
+        --
+        -- Um evento de avaliacao sem pai nao e avaliacao de nada, e um sem
+        -- payload nao registra o que foi comparado. Deixar isso por conta da
+        -- disciplina do modulo Python significaria que um defeito ali
+        -- mascararia a ausencia da regra aqui - o mesmo motivo pelo qual as
+        -- partidas dobradas moram em gatilho.
+        CREATE TRIGGER avaliacao_exige_pai_e_payload
+        BEFORE INSERT ON agent_event
+        WHEN NEW.kind = 'avaliacao'
+             AND (NEW.parent_event_id IS NULL OR NEW.evaluation_json IS NULL)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'avaliacao e evento filho da decisao e carrega o que comparou');
+        END;
+
+        CREATE TRIGGER evaluation_json_so_em_avaliacao
+        BEFORE INSERT ON agent_event
+        WHEN NEW.evaluation_json IS NOT NULL AND NEW.kind <> 'avaliacao'
+        BEGIN
+            SELECT RAISE(ABORT,
+                'evaluation_json pertence ao evento de avaliacao');
+        END;
+
+        CREATE INDEX idx_event_kind ON agent_event(kind);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

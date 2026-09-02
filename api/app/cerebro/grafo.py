@@ -118,6 +118,7 @@ def _evento(
     parent_event_id: int | None,
     outputs_digest: str | None = None,
     expectation: str | None = None,
+    confidence_ppm: int | None = None,
 ) -> int:
     event_id, _ = registrar_custo_reflexao(
         dep.conn,
@@ -131,6 +132,7 @@ def _evento(
         parent_event_id=parent_event_id,
         outputs_digest=outputs_digest,
         expectation=expectation,
+        confidence_ppm=confidence_ppm,
     )
     return event_id
 
@@ -327,7 +329,13 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
         kind="intencao",
         parent_event_id=_ultimo_evento(estado),
         outputs_digest=regra.hash(),
+        # As DUAS metades da regra 17, no mesmo evento e antes da execucao.
+        # `confidence_ppm` existia na coluna, era lido por
+        # `caminho_percorrido` e nunca era escrito: o painel mostrava um campo
+        # permanentemente vazio prometendo a confianca declarada. Sexta
+        # ocorrencia do padrao neste projeto.
         expectation=bruta.expectativa,
+        confidence_ppm=bruta.confianca_ppm,
     )
     return {
         "rule_id": rule_id,

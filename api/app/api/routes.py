@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 # O cerebro lento e importado aqui, mas nenhum SDK de provedor vem junto:
@@ -37,6 +38,10 @@ from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..ledger import livro
 from ..maos_rapidas import baselines
 from ..maos_rapidas import curva as curva_de_patrimonio
+from ..relatorio import montar as relatorio_montar
+from ..relatorio import reprodutibilidade as relatorio_reprodutibilidade
+from ..relatorio import texto as relatorio_texto
+from ..relatorio import vinculo as relatorio_vinculo
 from ..simulador import execucao as simulador
 from ..security import exigir_token_de_servico
 from ..settings import Settings
@@ -763,6 +768,88 @@ def agente_rodar(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
         )
     return resultado.como_dict()
+
+
+class PedidoProva(BaseModel):
+    """Semente da prova de reprodutibilidade.
+
+    Opcional: ausente usa `default_seed` da config. E entrada do run, e nao
+    campo do `config_hash` - e o que torna enunciavel a segunda metade da
+    prova, "digest diferente com config_hash igual".
+    """
+
+    semente: int | None = None
+
+# --------------------------------------------------------------- fechamento
+#
+# O relatorio da 0A. Uma funcao so o monta - a mesma que o `python -m
+# app.relatorio` usa para escrever o arquivo. Dois geradores independentes
+# poderiam discordar, e este e o documento em que a 0A responde a propria
+# pergunta: o pior lugar do sistema para duas versoes da verdade.
+
+
+@router.get("/relatorio")
+def relatorio(request: Request, run_id: int | None = None) -> dict[str, Any]:
+    """O relatorio de fechamento em JSON. `run_id` ausente usa o ultimo run."""
+    return relatorio_montar.montar(_conn(request), run_id)
+
+
+@router.get("/relatorio/markdown", response_class=PlainTextResponse)
+def relatorio_markdown(request: Request, run_id: int | None = None) -> str:
+    """O mesmo relatorio, para humano. So formata; nao calcula nada."""
+    return relatorio_texto.markdown(
+        relatorio_montar.montar(_conn(request), run_id)
+    )
+
+
+@router.get("/vinculo/execucao/{execution_id}")
+def vinculo_da_execucao(request: Request, execution_id: int) -> dict[str, Any]:
+    """De uma execucao qualquer ao evento cognitivo que a autorizou (R25.2)."""
+    return relatorio_vinculo.da_execucao_ao_evento(_conn(request), execution_id)
+
+
+@router.get("/vinculo/evento/{event_id}")
+def vinculo_do_evento(request: Request, event_id: int) -> dict[str, Any]:
+    """Da decisao ao custo, a regra, as execucoes e ao resultado (R25.2)."""
+    return relatorio_vinculo.do_evento_ao_resultado(_conn(request), event_id)
+
+
+@router.post("/reprodutibilidade", status_code=status.HTTP_201_CREATED)
+def reprodutibilidade_provar(
+    request: Request, pedido: PedidoProva = Body(default=PedidoProva())
+) -> dict[str, Any]:
+    """Roda a prova dos tres digests. Cria tres runs proprios, sem LLM.
+
+    POST porque escreve: tres runs de B1 pelo ledger. Nenhuma chamada a
+    provedor acontece aqui - a prova de reprodutibilidade nao pode custar
+    dinheiro nem depender de o cache estar quente.
+    """
+    conn = _conn(request)
+    config_service.exigir_hash_integro(conn)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "nenhuma configuracao gravada")
+
+    meta = dataset_loader.dataset_vigente(conn)
+    if meta is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "dataset ainda nao ingerido")
+
+    ativo = config_service.run_ativo(conn)
+    if ativo is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"run {ativo} esta ativo; encerre antes"
+        )
+
+    try:
+        return relatorio_reprodutibilidade.provar(
+            conn,
+            dataset_id=meta.id,
+            config=versao.config,
+            config_version_id=versao.id,
+            semente=pedido.semente,
+        )
+    except ValueError as erro:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(erro)) from erro
 
 
 # --------------------------------------------------------------- sentinela

@@ -30,7 +30,7 @@ from ..regra.schema import Regra
 from ..settings import Settings
 from ..simulador import execucao as simulador
 from ..simulador.execucao import condicoes_do_run
-from . import grafo, propostas
+from . import avaliacao, grafo, propostas
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +61,10 @@ class ResultadoDoCiclo:
     gasto: dict
     sobreposicao: dict
     condicoes_validade: str
+    # O evento filho da decisao que compara o declarado com o realizado
+    # (R25.3). `None` quando o cerebro nao declarou nada - nao ha o que
+    # avaliar, e pendurar a comparacao em quem nao afirmou seria invencao.
+    avaliacao_event_id: int | None
 
     def como_dict(self) -> dict:
         return {
@@ -85,6 +89,7 @@ class ResultadoDoCiclo:
             "gasto": self.gasto,
             "sobreposicao_amostral": self.sobreposicao,
             "condicoes_validade": self.condicoes_validade,
+            "avaliacao_event_id": self.avaliacao_event_id,
         }
 
 
@@ -170,6 +175,21 @@ def rodar(
         ).fetchone()["n"]
     )
 
+    # A avaliacao posterior: evento NOVO, filho da decisao (R25.3, regra 17).
+    #
+    # Depois do encerramento de proposito. "Posterior" e o adjetivo que define
+    # este evento: ele existe justamente porque o resultado so e conhecido
+    # quando tudo acabou. Emiti-lo antes seria declarar realizado o que ainda
+    # nao aconteceu - e o erro simetrico ao de editar a decisao depois.
+    avaliacao_event_id = avaliacao.registrar(
+        conn,
+        run_id=run_id,
+        config=config,
+        b1_casado=b1_casado,
+        operacoes=resultado.operacoes,
+        reflexoes=reflexoes,
+    )
+
     # Do LEDGER, e nao de um acumulador do executor: o saldo tem uma fonte
     # so (regra 16). E o mesmo `caixa_cents` que os baselines usam, entao os
     # numeros sao comparaveis por construcao e nao por coincidencia.
@@ -197,6 +217,7 @@ def rodar(
         gasto=livro.gasto_com_reflexao(conn, run_id),
         sobreposicao=propostas.sobreposicao_amostral(conn, run_id),
         condicoes_validade=condicoes_do_run(conn, run_id),
+        avaliacao_event_id=avaliacao_event_id,
     )
     log.info(
         "cerebro.ciclo",

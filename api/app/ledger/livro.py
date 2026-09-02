@@ -302,6 +302,7 @@ def registrar_custo_reflexao(
     price_table_version: str | None = None,
     custo_usd_micro: int | None = None,
     dinheiro_real: bool = True,
+    evaluation_json: str | None = None,
 ) -> tuple[int, int | None]:
     """Grava o evento cognitivo e o dinheiro que ele custou, amarrados.
 
@@ -365,15 +366,15 @@ def registrar_custo_reflexao(
             " tokens_cache_read, tokens_cache_write, price_table_version,"
             " usage_bruto_json, cost_usd_minor, cost_usd_micro, expectation,"
             " confidence_ppm, inputs_digest, outputs_digest,"
-            " ledger_transaction_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " ledger_transaction_id, evaluation_json)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 run_id, parent_event_id, quando, node, kind, tier, provider, model,
                 uso.tokens_in, uso.tokens_out,
                 uso.tokens_cache_read, uso.tokens_cache_write, price_table_version,
                 json.dumps(uso.bruto, ensure_ascii=False) if uso.bruto else None,
                 custo_usd_minor, custo_usd_micro, expectation, confidence_ppm,
-                inputs_digest, outputs_digest, tx_id,
+                inputs_digest, outputs_digest, tx_id, evaluation_json,
             ),
         )
         event_id = int(cur.lastrowid)
