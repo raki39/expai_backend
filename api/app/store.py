@@ -11,6 +11,7 @@ Regras que valem para todo o projeto:
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -55,6 +56,30 @@ def volume_gravavel(caminho: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def volume_montado(caminho: Path) -> bool | None:
+    """O caminho esta num volume montado, ou e diretorio da imagem?
+
+    Escrever com sucesso NAO prova persistencia: o Dockerfile cria /data na
+    propria imagem, entao o app grava normalmente mesmo sem volume - e perde
+    tudo no redeploy seguinte, sem erro nenhum. Foi exatamente o que
+    aconteceu.
+
+    Um volume montado e outro dispositivo de arquivos. Comparar o device do
+    caminho com o de "/" distingue os dois casos.
+
+    Retorna None quando a checagem nao se aplica (Windows, por exemplo), para
+    nao confundir "nao sei" com "nao esta montado".
+    """
+    if os.name != "posix":
+        return None
+    try:
+        dev_alvo = caminho.stat().st_dev
+        dev_raiz = Path("/").stat().st_dev
+    except OSError:
+        return None
+    return dev_alvo != dev_raiz
 
 
 def versao_schema(conn: sqlite3.Connection) -> int:

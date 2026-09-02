@@ -67,7 +67,24 @@ if ! touch "$DIR_BANCO/.escrita_ok" 2>/dev/null; then
 fi
 rm -f "$DIR_BANCO/.escrita_ok"
 
-registrar INFO startup.preflight_ok ",\"db_dir_gravavel\":true"
+# Escrever com sucesso NAO prova persistencia. O Dockerfile cria /data na
+# propria imagem, entao o app grava normalmente mesmo sem volume - e perde
+# tudo no redeploy seguinte, em silencio.
+#
+# Um volume montado e outro dispositivo de arquivos. Se o device de
+# $DIR_BANCO for o mesmo de "/", nao ha volume: e diretorio da imagem.
+DEV_DADOS=$(df -P "$DIR_BANCO" 2>/dev/null | tail -1 | awk '{print $1}')
+DEV_RAIZ=$(df -P / 2>/dev/null | tail -1 | awk '{print $1}')
+
+# AVISO, nao bloqueio: `df` varia entre ambientes e esta checagem nao pode
+# ser testada fora de Linux. Quem RECUSA subir e a checagem em Python
+# (app/main.py), que compara st_dev e tem teste unitario. Aqui so adiantamos
+# o diagnostico no log.
+if [ "${APP_ENV:-local}" = "railway" ] && [ -n "$DEV_DADOS" ] && [ "$DEV_DADOS" = "$DEV_RAIZ" ]; then
+    registrar WARNING startup.volume_ausente ",\"motivo\":\"${DIR_BANCO} parece nao estar num volume montado\",\"device\":\"${DEV_DADOS}\",\"acao\":\"Railway > Settings > Volumes: mount path exatamente /data\""
+fi
+
+registrar INFO startup.preflight_ok     ",\"db_dir_gravavel\":true,\"device\":\"${DEV_DADOS:-desconhecido}\",\"volume_montado\":$([ "$DEV_DADOS" != "$DEV_RAIZ" ] && echo true || echo false)"
 
 # ------------------------------------------------------------------ start
 # `exec` e o ponto do script: o uvicorn substitui este shell e vira PID 1,

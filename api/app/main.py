@@ -25,7 +25,7 @@ from .api.routes import router
 from .config import service as config_service
 from .logging_setup import configurar_logging
 from .settings import SECRET_FIELDS, get_settings
-from .store import conectar, migrar, volume_gravavel
+from .store import conectar, migrar, volume_gravavel, volume_montado
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,18 @@ async def lifespan(app: FastAPI):
             "Na Railway, confira se o volume esta montado em /data."
         )
 
+    # Escrever com sucesso nao prova persistencia. Em producao, exigimos que
+    # o diretorio do banco esteja num volume DE VERDADE - senao o servico
+    # sobe, grava, e perde tudo no proximo deploy sem avisar.
+    montado = volume_montado(settings.db_path.parent)
+    if settings.app_env == "railway" and montado is False:
+        raise RuntimeError(
+            f"{settings.db_path.parent} NAO esta num volume montado - e um "
+            "diretorio da propria imagem, e o banco seria perdido no proximo "
+            "deploy. Na Railway: Settings > Volumes, monte um volume com "
+            "mount path exatamente /data."
+        )
+
     conn = conectar(settings.db_path)
     schema_version = migrar(conn)
     versao_config = config_service.bootstrap(conn, settings)
@@ -76,6 +88,7 @@ async def lifespan(app: FastAPI):
             "app_env": settings.app_env,
             "db_path": str(settings.db_path),
             "schema_version": schema_version,
+            "volume_montado": montado,
             "config_version": versao_config.id,
             "config_hash": versao_config.config_hash,
             "build": app.state.build_id,

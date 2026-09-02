@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 
@@ -315,3 +316,76 @@ def test_producao_exige_token(
 
     with pytest.raises(ValueError, match="API_SERVICE_TOKEN"):
         Settings()
+
+
+# ------------------------------------- deteccao de volume montado de verdade
+
+
+def test_volume_montado_falso_quando_e_diretorio_comum(tmp_path: Path) -> None:
+    """Escrever com sucesso NAO prova persistencia.
+
+    O Dockerfile cria /data na imagem, entao o app grava normalmente mesmo
+    sem volume - e perde tudo no redeploy. Foi o que aconteceu no primeiro
+    deploy, e `volume_gravavel` sozinho nao pegou.
+    """
+    from app.store import volume_gravavel, volume_montado
+
+    alvo = tmp_path / "data"
+    alvo.mkdir()
+
+    # Gravavel: sim. Persistente: nao - e o mesmo dispositivo da raiz.
+    assert volume_gravavel(alvo) is True
+    if os.name == "posix":
+        assert volume_montado(alvo) is False
+    else:
+        assert volume_montado(alvo) is None
+
+
+def test_volume_montado_none_fora_de_posix(monkeypatch: pytest.MonkeyPatch,
+                                           tmp_path: Path) -> None:
+    """"Nao sei" nao pode virar "nao esta montado"."""
+    import app.store as store
+
+    monkeypatch.setattr(store.os, "name", "nt")
+    assert store.volume_montado(tmp_path) is None
+
+
+def test_producao_recusa_subir_sem_volume(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A trava que faltava: falhar alto em vez de perder dados em silencio."""
+    import app.store as store
+    from app.main import criar_app
+
+    monkeypatch.setenv("APP_ENV", "railway")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "data" / "fase0a.sqlite3"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data" / "datasets"))
+    get_settings.cache_clear()
+    monkeypatch.setattr(store, "volume_montado", lambda _: False)
+    monkeypatch.setattr("app.main.volume_montado", lambda _: False)
+
+    with pytest.raises(RuntimeError, match="volume montado"):
+        with TestClient(criar_app()):
+            pass
+
+
+def test_producao_sobe_com_volume_montado(
+    ambiente: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.main import criar_app
+
+    monkeypatch.setenv("APP_ENV", "railway")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "data" / "fase0a.sqlite3"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data" / "datasets"))
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.main.volume_montado", lambda _: True)
+
+    with TestClient(criar_app()) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        assert c.get("/api/health").status_code == 200
+
+
+def test_health_separa_gravavel_de_montado(client: TestClient) -> None:
+    corpo = client.get("/api/health").json()
+    assert "volume_gravavel" in corpo
+    assert "volume_montado" in corpo

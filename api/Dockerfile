@@ -33,8 +33,13 @@ COPY api/pytest.ini ./
 COPY api/start-backend.sh ./
 RUN chmod +x ./start-backend.sh
 
-# Diretorio do volume. Em producao a Railway monta o volume aqui e substitui
-# o conteudo; existe para o container tambem funcionar sem volume.
+# Diretorio do volume, para o container tambem funcionar sem volume montado
+# (compose local, teste rapido).
+#
+# CUIDADO: e justamente por existir na imagem que "consigo escrever em /data"
+# NAO prova persistencia. Sem volume, o app grava aqui e perde tudo no
+# redeploy. Por isso o start-backend.sh compara o device de /data com o de /
+# e recusa subir em producao se forem o mesmo.
 RUN mkdir -p /data/datasets
 
 # ---------------------------------------------------------------------------

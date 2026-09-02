@@ -19,7 +19,7 @@ from ..config import service as config_service
 from ..config.service import ConfigCongelada, SemMudanca, TetoExcedido
 from ..security import exigir_token_de_servico
 from ..settings import Settings
-from ..store import versao_schema, volume_gravavel
+from ..store import versao_schema, volume_gravavel, volume_montado
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,10 @@ def health(request: Request) -> dict[str, Any]:
         "build": request.app.state.build_id,
         "db_path": str(settings.db_path),
         "db_path_absoluto": settings.db_path.is_absolute(),
+        # Escrever com sucesso NAO prova persistencia (o /data pode ser da
+        # propria imagem). As duas linhas dizem coisas diferentes.
         "volume_gravavel": volume_gravavel(settings.db_path.parent),
+        "volume_montado": volume_montado(settings.db_path.parent),
         "data_dir": str(settings.data_dir),
         "schema_version": versao_schema(conn),
         "config_version": atual.id if atual else None,
