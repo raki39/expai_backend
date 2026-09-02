@@ -840,3 +840,32 @@ def test_restringir_o_digest_ao_livro_simulado_nao_muda_digest_de_baseline(
         return h.hexdigest()
 
     assert executor.digest_do_run(conn, run_id) == digest_dos_dois_livros(run_id)
+
+
+def test_o_resumo_diz_sob_qual_config_a_comparacao_rodou(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Numero sem a config que o produziu e numero que parou de descrever.
+
+    Alteracao material cria versao nova e invalida comparacao que a atravesse
+    (secao 10.2.3). Se o painel mostrar a comparacao antiga ao lado da config
+    nova sem dizer nada, quem le compara coisas de experimentos diferentes.
+    """
+    from app.config import service
+    from app.settings import get_settings
+
+    dataset_id, cfg = cenario
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1, semente=42
+    )
+    resumo = baselines.resumo_comparacao(conn)
+    assert resumo["sob_a_config_vigente"] is True
+    assert resumo["config_versions_da_comparacao"] == [1]
+
+    # Uma alteracao material cria a versao 2 e a comparacao envelhece.
+    service.criar_versao(
+        conn, get_settings(), alteracoes={"taker_fee_bps": "20"}, author="teste"
+    )
+    resumo = baselines.resumo_comparacao(conn)
+    assert resumo["sob_a_config_vigente"] is False
+    assert resumo["config_version_vigente"] == 2

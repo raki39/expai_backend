@@ -589,8 +589,25 @@ def agente_estado(request: Request) -> dict[str, Any]:
     if run_id is None:
         return {"run_id": None, "caminho": [], "propostas": [], "gasto": None}
 
+    carteira = livro.carteira(conn, run_id=int(run_id))
     return {
         "run_id": int(run_id),
+        # O resultado economico do run, do ledger. Sem ele o relatorio diz
+        # quantas operacoes houve e nao diz se sobrou dinheiro - que e a unica
+        # pergunta que a comparacao com os baselines responde.
+        "patrimonio_final_cents": simulador.caixa_cents(conn, int(run_id)),
+        "operacoes": conn.execute(
+            "SELECT COUNT(*) / 2 AS n FROM execution WHERE run_id = ?",
+            (int(run_id),),
+        ).fetchone()["n"],
+        "custos_cents": {
+            "execucao_total": carteira["simulado_usd"]["custo_execucao_minor"],
+            "reflexao_total": carteira["simulado_usd"]["tesouraria_minor"],
+            "posicao_aberta": carteira["simulado_usd"]["posicao_btc_minor"],
+        },
+        "config_version_id": conn.execute(
+            "SELECT config_version_id FROM run WHERE id = ?", (int(run_id),)
+        ).fetchone()["config_version_id"],
         "caminho": cerebro_ciclo.caminho_percorrido(conn, int(run_id)),
         "propostas": propostas_de_regra.do_run(conn, int(run_id)),
         "regra_ativa": propostas_de_regra.regra_ativa(conn, int(run_id)),

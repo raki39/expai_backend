@@ -28,6 +28,7 @@ from ..maos_rapidas import executor
 from ..regra import registro as registro_de_regra
 from ..regra.schema import Regra
 from ..settings import Settings
+from ..simulador import execucao as simulador
 from ..simulador.execucao import condicoes_do_run
 from . import grafo, propostas
 
@@ -47,6 +48,11 @@ class ResultadoDoCiclo:
     expectativa: str | None
     confianca_ppm: int | None
     execucao: dict
+    # O resultado economico do run. Sem ele o relatorio do agente diz quantas
+    # operacoes houve e nao diz se sobrou dinheiro - que e a unica pergunta
+    # que a comparacao com os baselines responde.
+    patrimonio_final_cents: int
+    custos: dict
     gasto: dict
     sobreposicao: dict
     condicoes_validade: str
@@ -64,6 +70,8 @@ class ResultadoDoCiclo:
             "expectativa": self.expectativa,
             "confianca_ppm": self.confianca_ppm,
             "execucao": self.execucao,
+            "patrimonio_final_cents": self.patrimonio_final_cents,
+            "custos_cents": self.custos,
             "gasto": self.gasto,
             "sobreposicao_amostral": self.sobreposicao,
             "condicoes_validade": self.condicoes_validade,
@@ -125,6 +133,11 @@ def rodar(
         ).fetchone()["n"]
     )
 
+    # Do LEDGER, e nao de um acumulador do executor: o saldo tem uma fonte
+    # so (regra 16). E o mesmo `caixa_cents` que os baselines usam, entao os
+    # numeros sao comparaveis por construcao e nao por coincidencia.
+    carteira = livro.carteira(conn, run_id=run_id)
+
     ciclo = ResultadoDoCiclo(
         run_id=run_id,
         reflexoes=reflexoes,
@@ -137,6 +150,12 @@ def rodar(
         expectativa=ativa["expectation"] if ativa else None,
         confianca_ppm=ativa["confidence_ppm"] if ativa else None,
         execucao=resultado.como_dict(),
+        patrimonio_final_cents=simulador.caixa_cents(conn, run_id),
+        custos={
+            "execucao_total": carteira["simulado_usd"]["custo_execucao_minor"],
+            "posicao_aberta_minor": carteira["simulado_usd"]["posicao_btc_minor"],
+            "reflexao_total": carteira["simulado_usd"]["tesouraria_minor"],
+        },
         gasto=livro.gasto_com_reflexao(conn, run_id),
         sobreposicao=propostas.sobreposicao_amostral(conn, run_id),
         condicoes_validade=condicoes_do_run(conn, run_id),
@@ -148,6 +167,7 @@ def rodar(
             "reflexoes": reflexoes,
             "regra_veio_do_cerebro": veio_do_cerebro,
             "operacoes": resultado.operacoes,
+            "patrimonio_final_cents": simulador.caixa_cents(conn, run_id),
         },
     )
     return ciclo

@@ -535,6 +535,12 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
             continue
         saida[chave] = {
             "run_id": r["id"],
+            # Sob qual configuracao este numero foi produzido. Sem isto o
+            # painel mostra um resultado sem dizer de que experimento ele e -
+            # e um numero que descreve outra config e um numero que parou de
+            # descrever o que diz, que e como este projeto ja se enganou
+            # cinco vezes.
+            "config_version_id": r["config_version_id"],
             "equity_final_cents": simulador.caixa_cents(conn, r["id"]),
             "execucoes": conn.execute(
                 "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?", (r["id"],)
@@ -580,6 +586,26 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
         saida["condicoes_validade"] = simulador.condicoes_do_run(
             conn, saida["B3"]["run_id"]
         )
+    # A comparacao ainda descreve a configuracao vigente?
+    #
+    # `config_version` muda por alteracao MATERIAL, e alteracao material
+    # invalida comparacao que a atravesse (secao 10.2.3). Um painel que mostra
+    # numeros de uma versao antiga ao lado da config atual mostra um resultado
+    # que parou de descrever o experimento - exatamente o padrao que este
+    # projeto ja registrou cinco vezes. Derivado, e nao guardado: nao ha campo
+    # para ficar desatualizado.
+    vigente = conn.execute(
+        "SELECT MAX(id) AS id FROM config_version"
+    ).fetchone()["id"]
+    versoes = {
+        saida[c]["config_version_id"]
+        for c in ("B2", "B3", "B1_representativa")
+        if c in saida
+    }
+    saida["config_version_vigente"] = vigente
+    saida["config_versions_da_comparacao"] = sorted(versoes)
+    saida["sob_a_config_vigente"] = versoes == {vigente} if versoes else None
+
     saida["aviso"] = (
         "Comparacao produzida SEM nenhum LLM envolvido. Fase 0A: nenhuma "
         "conclusao estatistica, nenhum conhecimento promovido."
