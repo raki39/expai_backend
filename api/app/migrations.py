@@ -766,6 +766,152 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        7,
+        "incremento 5: cerebro lento, proposta de regra e cache de respostas",
+        """
+        -- ==================================================================
+        -- `tokens_cached` nao dizia QUAL cache, e sao dois numeros com
+        -- precos diferentes: escrever no cache custa 1,25x o preco de
+        -- entrada, ler custa 0,1x. Um campo so para os dois torna o custo
+        -- impossivel de calcular sem estimar - e a secao 5.2 proibe estimar.
+        --
+        -- Renomear e mais honesto que documentar a ambiguidade: um nome que
+        -- nao descreve o que guarda e a forma como este projeto ja se enganou
+        -- quatro vezes.
+        -- ==================================================================
+        ALTER TABLE agent_event RENAME COLUMN tokens_cached TO tokens_cache_read;
+
+        -- NULL continua significando NAO INFORMADO PELO PROVEDOR. A OpenAI
+        -- nao cobra escrita de cache e nao reporta o numero: gravar zero ali
+        -- afirmaria que nada foi escrito, que e coisa diferente de nao saber.
+        ALTER TABLE agent_event ADD COLUMN tokens_cache_write INTEGER
+            CHECK (tokens_cache_write >= 0);
+
+        -- Qual tabela de precos converteu estes tokens em dinheiro.
+        -- Redundante com a config do run DE PROPOSITO: e redundancia
+        -- conferida, nao duplicada. `conferir_custo_recomputado` recalcula o
+        -- custo a partir dos tokens e desta versao e compara com o gravado.
+        -- Redundancia que ninguem confere e como um valor vira mentira.
+        ALTER TABLE agent_event ADD COLUMN price_table_version TEXT;
+
+        -- O custo EXATO, em micros de USD (1e-6). O ledger nao consegue
+        -- representar menos que um centavo, e uma reflexao custa fracoes de
+        -- centavo: postar o teto em centavos e o certo para o livro, mas
+        -- guardar SO isso faria toda chamada custar "1 centavo" e apagaria
+        -- exatamente a contabilidade de token que este incremento existe
+        -- para provar.
+        --
+        -- Nao sao duas fontes de verdade sobre dinheiro (regra 16): o ledger
+        -- continua sendo a autoridade sobre o que foi lancado, este campo e a
+        -- medida exata do que foi consumido, e a relacao entre os dois e
+        -- CONFERIDA - `conferir_arredondamento_do_custo` exige que o
+        -- lancamento seja o teto em centavos deste valor.
+        ALTER TABLE agent_event ADD COLUMN cost_usd_micro INTEGER
+            CHECK (cost_usd_micro >= 0);
+
+        CREATE INDEX idx_event_node ON agent_event(node);
+
+        -- ==================================================================
+        -- A proposta de regra do cerebro lento.
+        --
+        -- Existe separada de `rule` porque uma proposta REJEITADA nao vira
+        -- regra nenhuma e mesmo assim precisa ficar registrada (criterio 2).
+        -- Guardar so o que deu certo transforma o historico num relatorio de
+        -- sucesso, e o unico jeito de diagnosticar um modelo que responde
+        -- fora do schema e ter a resposta que ele deu.
+        -- ==================================================================
+        CREATE TABLE rule_proposal (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id         INTEGER NOT NULL REFERENCES run(id),
+
+            -- O evento cognitivo que a produziu. E o `decision_id` do
+            -- criterio 1: da proposta se chega ao custo, e do custo a
+            -- proposta, nos dois sentidos.
+            agent_event_id INTEGER NOT NULL REFERENCES agent_event(id),
+
+            proposed_at    TEXT    NOT NULL,
+            status         TEXT    NOT NULL
+                                   CHECK (status IN ('aceita','rejeitada')),
+
+            -- A resposta CRUA do modelo, sempre - inclusive invalida.
+            raw_response_json TEXT NOT NULL,
+
+            rejection_reason  TEXT,
+            rule_id           INTEGER REFERENCES rule(id),
+
+            -- Declaradas ANTES de qualquer execucao (regra 17, criterio 10).
+            -- Confianca em ppm: nao ha ponto flutuante nem aqui.
+            expectation    TEXT,
+            confidence_ppm INTEGER
+                           CHECK (confidence_ppm BETWEEN 0 AND 1000000),
+
+            -- A janela que o cerebro OBSERVOU para propor, em ms de abertura
+            -- de barra. Guardada para que a sobreposicao com a janela
+            -- executada seja CALCULAVEL, e nao uma afirmacao em prosa que
+            -- envelhece sozinha.
+            observed_from_ms INTEGER,
+            observed_to_ms   INTEGER,
+
+            -- Aceita tem regra e nao tem motivo de recusa; rejeitada tem
+            -- motivo e nao tem regra. Nunca as duas coisas, nunca nenhuma.
+            CHECK ((status = 'aceita'    AND rule_id IS NOT NULL
+                                         AND rejection_reason IS NULL)
+                OR (status = 'rejeitada' AND rule_id IS NULL
+                                         AND rejection_reason IS NOT NULL))
+        );
+
+        CREATE INDEX idx_proposal_run ON rule_proposal(run_id);
+        CREATE INDEX idx_proposal_event ON rule_proposal(agent_event_id);
+
+        CREATE TRIGGER rule_proposal_sem_update
+        BEFORE UPDATE ON rule_proposal
+        BEGIN
+            SELECT RAISE(ABORT,
+                'proposta e imutavel: reavaliacao e proposta nova');
+        END;
+
+        CREATE TRIGGER rule_proposal_sem_delete
+        BEFORE DELETE ON rule_proposal
+        BEGIN
+            SELECT RAISE(ABORT, 'rule_proposal e apenas por acrescimo');
+        END;
+
+        -- ==================================================================
+        -- Cache de respostas do provedor (criterio 4).
+        --
+        -- Enderecado por CONTEUDO: a chave e o hash do pedido inteiro -
+        -- provedor, modelo, sistema, mensagem, schema e parametros. Trocar
+        -- qualquer byte do pedido troca a chave, entao um acerto de cache so
+        -- acontece quando o pedido e literalmente o mesmo. E o que permite
+        -- reexecutar um run com custo adicional de R$0,00 sem que o cache
+        -- possa devolver a resposta de outra pergunta.
+        --
+        -- NAO e historia, e memoria: esvaziar o cache nao apaga registro
+        -- nenhum, so faz o proximo run pagar de novo. Por isso aceita DELETE
+        -- e recusa UPDATE - a mesma chave nao pode passar a devolver outra
+        -- resposta sem que a chave mude junto.
+        -- ==================================================================
+        CREATE TABLE llm_cache (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            key            TEXT    NOT NULL UNIQUE,
+            provider       TEXT    NOT NULL,
+            model          TEXT    NOT NULL,
+            request_json   TEXT    NOT NULL,
+            response_json  TEXT    NOT NULL,
+            usage_json     TEXT    NOT NULL,
+            cost_usd_minor INTEGER NOT NULL CHECK (cost_usd_minor >= 0),
+            created_at     TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER llm_cache_sem_update
+        BEFORE UPDATE ON llm_cache
+        BEGIN
+            SELECT RAISE(ABORT,
+                'entrada de cache e enderecada por conteudo: mude a chave, nao a resposta');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

@@ -98,13 +98,30 @@ def test_o_laco_por_barra_nao_abre_socket(
     assert resultado.execucoes > 0
 
 
-def test_provedor_de_llm_ausente_do_ambiente(conn, cenario) -> None:
-    """Nenhum modulo de provedor sequer carregado depois de rodar a comparacao."""
+def test_rodar_baseline_nao_carrega_provedor_nenhum(conn, cenario) -> None:
+    """Rodar um baseline nao pode CARREGAR modulo de provedor nem de grafo.
+
+    A afirmacao e sobre a variacao, e nao sobre o estado absoluto de
+    `sys.modules`. A suite inteira roda num processo so, e desde o incremento
+    5 existem testes do cerebro lento que carregam LangGraph legitimamente -
+    um teste que exigisse a ausencia absoluta passaria ou falharia conforme a
+    ORDEM dos testes, que e a forma mais barata de ter uma garantia que nao
+    garante nada.
+
+    O que importa e isto: o caminho das maos rapidas nao puxa nenhum deles.
+    """
     dataset_id, cfg = cenario
     run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+
+    antes = set(sys.modules)
     baselines.rodar_b3(conn, run_id=run_id, dataset_id=dataset_id, config=cfg)
-    carregados = set(sys.modules)
-    assert not {"langgraph", "anthropic", "openai", "langchain"} & carregados
+    novos = set(sys.modules) - antes
+
+    proibidos = {
+        m for m in novos
+        if m.split(".")[0] in {"langgraph", "anthropic", "openai", "langchain"}
+    }
+    assert not proibidos, f"o baseline carregou: {sorted(proibidos)}"
 
 
 # ============================================================================
@@ -788,3 +805,38 @@ def test_reexecutar_nao_mistura_duas_distribuicoes(
     assert resumo["B1"]["repeticoes"] == 1_000
     assert resumo["B1"]["p50"] == segunda["B1"]["p50"]
     assert resumo["B3"]["digest"] == segunda["B3"]["digest"]
+
+
+def test_restringir_o_digest_ao_livro_simulado_nao_muda_digest_de_baseline(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """O incremento 5 restringiu `digest_do_run` ao livro simulado.
+
+    A afirmacao de que isso nao altera nenhum digest ja publicado precisa ser
+    CONFERIDA, e nao explicada num comentario: um baseline nao chama modelo
+    nenhum, entao nao tem lancamento no livro real, e as duas formas de contar
+    tem de dar exatamente o mesmo hash. Se um dia deixarem de dar, e porque
+    algo passou a lancar em BRL dentro de um run de baseline - e ai o digest
+    publicado de fato mudou e alguem precisa saber.
+    """
+    import hashlib
+
+    dataset_id, cfg = cenario
+    run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    baselines.rodar_b3(conn, run_id=run_id, dataset_id=dataset_id, config=cfg)
+
+    def digest_dos_dois_livros(run: int) -> str:
+        h = hashlib.sha256()
+        for linha in conn.execute(
+            "SELECT t.kind AS kind, a.code AS code, e.amount_minor AS valor"
+            " FROM ledger_entry e"
+            " JOIN ledger_transaction t ON t.id = e.transaction_id"
+            " JOIN account a ON a.id = e.account_id"
+            " WHERE t.run_id = ? AND t.posted_at IS NOT NULL"
+            " ORDER BY t.id, e.id",
+            (run,),
+        ):
+            h.update(f"{linha['kind']}|{linha['code']}|{linha['valor']}\n".encode())
+        return h.hexdigest()
+
+    assert executor.digest_do_run(conn, run_id) == digest_dos_dois_livros(run_id)

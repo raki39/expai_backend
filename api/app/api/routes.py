@@ -15,6 +15,13 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+# O cerebro lento e importado aqui, mas nenhum SDK de provedor vem junto:
+# os adaptadores carregam o proprio SDK dentro da funcao que chama. Subir a
+# API nao carrega provedor nenhum, e ha teste que confere a variacao de
+# `sys.modules` em vez do estado absoluto dela.
+from ..cerebro import cache as cerebro_cache
+from ..cerebro import ciclo as cerebro_ciclo
+from ..cerebro import propostas as propostas_de_regra
 from ..config import service as config_service
 from ..config.service import (
     ConfigCongelada,
@@ -516,6 +523,93 @@ def comparacao_rodar(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
         )
+
+
+# ------------------------------------------------------------ cerebro lento
+
+
+class PedidoAgente(BaseModel):
+    author: str = Field(min_length=1, max_length=120)
+
+
+@router.get("/agente")
+def agente_estado(request: Request) -> dict[str, Any]:
+    """O ultimo run do agente: caminho percorrido, propostas e gasto.
+
+    Um run do agente e um run que tem `agent_event` - derivado, e nao uma
+    coluna nova: quem tem evento cognitivo passou pelo cerebro, e quem nao
+    tem, nao passou. Nao ha estado para ficar desatualizado.
+    """
+    conn = _conn(request)
+    linha = conn.execute(
+        "SELECT MAX(run_id) AS run_id FROM agent_event WHERE run_id IS NOT NULL"
+    ).fetchone()
+    run_id = linha["run_id"] if linha else None
+    if run_id is None:
+        return {"run_id": None, "caminho": [], "propostas": [], "gasto": None}
+
+    return {
+        "run_id": int(run_id),
+        "caminho": cerebro_ciclo.caminho_percorrido(conn, int(run_id)),
+        "propostas": propostas_de_regra.do_run(conn, int(run_id)),
+        "regra_ativa": propostas_de_regra.regra_ativa(conn, int(run_id)),
+        "gasto": livro.gasto_com_reflexao(conn, int(run_id)),
+        "sobreposicao_amostral": propostas_de_regra.sobreposicao_amostral(
+            conn, int(run_id)
+        ),
+        "condicoes_validade": simulador.condicoes_do_run(conn, int(run_id)),
+        "cache_de_respostas": cerebro_cache.tamanho(conn),
+        "arredondamento_do_custo_ok": (
+            livro.conferir_arredondamento_do_custo(conn) == []
+        ),
+    }
+
+
+@router.post("/agente", status_code=status.HTTP_201_CREATED)
+def agente_rodar(
+    request: Request, pedido: PedidoAgente = Body(...)
+) -> dict[str, Any]:
+    """Fecha o ciclo: observa, reflete, propoe regra, executa, contabiliza.
+
+    E a unica rota do projeto que pode gastar dinheiro de verdade. Os tetos
+    ficam dentro do ciclo, e nao aqui: uma trava no caminho HTTP protege
+    contra o painel, nao contra o programa (secao 12.1).
+    """
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="encerre o run ativo antes de rodar o agente",
+        )
+    try:
+        config_service.exigir_hash_integro(conn)
+    except SchemaDivergente as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    meta = dataset_loader.dataset_vigente(conn)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ingira o dataset antes de rodar o agente",
+        )
+
+    log.info("agente.pedido", extra={"author": pedido.author})
+    try:
+        resultado = cerebro_ciclo.rodar(
+            conn,
+            dataset_id=meta.id,
+            config=atual.config,
+            config_version_id=atual.id,
+            settings=_settings(request),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+    return resultado.como_dict()
 
 
 # --------------------------------------------------------------- sentinela

@@ -6,9 +6,12 @@ execucao e de cada resultado (secao 8.4.1.1).
 
 Como o pessimismo e construido, em ordem:
 
-1. **Referencia = o limite ADVERSO da barra.** Compra ao topo da barra, venda
-   ao fundo. Nao a abertura, nao o fechamento, nao a media: o pior preco que
-   de fato existiu naquele instante (secao 8.4.1.2).
+1. **Referencia = o que `execution_reference` disser** (ADR 0015). Por
+   padrao, a ABERTURA da barra de execucao: a ordem entra no inicio dela e e
+   esse o preco que encontra. O modelo antigo - limite adverso da barra -
+   segue disponivel porque o campo e versionado e uma comparacao antiga tem
+   de poder ser reproduzida sob o modelo em que foi feita. Ver
+   `preco_referencia` (secao 8.4.1.2).
 
 2. **Spread, slippage e penalidade pioram a referencia**, cada um na direcao
    contraria a operacao. O executado pode passar do topo da barra numa

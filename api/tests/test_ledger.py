@@ -328,7 +328,8 @@ def test_custo_de_reflexao_move_os_dois_livros(
         conn, run_id=run, node="reflexao", kind="decisao",
         custo_usd_minor=custo_usd, fx_rate_micro=FX, fx_rate_date=DATA_FX,
         tier="padrao", provider="anthropic", model="claude-sonnet-5",
-        uso=Uso(tokens_in=1500, tokens_out=300, tokens_cached=1200),
+        uso=Uso(tokens_in=1500, tokens_out=300, tokens_cache_read=1200,
+                tokens_cache_write=200),
         expectation="a regra deve superar B3", confidence_ppm=600_000,
     )
 
@@ -450,11 +451,13 @@ def test_token_nao_informado_fica_nulo_e_nao_zero(
         uso=Uso(tokens_in=100, tokens_out=50),  # cache nao informado
     )
     linha = conn.execute(
-        "SELECT tokens_in, tokens_out, tokens_cached FROM agent_event WHERE id = ?",
+        "SELECT tokens_in, tokens_out, tokens_cache_read, tokens_cache_write"
+        " FROM agent_event WHERE id = ?",
         (event_id,),
     ).fetchone()
     assert linha["tokens_in"] == 100
-    assert linha["tokens_cached"] is None
+    assert linha["tokens_cache_read"] is None
+    assert linha["tokens_cache_write"] is None
 
 
 def test_profile_id_existe_e_e_inerte(conn: sqlite3.Connection, run: int) -> None:

@@ -79,6 +79,18 @@ def digest_do_run(conn: sqlite3.Connection, run_id: int) -> str:
     sao chaves de superficie: dois runs economicamente identicos os teriam
     diferentes, e o digest passaria a dizer "sao diferentes" quando eles nao
     sao. O que identifica o run e a SEQUENCIA de tipo, conta e valor.
+
+    **So o livro simulado entra.** O digest responde "o experimento se
+    reproduziu?", e o livro real responde outra pergunta: "quanto dinheiro
+    saiu da conta desta vez?". Com o cache de respostas quente, a segunda
+    execucao do mesmo run nao gasta nada de verdade e o livro real fica
+    diferente - corretamente. Misturar os dois faria o digest acusar
+    divergencia onde o experimento se reproduziu perfeitamente, e a regra 7 ja
+    diz que os dois livros nunca se somam.
+
+    Isto NAO altera nenhum digest ja publicado: todo run existente ate aqui e
+    de baseline, e baseline nao chama modelo nenhum - todos os lancamentos
+    deles ja sao do livro simulado. Comparado, nao suposto.
     """
     h = hashlib.sha256()
     for linha in conn.execute(
@@ -87,6 +99,7 @@ def digest_do_run(conn: sqlite3.Connection, run_id: int) -> str:
         " JOIN ledger_transaction t ON t.id = e.transaction_id"
         " JOIN account a ON a.id = e.account_id"
         " WHERE t.run_id = ? AND t.posted_at IS NOT NULL"
+        "   AND a.book = 'simulado'"
         " ORDER BY t.id, e.id",
         (run_id,),
     ):

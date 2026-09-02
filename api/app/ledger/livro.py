@@ -261,11 +261,23 @@ class Uso:
     diferentes, e trata-las como iguais corrompe o custo por decisao
     (secao 5.2). Os dois provedores reportam cache de formas distintas, e e
     justamente ai que a confusao aconteceria.
+
+    `tokens_in` e SEMPRE "entrada cobrada ao preco cheio", ja descontado o
+    que veio do cache. Os provedores discordam nisto - a Anthropic entrega
+    `input_tokens` ja sem os lidos do cache, a OpenAI entrega `prompt_tokens`
+    COM eles dentro - e normalizar no adaptador e o unico lugar onde a
+    diferenca pode ser tratada com conhecimento de causa. O payload cru fica
+    em `bruto`, entao nada do que o provedor disse se perde.
+
+    Os dois numeros de cache sao separados porque tem precos diferentes:
+    escrever custa 1,25x a entrada, ler custa 0,1x. Um campo so para os dois
+    obrigaria a estimar.
     """
 
     tokens_in: int | None = None
     tokens_out: int | None = None
-    tokens_cached: int | None = None
+    tokens_cache_read: int | None = None
+    tokens_cache_write: int | None = None
     bruto: dict[str, Any] | None = None
 
 
@@ -287,6 +299,9 @@ def registrar_custo_reflexao(
     parent_event_id: int | None = None,
     inputs_digest: str | None = None,
     outputs_digest: str | None = None,
+    price_table_version: str | None = None,
+    custo_usd_micro: int | None = None,
+    dinheiro_real: bool = True,
 ) -> tuple[int, int | None]:
     """Grava o evento cognitivo e o dinheiro que ele custou, amarrados.
 
@@ -299,6 +314,14 @@ def registrar_custo_reflexao(
     `fx_rate_date`, gravados na propria transacao - nunca uma conversao feita
     na hora de ler, que faria variacao cambial virar desempenho (secao 4.2).
 
+    **`dinheiro_real=False`** grava so o par do livro simulado. E o caso da
+    resposta servida do cache local: o agente pagou pelo proprio pensamento -
+    isso e fato do experimento e nao pode depender de o nosso cache estar
+    quente, senao reexecutar um run melhoraria o resultado dele - mas nenhum
+    real saiu da conta, e afirmar que saiu seria inventar despesa. Cada livro
+    fecha em zero por si, entao omitir o par do livro real nao desequilibra
+    coisa nenhuma.
+
     Ordem da gravacao, que existe por causa da referencia mutua (criterio 9):
     a transacao nasce aberta, o evento e criado apontando para ela, a
     transacao recebe o id do evento enquanto ainda esta aberta, e so entao
@@ -306,6 +329,14 @@ def registrar_custo_reflexao(
     """
     if custo_usd_minor < 0:
         raise TransacaoInvalida("custo nao pode ser negativo")
+    if custo_usd_micro is not None and -(-custo_usd_micro // 10_000) != custo_usd_minor:
+        # O lancamento tem de ser o TETO em centavos do custo exato. Se os
+        # dois puderem divergir, o campo exato deixa de descrever o
+        # lancamento e vira a quinta ocorrencia do padrao de sempre.
+        raise TransacaoInvalida(
+            f"custo em centavos ({custo_usd_minor}) nao e o teto do custo"
+            f" exato ({custo_usd_micro} micros)"
+        )
 
     uso = uso or Uso()
     custo_brl_minor = usd_para_brl(custo_usd_minor, fx_rate_micro)
@@ -330,15 +361,18 @@ def registrar_custo_reflexao(
 
         cur = conn.execute(
             "INSERT INTO agent_event (run_id, parent_event_id, occurred_at, node,"
-            " kind, tier, provider, model, tokens_in, tokens_out, tokens_cached,"
-            " usage_bruto_json, cost_usd_minor, expectation, confidence_ppm,"
-            " inputs_digest, outputs_digest, ledger_transaction_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " kind, tier, provider, model, tokens_in, tokens_out,"
+            " tokens_cache_read, tokens_cache_write, price_table_version,"
+            " usage_bruto_json, cost_usd_minor, cost_usd_micro, expectation,"
+            " confidence_ppm, inputs_digest, outputs_digest,"
+            " ledger_transaction_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 run_id, parent_event_id, quando, node, kind, tier, provider, model,
-                uso.tokens_in, uso.tokens_out, uso.tokens_cached,
+                uso.tokens_in, uso.tokens_out,
+                uso.tokens_cache_read, uso.tokens_cache_write, price_table_version,
                 json.dumps(uso.bruto, ensure_ascii=False) if uso.bruto else None,
-                custo_usd_minor, expectation, confidence_ppm,
+                custo_usd_minor, custo_usd_micro, expectation, confidence_ppm,
                 inputs_digest, outputs_digest, tx_id,
             ),
         )
@@ -351,16 +385,20 @@ def registrar_custo_reflexao(
                 "UPDATE ledger_transaction SET agent_event_id = ? WHERE id = ?",
                 (event_id, tx_id),
             )
-            conn.executemany(
-                "INSERT INTO ledger_entry (transaction_id, account_id,"
-                " amount_minor, memo) VALUES (?,?,?,?)",
-                [
-                    (tx_id, mapa[contas.CAIXA_SIM], -custo_usd_minor, "reflexao"),
-                    (tx_id, mapa[contas.TESOURARIA_SIM], custo_usd_minor, "reflexao"),
+            lancamentos = [
+                (tx_id, mapa[contas.CAIXA_SIM], -custo_usd_minor, "reflexao"),
+                (tx_id, mapa[contas.TESOURARIA_SIM], custo_usd_minor, "reflexao"),
+            ]
+            if dinheiro_real:
+                lancamentos += [
                     (tx_id, mapa[contas.CAIXA_REAL], -custo_brl_minor, "inferencia"),
                     (tx_id, mapa[contas.DESPESA_INFERENCIA], custo_brl_minor,
                      "inferencia"),
-                ],
+                ]
+            conn.executemany(
+                "INSERT INTO ledger_entry (transaction_id, account_id,"
+                " amount_minor, memo) VALUES (?,?,?,?)",
+                lancamentos,
             )
             # Fechar dispara a conferencia de partidas dobradas.
             conn.execute(
@@ -377,7 +415,8 @@ def registrar_custo_reflexao(
             "transaction_id": tx_id,  # None quando nao houve custo
             "custo_usd_minor": custo_usd_minor,
             "custo_brl_minor": custo_brl_minor,
-            "tokens_cached_informado": uso.tokens_cached is not None,
+            "cache_read_informado": uso.tokens_cache_read is not None,
+            "cache_write_informado": uso.tokens_cache_write is not None,
         },
     )
     return event_id, tx_id
@@ -568,6 +607,72 @@ def conferir_vinculo_inferencia(conn: sqlite3.Connection) -> dict[str, list[int]
         "transacoes_sem_evento": orfas,
         "eventos_com_custo_sem_lancamento": sem_contrapartida,
         "vinculos_assimetricos": assimetricos,
+    }
+
+
+def conferir_arredondamento_do_custo(conn: sqlite3.Connection) -> list[dict]:
+    """O custo lancado e o teto em centavos do custo exato? (incremento 5)
+
+    Existe porque `cost_usd_micro` e `cost_usd_minor` descrevem a mesma
+    quantia em duas precisoes, e valor que descreve outro valor sem ser
+    conferido e como este projeto ja se enganou quatro vezes. Aqui a relacao
+    e verificavel a qualquer momento, e nao so no instante da gravacao.
+    """
+    return [
+        dict(l)
+        for l in conn.execute(
+            "SELECT id AS event_id, cost_usd_minor, cost_usd_micro"
+            " FROM agent_event"
+            " WHERE cost_usd_micro IS NOT NULL"
+            "   AND cost_usd_minor <> (cost_usd_micro + 9999) / 10000"
+        )
+    ]
+
+
+def gasto_com_reflexao(conn: sqlite3.Connection, run_id: int) -> dict:
+    """Quanto o cerebro lento ja custou neste run, e quantas vezes falou.
+
+    Sai do LEDGER, nunca de contador em memoria: o teto que protege o
+    orcamento tem de ser lido da mesma fonte que registra o dinheiro, senao
+    um processo reiniciado no meio de um run recomeca a contagem do zero e o
+    teto deixa de ser teto (secao 12.1).
+
+    Em centavos, e nao em micros, porque e o que esta lancado. Como cada
+    chamada arredonda para cima, este numero e sempre maior ou igual ao gasto
+    exato - o teto para mais cedo, nunca mais tarde.
+
+    Conta o custo do LIVRO SIMULADO, e por isso inclui as respostas servidas
+    do cache local, que nao custaram real nenhum. E de proposito, por duas
+    razoes: o teto passa a valer identicamente num run frio e num run quente,
+    o que mantem o comportamento reproduzivel; e como resultado ele conta
+    algumas chamadas como pagas sem terem sido, o que so faz o limite de
+    dinheiro real parar mais cedo. Errar para o lado de gastar menos e o
+    unico erro aceitavel num teto (secao 12.1).
+    """
+    linha = conn.execute(
+        "SELECT COUNT(*) AS chamadas,"
+        "       COALESCE(SUM(cost_usd_minor), 0) AS gasto_cents,"
+        "       COALESCE(SUM(cost_usd_micro), 0) AS gasto_micro"
+        " FROM agent_event"
+        " WHERE run_id = ? AND provider IS NOT NULL AND cost_usd_minor > 0",
+        (run_id,),
+    ).fetchone()
+    real = conn.execute(
+        "SELECT COALESCE(SUM(e.amount_minor), 0) AS brl"
+        " FROM ledger_entry e"
+        " JOIN ledger_transaction t ON t.id = e.transaction_id"
+        " JOIN account a ON a.id = e.account_id"
+        " WHERE t.run_id = ? AND t.kind = 'reflexao'"
+        "   AND a.code = ?",
+        (run_id, contas.DESPESA_INFERENCIA),
+    ).fetchone()
+    return {
+        "chamadas_com_custo": int(linha["chamadas"]),
+        "gasto_cents": int(linha["gasto_cents"]),
+        "gasto_micro": int(linha["gasto_micro"]),
+        # O que de fato saiu da conta, em centavos de BRL. Zero num run
+        # inteiramente servido pelo cache - e e essa a prova do criterio 4.
+        "gasto_real_brl_cents": int(real["brl"]),
     }
 
 

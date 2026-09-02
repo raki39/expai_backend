@@ -48,7 +48,10 @@ class PrecoModelo(BaseModel):
     output_usd_per_mtok: Decimal
     # Secao 3.3: contexto repetido custa 10% do preco de entrada.
     cache_read_usd_per_mtok: Decimal | None = None
-    # Nao verificado nesta sessao; preencher e datar antes de usar.
+    # Escrever no cache custa 1,25x a entrada (janela de 5 min). Ficou como
+    # None ate o incremento 5, quando passou a importar: a PRIMEIRA chamada de
+    # cada run grava o prefixo no cache, e sem este preco o custo dela sairia
+    # incompleto - declarado como incompleto, mas incompleto.
     cache_write_usd_per_mtok: Decimal | None = None
     # None = nao verificado. "Nao sei" nao e a mesma coisa que zero.
     verified_at: str | None = None
@@ -123,7 +126,13 @@ class ExperimentConfig(BaseModel):
         }
     )
 
-    price_table_version: str = "2026-09-01"
+    # Conferida na pagina de precos do provedor em 2026-09-02, inclusive a
+    # coluna de escrita de cache, que faltava. ATENCAO: `price_table` e
+    # MATERIAL de proposito. Parece dado administrativo, mas o custo alimenta
+    # o teto de gasto, e o teto decide quantas reflexoes cabem num run - entao
+    # trocar preco pode mudar o caminho de decisao. Por isso mexer aqui exige
+    # nova `config_version` e invalida comparacao que atravesse a mudanca.
+    price_table_version: str = "2026-09-02"
     price_table: list[PrecoModelo] = Field(
         default_factory=lambda: [
             PrecoModelo(
@@ -132,7 +141,8 @@ class ExperimentConfig(BaseModel):
                 input_usd_per_mtok=Decimal("2.00"),
                 output_usd_per_mtok=Decimal("10.00"),
                 cache_read_usd_per_mtok=Decimal("0.20"),
-                verified_at="2026-09-01",
+                cache_write_usd_per_mtok=Decimal("2.50"),
+                verified_at="2026-09-02",
             ),
             PrecoModelo(
                 provider="anthropic",
@@ -140,7 +150,8 @@ class ExperimentConfig(BaseModel):
                 input_usd_per_mtok=Decimal("5.00"),
                 output_usd_per_mtok=Decimal("25.00"),
                 cache_read_usd_per_mtok=Decimal("0.50"),
-                verified_at="2026-09-01",
+                cache_write_usd_per_mtok=Decimal("6.25"),
+                verified_at="2026-09-02",
             ),
         ]
     )
