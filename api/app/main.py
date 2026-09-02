@@ -24,7 +24,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .config import service as config_service
 from .logging_setup import configurar_logging
-from .sonda_rede import router as router_sonda
 from .settings import SECRET_FIELDS, get_settings
 from .store import (
     conectar,
@@ -187,9 +186,6 @@ def criar_app() -> FastAPI:
         return {"status": "alive", "service": "fase0a-api", "fase": "0A"}
 
     app.include_router(router)
-
-    # TEMPORARIO - sai junto com app/sonda_rede.py quando a D18 for registrada.
-    app.include_router(router_sonda)
 
     return app
 
