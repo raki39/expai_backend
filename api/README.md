@@ -19,10 +19,10 @@ python -m venv .venv
 # source .venv/bin/activate && pip install -r requirements-dev.txt  # Linux/Mac
 
 cp .env.example .env        # preencha API_SERVICE_TOKEN
-python -m uvicorn app.main:app --host :: --port 8000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-O bind em `::` é dual-stack: atende IPv4 e IPv6 sem custo.
+O bind é `0.0.0.0` (IPv4), que é o que o proxy público da Railway usa. Sobreponha com `HOST=::` apenas se um serviço precisar falar por rede privada.
 
 ## Testes
 

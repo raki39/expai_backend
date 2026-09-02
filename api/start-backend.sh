@@ -20,6 +20,22 @@
 set -eu
 
 PORTA="${PORT:-8000}"
+
+# ATENCAO - o endereco de bind decide se a plataforma alcanca o app.
+#
+#   0.0.0.0  IPv4. E o que o proxy PUBLICO da Railway usa para conectar no
+#            container. E o default correto enquanto o painel estiver na
+#            Vercel e falar com a api pela internet (ADR 0010).
+#
+#   ::       IPv6. So e necessario para a REDE PRIVADA da Railway
+#            (*.railway.internal). Um socket em "::" sem dual-stack explicito
+#            RECUSA conexao IPv4 - e o sintoma e exatamente
+#            "Application failed to respond" com o app rodando e logando
+#            "Uvicorn running on http://[::]:PORTA".
+#
+# Se um dia um segundo servico precisar falar com este pela rede privada,
+# defina HOST=:: na plataforma. Nao mude o default sem esse motivo.
+ENDERECO="${HOST:-0.0.0.0}"
 CAMINHO_BANCO="${DB_PATH:-/data/fase0a.sqlite3}"
 DIR_BANCO=$(dirname "$CAMINHO_BANCO")
 DIR_DADOS="${DATA_DIR:-/data/datasets}"
@@ -32,7 +48,7 @@ registrar() {
 }
 
 registrar INFO startup.preflight \
-    ",\"app_env\":\"${APP_ENV:-nao-definido}\",\"port\":\"${PORTA}\",\"db_path\":\"${CAMINHO_BANCO}\",\"data_dir\":\"${DIR_DADOS}\""
+    ",\"app_env\":\"${APP_ENV:-nao-definido}\",\"host\":\"${ENDERECO}\",\"port\":\"${PORTA}\",\"db_path\":\"${CAMINHO_BANCO}\",\"data_dir\":\"${DIR_DADOS}\""
 
 # --------------------------------------------------------------- pre-voo
 # O volume e montado no START do container, nunca no build. Se ele nao estiver
@@ -56,6 +72,4 @@ registrar INFO startup.preflight_ok ",\"db_dir_gravavel\":true"
 # ------------------------------------------------------------------ start
 # `exec` e o ponto do script: o uvicorn substitui este shell e vira PID 1,
 # passando a receber SIGTERM diretamente.
-#
-# Bind em "::" e dual-stack: atende IPv4 e IPv6.
-exec uvicorn app.main:app --host :: --port "$PORTA"
+exec uvicorn app.main:app --host "$ENDERECO" --port "$PORTA"

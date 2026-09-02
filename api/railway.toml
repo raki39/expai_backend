@@ -44,7 +44,12 @@
 #   CORS_ALLOWED_ORIGINS=               vazio: o painel faz proxy no servidor
 #   ANTHROPIC_API_KEY / OPENAI_API_KEY  so a partir do incremento 5
 #
-# NAO defina PORT: a Railway injeta, e o start-backend.sh usa ${PORT}.
+#   PORT=8000                           precisa bater com o target port do
+#                                       dominio gerado
+#
+# NAO defina HOST. O default e 0.0.0.0 (IPv4), que e o que o proxy publico da
+# Railway usa. Definir HOST=:: quebra o acesso publico com
+# "Application failed to respond" - "::" so serve para a rede privada.
 
 [build]
 builder = "DOCKERFILE"

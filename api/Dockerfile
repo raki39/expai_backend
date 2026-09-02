@@ -49,9 +49,10 @@ RUN mkdir -p /data/datasets
 EXPOSE 8000
 
 # Forma exec, chamando o script. O script faz o pre-voo (volume montado e
-# gravavel?) e termina com `exec uvicorn`, de modo que o uvicorn vire PID 1 e
-# receba SIGTERM no redeploy - fechando o SQLite graciosamente em vez de
-# levar SIGKILL depois do timeout.
+# gravavel?), decide o endereco de bind (0.0.0.0 por padrao - IPv4, que e o
+# que o proxy publico da Railway usa) e termina com `exec uvicorn`, de modo
+# que o uvicorn vire PID 1 e receba SIGTERM no redeploy - fechando o SQLite
+# graciosamente em vez de levar SIGKILL depois do timeout.
 #
 # NAO defina `startCommand` no railway.toml: com Dockerfile ele sobrescreve
 # este CMD, e o pre-voo deixaria de rodar.
