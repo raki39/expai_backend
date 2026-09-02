@@ -147,13 +147,31 @@ def _bps_sobre(valor_cents: int, bps: Decimal) -> int:
     return _teto(valor_cents * int(bps * 100), 100 * 10_000)
 
 
-def preco_adverso(barra: loader.BarraCarregada, lado: Lado) -> int:
-    """O pior preco que existiu na barra, para o lado da operacao.
+def preco_referencia(
+    barra: loader.BarraCarregada, lado: Lado, config: ExperimentConfig
+) -> int:
+    """O preco de referencia da execucao, conforme o modelo configurado.
 
-    Compra ao topo, venda ao fundo. Nao a abertura nem o fechamento: escolher
-    um preco melhor que o adverso e supor que a ordem pegou o melhor momento
-    da barra - que e exatamente a afirmacao que a fidelidade 1 nao sustenta.
+    **abertura** (padrao, ADR 0015): a decisao fecha na barra i e a ordem
+    entra no inicio da barra i+1 - a abertura e o preco que ela encontra
+    naquele instante. Usa APENAS informacao do momento da execucao.
+
+    **limite_adverso**: maxima na compra, minima na venda. Supoe azar maximo
+    intrabarra em toda execucao. Mantido porque o campo e versionado e uma
+    comparacao antiga precisa poder ser reproduzida sob o modelo em que foi
+    feita - mas note que ele exige conhecer a barra INTEIRA para escolher o
+    pior preco dela, o que e retrospectiva, ainda que usada contra nos.
+
+    Em nenhum dos dois o pessimismo desaparece: spread, slippage, penalidade
+    e taxa taker entram por cima, em `preco_executado`.
     """
+    if config.execution_reference == "abertura":
+        return barra.open
+    return barra.high if lado == "compra" else barra.low
+
+
+def preco_adverso(barra: loader.BarraCarregada, lado: Lado) -> int:
+    """Limite adverso puro. Preservado para leitura e para os testes."""
     return barra.high if lado == "compra" else barra.low
 
 
@@ -298,7 +316,7 @@ def comprar(
         raise ValueError("fracao do caixa precisa estar em (0, 1]")
 
     barra = _barra_de_execucao(conn, dataset_id, decision_bar_ms, config)
-    price_ref = preco_adverso(barra, "compra")
+    price_ref = preco_referencia(barra, "compra", config)
     price_exec = preco_executado(price_ref, "compra", config)
 
     disponivel = caixa_cents(conn, run_id)
@@ -343,7 +361,7 @@ def vender(
         raise PosicaoInvalida("nao ha posicao para vender; long/flat nao vende a descoberto")
 
     barra = _barra_de_execucao(conn, dataset_id, decision_bar_ms, config)
-    price_ref = preco_adverso(barra, "venda")
+    price_ref = preco_referencia(barra, "venda", config)
     price_exec = preco_executado(price_ref, "venda", config)
 
     return _registrar(

@@ -122,7 +122,7 @@ def simular_pares(
         barra_e = barras[entrada + lat]
         barra_s = barras[saida + lat]
 
-        ref_c = simulador.preco_adverso(barra_e, "compra")
+        ref_c = simulador.preco_referencia(barra_e, "compra", config)
         exec_c = simulador.preco_executado(ref_c, "compra", config)
         orcamento = int(Decimal(caixa) * fracao)
         qty = simulador.dimensionar(orcamento, exec_c, config)
@@ -132,7 +132,7 @@ def simular_pares(
         nocional_c, custos_c = simulador.custear(qty, ref_c, exec_c, "compra", config)
         caixa -= nocional_c + custos_c.de_preco + custos_c.fee
 
-        ref_v = simulador.preco_adverso(barra_s, "venda")
+        ref_v = simulador.preco_referencia(barra_s, "venda", config)
         exec_v = simulador.preco_executado(ref_v, "venda", config)
         nocional_v, custos_v = simulador.custear(qty, ref_v, exec_v, "venda", config)
         caixa += nocional_v - custos_v.de_preco - custos_v.fee

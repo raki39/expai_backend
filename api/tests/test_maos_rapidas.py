@@ -211,12 +211,12 @@ def test_b2_e_exatamente_uma_ida_e_volta_conferida_a_mao(
     barra_compra = barras[0 + lat]
     barra_venda = barras[ultima_decidivel + lat]
 
-    ref_c = barra_compra.high              # limite adverso na compra
+    ref_c = barra_compra.open              # preco no instante da execucao
     exec_c = simulador.preco_executado(ref_c, "compra", cfg)
     qty = simulador.dimensionar(SEMENTE_USD, exec_c, cfg)
     nocional_c, custos_c = simulador.custear(qty, ref_c, exec_c, "compra", cfg)
 
-    ref_v = barra_venda.low                # limite adverso na venda
+    ref_v = barra_venda.open               # preco no instante da execucao
     exec_v = simulador.preco_executado(ref_v, "venda", cfg)
     nocional_v, custos_v = simulador.custear(qty, ref_v, exec_v, "venda", cfg)
 

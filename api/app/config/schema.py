@@ -82,6 +82,21 @@ class ExperimentConfig(BaseModel):
     # ------------------------------- simulador pessimista (secao 8.4.1)
     # Sempre taker. Spread por cima, slippage sempre desfavoravel, atraso
     # entre decisao e execucao, penalidade adicional explicita.
+    #
+    # Qual preco da barra de execucao serve de REFERENCIA (ADR 0015):
+    #
+    #   abertura       o preco no instante da execucao. A ordem entra no
+    #                  inicio da barra i+1, e e isso que ela encontra.
+    #   limite_adverso maxima na compra, minima na venda. Supoe azar maximo
+    #                  intrabarra em toda execucao - e exige conhecer a barra
+    #                  inteira, o que e retrospectiva, ainda que contra nos.
+    #
+    # ESTE CAMPO PRECISA SER VERSIONADO. O modelo mora no codigo, e sem ele
+    # aqui dois runs reportariam o mesmo config_hash com semanticas de
+    # execucao diferentes - o que torna a comparacao entre eles invalida sem
+    # que nada acuse.
+    execution_reference: Literal["abertura", "limite_adverso"] = "abertura"
+
     taker_fee_bps: Decimal = Decimal("10")     # Binance spot: 0,10%
     spread_bps: Decimal = Decimal("1")         # spread cheio, aplicado pela metade em cada lado
     slippage_bps: Decimal = Decimal("2")

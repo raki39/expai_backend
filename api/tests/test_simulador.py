@@ -113,32 +113,70 @@ def barra(i: int) -> int:
 # ============================================================================
 
 
-def test_compra_nunca_abaixo_da_maxima_da_barra(conn, cenario) -> None:
+def test_referencia_e_a_abertura_da_barra_de_execucao(conn, cenario) -> None:
+    """ADR 0015: o preco no INSTANTE da execucao, sem olhar o resto da barra.
+
+    A ordem entra no inicio da barra i+1 e e isso que ela encontra. Escolher
+    o pior preco da barra exigiria conhecer a barra inteira - retrospectiva,
+    ainda que usada contra nos.
+    """
     run_id, dataset_id, cfg = cenario
     e = comprar(
         conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
         config=cfg, fracao_do_caixa=Decimal("0.5"),
     )
     b = conn.execute(
-        "SELECT high, low FROM bar WHERE dataset_id = ? AND open_time_ms = ?",
+        "SELECT open FROM bar WHERE dataset_id = ? AND open_time_ms = ?",
         (dataset_id, e.execution_bar_ms),
     ).fetchone()
-    assert e.price_ref == b["high"], "referencia tem de ser o topo da barra"
-    assert e.price_exec >= e.price_ref, "executado nunca melhor que a referencia"
-    assert e.price_exec > b["high"], "spread e slippage pioram alem do topo"
+    assert e.price_ref == b["open"]
 
 
-def test_venda_nunca_acima_da_minima_da_barra(conn, cenario) -> None:
-    run_id, dataset_id, cfg = cenario
-    comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0), config=cfg)
-    e = vender(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(5), config=cfg)
+def test_executado_nunca_melhor_que_a_referencia_nos_DOIS_modelos(
+    conn, cenario
+) -> None:
+    """O pessimismo nao depende do modelo: ele esta em `preco_executado`."""
+    run_id, dataset_id, _ = cenario
+    for modelo in ("abertura", "limite_adverso"):
+        cfg = ExperimentConfig(execution_reference=modelo)
+        c = comprar(
+            conn, run_id=run_id, dataset_id=dataset_id,
+            decision_bar_ms=barra(0), config=cfg, fracao_do_caixa=Decimal("0.1"),
+        )
+        assert c.price_exec > c.price_ref, f"{modelo}: compra nao piorou"
+        v = vender(
+            conn, run_id=run_id, dataset_id=dataset_id,
+            decision_bar_ms=barra(5), config=cfg,
+        )
+        assert v.price_exec < v.price_ref, f"{modelo}: venda nao piorou"
+
+
+def test_modelo_limite_adverso_continua_reproduzivel(conn, cenario) -> None:
+    """O campo e versionado: uma comparacao antiga precisa poder ser refeita
+    sob o modelo em que foi feita."""
+    run_id, dataset_id, _ = cenario
+    cfg = ExperimentConfig(execution_reference="limite_adverso")
+    e = comprar(
+        conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
+        config=cfg, fracao_do_caixa=Decimal("0.5"),
+    )
     b = conn.execute(
-        "SELECT high, low FROM bar WHERE dataset_id = ? AND open_time_ms = ?",
+        "SELECT high FROM bar WHERE dataset_id = ? AND open_time_ms = ?",
         (dataset_id, e.execution_bar_ms),
     ).fetchone()
-    assert e.price_ref == b["low"], "referencia tem de ser o fundo da barra"
-    assert e.price_exec <= e.price_ref
-    assert e.price_exec < b["low"]
+    assert e.price_ref == b["high"]
+
+
+def test_o_modelo_de_execucao_e_material(conn) -> None:
+    """Trocar o modelo tem de mudar o config_hash.
+
+    Se nao mudasse, dois runs reportariam a mesma identidade de configuracao
+    com semanticas de execucao diferentes - e a comparacao entre eles mentiria
+    sem nada acusar.
+    """
+    a = ExperimentConfig(execution_reference="abertura")
+    b = ExperimentConfig(execution_reference="limite_adverso")
+    assert a.config_hash() != b.config_hash()
 
 
 def test_o_BANCO_recusa_execucao_generosa(conn, cenario) -> None:
