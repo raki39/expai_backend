@@ -7,7 +7,7 @@ bytes, confere integridade contra a origem e devolve barras normalizadas.
 Tres fatos da fonte que o codigo aqui existe para tratar:
 
 1. A unidade do timestamp muda de milissegundos para MICROSSEGUNDOS em
-   2025-01, dentro da janela decidida (2024-09 a 2026-09). Normalizamos tudo
+   2025-01, dentro da janela decidida (2024-08 a 2026-08). Normalizamos tudo
    para milissegundos.
 
 2. Precos e volumes vem como STRING decimal ("93576.00000000"), nunca como
@@ -121,8 +121,9 @@ def intervalo_ms(timeframe: str) -> int:
 def meses_da_janela(inicio: date, fim: date) -> list[str]:
     """Meses "AAAA-MM" que cobrem [inicio, fim). O fim e exclusivo.
 
-    A janela decidida termina em 2026-09-01, que significa "ate o fim de
-    agosto". Incluir setembro traria um mes que a decisao nao pediu.
+    A janela decidida termina em 2026-08-01, que significa "ate o fim de
+    julho". Incluir agosto traria um mes que a decisao nao pediu - e que a
+    origem ainda nem publicou (ADR 0013).
     """
     if inicio >= fim:
         raise ValueError("inicio precisa ser anterior a fim")

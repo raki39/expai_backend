@@ -67,8 +67,12 @@ class ExperimentConfig(BaseModel):
 
     # ------------------------------------ dados e janela (ADR 0002, 0006)
     timeframe: str = "15m"
-    data_start: str = "2024-09-01"
-    data_end: str = "2026-09-01"
+    # Janela de 24 meses exatos, terminando num mes ja publicado pela origem.
+    # O `data_end` e EXCLUSIVO: 2026-08-01 significa "ate o fim de julho".
+    # Ver ADR 0013 - a janela anterior terminava em 2026-09-01, que a origem
+    # ainda nao tinha publicado.
+    data_start: str = "2024-08-01"
+    data_end: str = "2026-08-01"
     # Ultimos ~20% reservados na ingestao, excluidos do loader do experimento.
     reserved_fraction: Decimal = Decimal("0.20")
     # Nivel 1 = candles OHLCV. Declarado e propagado a todo resultado

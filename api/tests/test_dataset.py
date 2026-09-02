@@ -538,18 +538,23 @@ def _instalar_baixador(monkeypatch: pytest.MonkeyPatch, por_mes) -> None:
     )
 
 
+def meses_da_config() -> list[str]:
+    """Meses da janela que o bootstrap realmente usa.
+
+    Derivado da config, nunca repetido a mao: teste que duplica a data quebra
+    sozinho no dia em que a janela muda - e foi o que aconteceu.
+    """
+    cfg = ExperimentConfig()
+    return meses_da_janela(
+        date.fromisoformat(cfg.data_start), date.fromisoformat(cfg.data_end)
+    )
+
+
 def test_rota_de_ingestao_devolve_relatorio(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Caminho feliz de ponta a ponta, pela rota HTTP."""
-    todos = {
-        mes: barras_do_mes(mes)
-        for mes in meses_da_janela(
-            date(2024, 9, 1),
-            date(2026, 9, 1),
-        )
-    }
-    _instalar_baixador(monkeypatch, todos)
+    _instalar_baixador(monkeypatch, {m: barras_do_mes(m) for m in meses_da_config()})
 
     resposta = client.post("/api/dataset/ingest", json={"author": "teste"})
     assert resposta.status_code == 201
@@ -568,7 +573,7 @@ def test_rota_responde_409_com_o_relatorio_quando_ha_lacuna(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """O 409 tem de trazer o relatorio: e com ele que se decide aceitar."""
-    meses = meses_da_janela(date(2024, 9, 1), date(2026, 9, 1))
+    meses = meses_da_config()
     todos = {mes: barras_do_mes(mes) for mes in meses}
     todos[meses[3]] = barras_do_mes(meses[3], pular={50, 51, 52, 53})
     _instalar_baixador(monkeypatch, todos)
