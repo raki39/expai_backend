@@ -22,6 +22,7 @@ from ..dataset import loader as dataset_loader
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..ledger import livro
+from ..simulador import execucao as simulador
 from ..security import exigir_token_de_servico
 from ..settings import Settings
 from ..store import versao_schema, volume_gravavel, volume_montado
@@ -246,14 +247,17 @@ def ledger_estado(request: Request) -> dict[str, Any]:
     a prova de que o livro fecha e so um numero.
     """
     conn = _conn(request)
+    ativo = config_service.run_ativo(conn)
     violacoes = livro.conferir_partidas_dobradas(conn)
     divergencias = livro.reconciliar(conn)
     vinculos = livro.conferir_vinculo_inferencia(conn)
 
     return {
-        "run_ativo": config_service.run_ativo(conn),
-        "carteira": livro.carteira(conn),
-        "contas": livro.saldos(conn),
+        "run_ativo": ativo,
+        # Carteira DO RUN ativo: contas sao globais e somam a historia toda,
+        # o que responderia outra pergunta.
+        "carteira": livro.carteira(conn, run_id=ativo),
+        "contas": livro.saldos(conn, run_id=ativo) if ativo else livro.saldos(conn),
         "conferencias": {
             "partidas_dobradas_ok": not violacoes,
             "violacoes": violacoes,
@@ -329,6 +333,43 @@ def run_encerrar(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
         )
     return {"run_id": run_id, "state": estado}
+
+
+# -------------------------------------------------------------- simulador
+
+
+@router.get("/simulador")
+def simulador_estado(request: Request) -> dict[str, Any]:
+    """Agregado das execucoes do run ativo.
+
+    A fidelidade e as condicoes de validade vao SEMPRE junto do numero
+    (criterio 5, secao 8.4.1.1). Um custo agregado sem o nivel de fidelidade
+    que o produziu convida a conclusao que a Fase 0A nao pode sustentar.
+    """
+    conn = _conn(request)
+    ativo = config_service.run_ativo(conn)
+    if ativo is None:
+        return {
+            "run_ativo": None,
+            "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
+        }
+    return {"run_ativo": ativo, **simulador.resumo(conn, ativo)}
+
+
+@router.get("/execucoes")
+def execucoes_listar(request: Request, limite: int = 50) -> dict[str, Any]:
+    linhas = _conn(request).execute(
+        "SELECT id, run_id, side, decision_bar_ms, execution_bar_ms,"
+        " quantity_sats, price_ref, price_exec, notional_ref_cents, fee_cents,"
+        " spread_cents, slippage_cents, penalty_cents, fidelity_level,"
+        " ledger_transaction_id FROM execution ORDER BY id DESC LIMIT ?",
+        (limite,),
+    ).fetchall()
+    return {
+        "total": len(linhas),
+        "items": [dict(l) for l in linhas],
+        "condicoes_validade": simulador.CONDICOES_DE_VALIDADE,
+    }
 
 
 # --------------------------------------------------------------- sentinela

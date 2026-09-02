@@ -139,6 +139,49 @@ def carregar(
     return barras
 
 
+def barra_em(
+    conn: sqlite3.Connection, dataset_id: int, open_time_ms: int
+) -> BarraCarregada | None:
+    """A barra que abre exatamente em `open_time_ms`, ou None.
+
+    Sem guarda de `decision_ts`, e de proposito: o simulador precisa da barra
+    POSTERIOR a decisao para executar nela - e isso nao e olhar o futuro, e a
+    latencia acontecendo. O que a decisao pode VER continua sendo assunto de
+    `carregar()`.
+
+    Le de `bar_experimento`, entao o periodo reservado segue inalcancavel:
+    executar sobre dado reservado seria contamina-lo tanto quanto le-lo.
+    """
+    linha = conn.execute(
+        "SELECT open_time_ms, close_time_ms, open, high, low, close, volume,"
+        " quote_volume, trades FROM bar_experimento"
+        " WHERE dataset_id = ? AND open_time_ms = ?",
+        (dataset_id, open_time_ms),
+    ).fetchone()
+    return BarraCarregada(*tuple(linha)) if linha else None
+
+
+def proxima_barra(
+    conn: sqlite3.Connection, dataset_id: int, depois_de_ms: int, saltos: int = 1
+) -> BarraCarregada | None:
+    """A n-esima barra apos `depois_de_ms`. E assim que a latencia e aplicada.
+
+    Anda pela GRADE de barras existentes, e nao por aritmetica de timestamp:
+    se houvesse lacuna, somar o intervalo cairia num buraco e a execucao
+    aconteceria numa barra que nao existe.
+    """
+    if saltos < 1:
+        raise ValueError("latencia precisa ser de ao menos uma barra")
+    linha = conn.execute(
+        "SELECT open_time_ms, close_time_ms, open, high, low, close, volume,"
+        " quote_volume, trades FROM bar_experimento"
+        " WHERE dataset_id = ? AND open_time_ms > ?"
+        " ORDER BY open_time_ms LIMIT 1 OFFSET ?",
+        (dataset_id, depois_de_ms, saltos - 1),
+    ).fetchone()
+    return BarraCarregada(*tuple(linha)) if linha else None
+
+
 def resumo(conn: sqlite3.Connection, dataset_id: int) -> dict:
     """Contagens para o painel. Nao devolve barra reservada, so quantas sao."""
     meta = metadados(conn, dataset_id)

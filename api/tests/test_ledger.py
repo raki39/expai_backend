@@ -692,3 +692,60 @@ def test_historico_mostra_original_e_estorno(
     por_id = {i["id"]: i for i in items}
     assert tx in por_id and estorno in por_id
     assert por_id[estorno]["reverses_transaction_id"] == tx
+
+
+# ============================================================================
+# Isolamento entre runs
+#
+# Regressao de um defeito real: as contas sao globais, entao abrir um segundo
+# run creditava capital semente POR CIMA do saldo do primeiro e os dois
+# passavam a dividir a mesma carteira. So apareceu quando o simulador rodou
+# varios runs em sequencia e o caixa CRESCEU com mais operacoes.
+# ============================================================================
+
+
+def test_cada_run_tem_carteira_propria(conn: sqlite3.Connection) -> None:
+    from app.ledger.livro import saldo_da_conta
+
+    run_a, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    registrar(
+        conn, kind="operacao", run_id=run_a,
+        lancamentos=[
+            Lancamento(contas.CAIXA_SIM, -30_000),
+            Lancamento(contas.DESPESA_TAXA, 30_000),
+        ],
+    )
+    run_b, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+
+    # O run B comeca com a semente inteira, sem herdar o gasto do A.
+    assert saldo_da_conta(conn, contas.CAIXA_SIM, run_id=run_a) == SEMENTE_USD - 30_000
+    assert saldo_da_conta(conn, contas.CAIXA_SIM, run_id=run_b) == SEMENTE_USD
+
+    # E o livro inteiro continua somando os dois: sao perguntas diferentes,
+    # e as duas tem resposta correta.
+    assert saldo_da_conta(conn, contas.CAIXA_SIM) == 2 * SEMENTE_USD - 30_000
+
+
+def test_carteira_de_run_novo_nao_tem_buraco(conn: sqlite3.Connection) -> None:
+    """A view so traz conta com movimento; a carteira precisa das zeradas."""
+    run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    c = carteira(conn, run_id=run_id)
+    assert c["simulado_usd"]["caixa_minor"] == SEMENTE_USD
+    assert c["simulado_usd"]["posicao_btc_minor"] == 0
+    assert c["real_brl"]["caixa_minor"] == 0
+
+
+def test_transacao_sem_run_nao_entra_em_run_nenhum(conn: sqlite3.Connection) -> None:
+    """Atribui-la a algum run seria inventar procedencia."""
+    from app.ledger.livro import saldo_da_conta
+
+    run_id, _ = abrir_run(conn, config_version_id=1, seed_capital_usd_cents=SEMENTE_USD)
+    registrar(
+        conn, kind="operacao",  # sem run_id
+        lancamentos=[
+            Lancamento(contas.CAIXA_SIM, -5_000),
+            Lancamento(contas.DESPESA_TAXA, 5_000),
+        ],
+    )
+    assert saldo_da_conta(conn, contas.CAIXA_SIM, run_id=run_id) == SEMENTE_USD
+    assert saldo_da_conta(conn, contas.CAIXA_SIM) == SEMENTE_USD - 5_000

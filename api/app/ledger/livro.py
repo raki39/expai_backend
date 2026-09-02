@@ -388,8 +388,38 @@ def registrar_custo_reflexao(
 # ---------------------------------------------------------------------------
 
 
-def saldos(conn: sqlite3.Connection, book: str | None = None) -> list[dict]:
-    """Saldo por conta, sempre derivado dos lancamentos."""
+def saldos(
+    conn: sqlite3.Connection,
+    book: str | None = None,
+    *,
+    run_id: int | None = None,
+) -> list[dict]:
+    """Saldo por conta, sempre derivado dos lancamentos.
+
+    Com `run_id`, devolve a historia economica DAQUELE run. Sem ele, o livro
+    inteiro. Os dois numeros sao legitimos e respondem perguntas diferentes -
+    confundi-los faz um run herdar a carteira do anterior, que foi exatamente
+    o defeito que o simulador revelou.
+    """
+    if run_id is not None:
+        linhas = conn.execute(
+            "SELECT * FROM account_balance_run WHERE run_id = ?"
+            + (" AND book = ?" if book else "")
+            + " ORDER BY code",
+            (run_id, book) if book else (run_id,),
+        ).fetchall()
+        # A view so traz conta que teve movimento. Completa com as zeradas,
+        # para que a carteira de um run novo nao tenha buraco.
+        vistas = {l["code"] for l in linhas}
+        faltantes = [
+            dict(l) | {"run_id": run_id, "balance_minor": 0, "entries": 0}
+            for l in conn.execute("SELECT * FROM account_balance ORDER BY code")
+            if l["code"] not in vistas and (not book or l["book"] == book)
+        ]
+        return sorted(
+            [dict(l) for l in linhas] + faltantes, key=lambda s: s["code"]
+        )
+
     sql = "SELECT * FROM account_balance"
     parametros: tuple = ()
     if book is not None:
@@ -398,9 +428,26 @@ def saldos(conn: sqlite3.Connection, book: str | None = None) -> list[dict]:
     return [dict(l) for l in conn.execute(sql + " ORDER BY code", parametros)]
 
 
-def carteira(conn: sqlite3.Connection) -> dict:
-    """Resumo economico dos dois livros."""
-    por_conta = {s["code"]: s for s in saldos(conn)}
+def saldo_da_conta(
+    conn: sqlite3.Connection, code: str, *, run_id: int | None = None
+) -> int:
+    """Saldo de uma conta. Ponto unico de leitura, para nao haver duas formas."""
+    if run_id is not None:
+        linha = conn.execute(
+            "SELECT balance_minor FROM account_balance_run"
+            " WHERE run_id = ? AND code = ?",
+            (run_id, code),
+        ).fetchone()
+    else:
+        linha = conn.execute(
+            "SELECT balance_minor FROM account_balance WHERE code = ?", (code,)
+        ).fetchone()
+    return int(linha["balance_minor"]) if linha else 0
+
+
+def carteira(conn: sqlite3.Connection, *, run_id: int | None = None) -> dict:
+    """Resumo economico dos dois livros. Com `run_id`, so daquele run."""
+    por_conta = {s["code"]: s for s in saldos(conn, run_id=run_id)}
     return {
         "simulado_usd": {
             "caixa_minor": por_conta[contas.CAIXA_SIM]["balance_minor"],

@@ -37,6 +37,7 @@ POSICAO_BTC = "sim.carteira.posicao_btc"
 SEMENTE = "sim.patrimonio.semente"
 TESOURARIA_SIM = "sim.tesouraria"
 DESPESA_TAXA = "sim.despesa.taxa"
+DESPESA_SPREAD = "sim.despesa.spread"
 DESPESA_SLIPPAGE = "sim.despesa.slippage"
 DESPESA_PENALIDADE = "sim.despesa.penalidade"
 RESULTADO = "sim.resultado.realizado"
@@ -58,7 +59,11 @@ PLANO: tuple[Conta, ...] = (
     # que torna o custo cognitivo visivel DENTRO do resultado do agente, e nao
     # uma despesa externa que ele nao enxerga (secao 3.6).
     Conta(TESOURARIA_SIM, "simulado", "USD", "tesouraria", "Tesouraria (simulado)"),
+    # Quatro contas de custo, e nao uma so: o criterio 3 do incremento 3
+    # recusa um campo "custo" agregado. Sem separar, e impossivel saber
+    # depois qual componente comeu o resultado.
     Conta(DESPESA_TAXA, "simulado", "USD", "despesa", "Taxas de execucao"),
+    Conta(DESPESA_SPREAD, "simulado", "USD", "despesa", "Spread"),
     Conta(DESPESA_SLIPPAGE, "simulado", "USD", "despesa", "Slippage"),
     Conta(
         DESPESA_PENALIDADE,

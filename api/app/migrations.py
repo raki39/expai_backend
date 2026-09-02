@@ -507,6 +507,140 @@ MIGRACOES: list[tuple[int, str, str]] = [
         FROM account a;
         """,
     ),
+    (
+        4,
+        "incremento 3: execucoes do simulador pessimista",
+        """
+        -- ==================================================================
+        -- Uma execucao simulada.
+        --
+        -- Guarda a DECOMPOSICAO, e nao so o total: o criterio 3 recusa um
+        -- campo "custo" agregado. Sem separar taxa, spread, slippage e
+        -- penalidade, e impossivel saber depois qual deles comeu o resultado
+        -- - e essa e justamente a pergunta que a Fase 0A precisa poder fazer
+        -- (secao 8.4.1).
+        --
+        -- Precos com a escala do dataset (1e-8). Dinheiro em centavos de USD.
+        -- Quantidade de BTC em satoshis (1e-8). Tudo inteiro (regra 5).
+        -- ==================================================================
+        CREATE TABLE execution (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id            INTEGER NOT NULL REFERENCES run(id),
+            dataset_id        INTEGER NOT NULL REFERENCES dataset(id),
+
+            -- A latencia e estrutural: a execucao acontece numa barra
+            -- POSTERIOR a da decisao, sempre (criterio 2). O CHECK abaixo
+            -- torna "executou na mesma barra" impossivel, e nao apenas
+            -- improvavel.
+            decision_bar_ms   INTEGER NOT NULL,
+            execution_bar_ms  INTEGER NOT NULL,
+
+            side              TEXT    NOT NULL CHECK (side IN ('compra','venda')),
+            quantity_sats     INTEGER NOT NULL CHECK (quantity_sats > 0),
+
+            -- Referencia = limite ADVERSO da barra no nivel de fidelidade
+            -- declarado: maxima na compra, minima na venda. Executado = a
+            -- referencia piorada por spread, slippage e penalidade.
+            price_ref         INTEGER NOT NULL CHECK (price_ref > 0),
+            price_exec        INTEGER NOT NULL CHECK (price_exec > 0),
+
+            notional_ref_cents INTEGER NOT NULL CHECK (notional_ref_cents > 0),
+            fee_cents         INTEGER NOT NULL CHECK (fee_cents >= 0),
+            spread_cents      INTEGER NOT NULL CHECK (spread_cents >= 0),
+            slippage_cents    INTEGER NOT NULL CHECK (slippage_cents >= 0),
+            penalty_cents     INTEGER NOT NULL CHECK (penalty_cents >= 0),
+
+            -- Declarado em CADA execucao e propagado a todo resultado
+            -- (criterio 5, secao 8.4.1.1). Nao e metadado do dataset que
+            -- alguem consulta depois: viaja junto do numero.
+            fidelity_level    INTEGER NOT NULL CHECK (fidelity_level >= 1),
+
+            ledger_transaction_id INTEGER NOT NULL
+                                  REFERENCES ledger_transaction(id),
+
+            CHECK (execution_bar_ms > decision_bar_ms),
+
+            -- Nunca favoravel (criterio 1). Na compra o executado nao pode
+            -- ficar abaixo da referencia adversa; na venda, nao pode ficar
+            -- acima. O banco recusa a execucao generosa.
+            CHECK (
+                (side = 'compra' AND price_exec >= price_ref)
+             OR (side = 'venda'  AND price_exec <= price_ref)
+            )
+        );
+
+        CREATE INDEX idx_execution_run ON execution(run_id);
+        CREATE INDEX idx_execution_bar ON execution(execution_bar_ms);
+
+        CREATE TRIGGER execution_sem_update
+        BEFORE UPDATE ON execution
+        BEGIN
+            SELECT RAISE(ABORT, 'execucao e imutavel: corrija por estorno');
+        END;
+
+        CREATE TRIGGER execution_sem_delete
+        BEFORE DELETE ON execution
+        BEGIN
+            SELECT RAISE(ABORT, 'execucao e apenas por acrescimo');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- Posicao corrente, derivada das execucoes.
+        --
+        -- Como o saldo, nao e armazenada: duas fontes de verdade sobre
+        -- quanto se tem divergem, e ai nao ha como saber qual esta certa
+        -- (regra 16). D1 fixou long/flat, entao o resultado e sempre >= 0.
+        -- ------------------------------------------------------------------
+        CREATE VIEW position_atual AS
+        SELECT
+            run_id,
+            COALESCE(SUM(CASE WHEN side = 'compra' THEN quantity_sats
+                              ELSE -quantity_sats END), 0) AS quantity_sats,
+            COUNT(*) AS execucoes,
+            MAX(fidelity_level) AS fidelity_level
+        FROM execution
+        GROUP BY run_id;
+        """,
+    ),
+    (
+        5,
+        "saldo por run: cada run tem historia economica propria",
+        """
+        -- ==================================================================
+        -- Saldo POR RUN.
+        --
+        -- `account_balance` soma o livro inteiro, o que esta certo para
+        -- "quanto ja passou por esta conta na historia toda" - e errado para
+        -- "quanto este run tem". Com contas globais, abrir um segundo run
+        -- credita capital semente por cima do saldo do primeiro, e os dois
+        -- passam a dividir a mesma carteira.
+        --
+        -- O defeito so apareceu quando o simulador rodou varios runs em
+        -- sequencia: o caixa CRESCIA com mais operacoes. E ele inviabilizaria
+        -- o incremento 4, onde o B1 sozinho precisa de mil historias
+        -- economicas independentes.
+        --
+        -- Transacao sem `run_id` fica de fora: ela nao pertence a run nenhum,
+        -- e atribui-la a algum seria inventar procedencia.
+        -- ==================================================================
+        CREATE VIEW account_balance_run AS
+        SELECT
+            t.run_id   AS run_id,
+            a.id       AS account_id,
+            a.code     AS code,
+            a.book     AS book,
+            a.currency AS currency,
+            a.kind     AS kind,
+            a.name     AS name,
+            SUM(e.amount_minor) AS balance_minor,
+            COUNT(e.id) AS entries
+        FROM ledger_entry e
+        JOIN ledger_transaction t ON t.id = e.transaction_id
+        JOIN account a ON a.id = e.account_id
+        WHERE t.posted_at IS NOT NULL AND t.run_id IS NOT NULL
+        GROUP BY t.run_id, a.id;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
