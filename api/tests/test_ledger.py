@@ -782,3 +782,48 @@ def test_a_rota_declara_QUAL_carteira_esta_mostrando(
     assert corpo["runs_somados"] == 2
     # O livro inteiro soma os dois: e o que "livro_inteiro" quer dizer.
     assert corpo["carteira"]["simulado_usd"]["caixa_minor"] == 2 * SEMENTE_USD
+
+
+def test_na_0a_nenhum_caminho_leva_ao_estado_pausado(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """ADR 0018: o run e atomico, e a ausencia da pausa foi escolhida.
+
+    `pausado` sobrevive no CHECK de `run.state` desde a migracao 1, e
+    `ESTADOS_ATIVOS` o trata como ativo para travar a config. O ADR afirma que
+    ninguem alcanca esse estado - e afirmacao de ADR que ninguem confere e
+    justamente a que para de valer sem avisar. Este teste confere.
+    """
+    import ast
+    from pathlib import Path
+
+    from app.ledger.livro import encerrar_run
+
+    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
+
+    with pytest.raises(TransacaoInvalida):
+        encerrar_run(conn, run_id, "pausado")
+
+    estado = conn.execute("SELECT state FROM run WHERE id = ?", (run_id,)).fetchone()[0]
+    assert estado == "executando"
+
+    # Nenhum modulo fora da migracao escreve o estado. Quem abrir a transicao
+    # um dia cai aqui - e vai reler o ADR em vez de descobrir mais tarde que
+    # nada no sistema sabe o que fazer com um run pausado.
+    #
+    # A varredura e de CONSTANTE DE STRING, via AST, e nao de texto: um
+    # comentario explicando que a pausa nao existe e legitimo, ate desejavel.
+    # O que nao pode e o valor entrar no codigo. (Mesma licao do teste de nome
+    # de provedor, que comecou como grep e acusava a propria explicacao.)
+    raiz = Path(__file__).resolve().parents[1] / "app"
+    mencionam = sorted(
+        caminho.relative_to(raiz).as_posix()
+        for caminho in raiz.rglob("*.py")
+        if any(
+            isinstance(no, ast.Constant)
+            and isinstance(no.value, str)
+            and "pausado" in no.value
+            for no in ast.walk(ast.parse(caminho.read_text(encoding="utf-8")))
+        )
+    )
+    assert mencionam == ["migrations.py"]
