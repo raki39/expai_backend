@@ -57,17 +57,111 @@ a ser ignorado** para esses campos.
 Todos exigem `Authorization: Bearer <API_SERVICE_TOKEN>`. Sem exceção —
 `/api/health` inclusive. Com a api pública, isto é o que a protege.
 
+Esta tabela é **conferida por teste** (`test_o_readme_descreve_todas_as_rotas`):
+toda rota do router aparece aqui, e toda rota citada aqui existe. Uma tabela de
+endpoints que ninguém confere envelhece em silêncio — esta já tinha
+envelhecido, listando 6 rotas quando existiam 26.
+
 | Método | Rota | Função |
 |---|---|---|
 | GET | `/api/health` | substrato: banco, volume, schema, config vigente |
-| GET | `/api/config` | configuração vigente |
+| GET | `/api/config` | configuração vigente e se o catálogo está defasado |
 | GET | `/api/config/history` | versões com autor, data, valor anterior e novo |
 | POST | `/api/config` | nova versão (recusada durante run ativo ou acima do teto) |
+| POST | `/api/config/catalogo` | adota o catálogo de provedores vigente |
+| POST | `/api/config/reancorar` | regrava a config sob o hash correto após deriva de schema |
+| GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
+| POST | `/api/dataset/ingest` | baixa e fixa o dataset (~35 s, 46 arquivos) |
+| GET | `/api/ledger` | carteira e escopo (run ativo, ou livro inteiro) |
+| GET | `/api/ledger/transacoes` | histórico, com estornos |
+| POST | `/api/run` | abre run e credita capital semente |
+| POST | `/api/run/{run_id}/encerrar` | encerra num dos três estados terminais |
+| GET | `/api/simulador` | parâmetros efetivos e condições de validade |
+| GET | `/api/execucoes` | ordens e execuções simuladas |
+| GET | `/api/comparacao` | última comparação B1, B2, B3 |
+| POST | `/api/comparacao` | roda a comparação (sem LLM) |
+| GET | `/api/curva` | curva de patrimônio e excesso sobre baseline |
+| GET | `/api/agente` | caminho percorrido, propostas, gasto |
+| POST | `/api/agente` | **roda o ciclo com LLM — gasta dinheiro de verdade** |
+| GET | `/api/relatorio` | relatório de fechamento da 0A, em JSON |
+| GET | `/api/relatorio/markdown` | o mesmo relatório, para humano |
+| POST | `/api/reprodutibilidade` | prova de R12: três digests, sem LLM |
+| GET | `/api/vinculo/execucao/{execution_id}` | da execução ao evento cognitivo (R25.2) |
+| GET | `/api/vinculo/evento/{event_id}` | da decisão ao custo, regra, execuções e resultado |
 | POST | `/api/sentinel` | grava marcador de persistência |
 | GET | `/api/sentinel` | lista marcadores |
 
 Sem `/docs`, `/redoc` ou `/openapi.json`: a superfície é consumida pelo proxy
 do `web`, e um endpoint a menos é uma coisa a menos para proteger.
+
+## Operação: do zero ao relatório
+
+A ordem importa. Cada passo depende do anterior, e pular um faz o seguinte
+recusar com `409` em vez de produzir número errado.
+
+```bash
+T="Authorization: Bearer $API_SERVICE_TOKEN"
+API=http://localhost:8000
+
+# 1. o substrato responde, e o volume PERSISTE (não apenas aceita escrita)
+curl -sH "$T" $API/api/health
+
+# 2. o dataset, uma vez só. ~35 s. Fixa janela, sha256 e reserva.
+curl -sH "$T" -XPOST $API/api/dataset/ingest -d '{"author":"voce"}'
+
+# 3. a comparação sem LLM: B1, B2 e B3. Nenhum centavo gasto.
+curl -sH "$T" -XPOST $API/api/comparacao -d '{"author":"voce"}'
+
+# 4. a prova de reprodutibilidade: três digests. Também sem LLM.
+curl -sH "$T" -XPOST $API/api/reprodutibilidade -d '{}'
+
+# 5. o ciclo do agente. ESTE gasta dinheiro de verdade.
+curl -sH "$T" -XPOST $API/api/agente -d '{"author":"voce"}'
+
+# 6. o relatório
+curl -sH "$T" $API/api/relatorio/markdown
+```
+
+**O passo 5 é o único que custa dinheiro.** Os tetos são rígidos: ao atingir,
+as mãos rápidas continuam e o cérebro para (§3.6 regra 2). O teto do banco
+nunca pode exceder `LLM_MAX_USD_ABSOLUTE` do env.
+
+Se `/api/config` acusar `config_hash` como **não descreve mais**, um campo
+novo entrou no schema. Abrir run fica bloqueado até `POST
+/api/config/reancorar` — é o mecanismo funcionando, não uma falha.
+
+### Como ler o relatório
+
+```bash
+python -m app.relatorio                    # escreve no volume, ao lado do banco
+python -m app.relatorio saida.md --run 14  # destino e run explícitos
+```
+
+Sai `0` quando o ciclo fecha e `1` quando não fecha — um script de CI que
+gerasse o relatório e ignorasse o resultado seria decoração.
+
+O relatório abre pela **pergunta da 0A**: *o ciclo básico fecha?*. A resposta
+não é digitada em lugar nenhum: é a conjunção de doze condições, cada uma um
+booleano vindo de uma consulta. Quando alguma é falsa, o relatório **diz
+qual** — e `nao se aplica` é diferente de `NAO`, porque com o teto em zero não
+há custo de decisão a registrar (D23), e reprovar o run por isso confundiria
+"não sei" com "não".
+
+As dez seções respondem, nesta ordem: o que o agente **observou** (janela e
+dataset com hash), quanto **refletiu** (tokens e custo lidos do `usage` real),
+que **regra propôs** (hash, JSON e a expectativa declarada *antes* de
+executar), o que **executou**, quanto **custou nos dois livros**, como se saiu
+**contra B1, B2 e B3**, o que a **avaliação posterior** comparou, o **caminho
+percorrido** com o vínculo navegado nos dois sentidos, a **integridade
+contábil** e a **reprodutibilidade**.
+
+Duas leituras que enganam se lidas rápido:
+
+- **Excesso sobre baseline, nunca valor absoluto.** "US$ 620" não diz nada; o
+  que diz é a faixa contra o B1 casado, que gira o mesmo número de vezes **e
+  com o mesmo tamanho de posição**.
+- **Zero reflexões significa que o agente É o B3** (D23). Um run assim não
+  mede cérebro nenhum, e o relatório informa isso na seção 2.
 
 ## Estrutura
 
@@ -75,15 +169,26 @@ do `web`, e um endpoint a menos é uma coisa a menos para proteger.
 app/
 ├── settings.py       env: segredos e bootstrap
 ├── logging_setup.py  JSON estruturado + redação de segredo
-├── migrations.py     DDL versionado
+├── migrations.py     DDL versionado (8 migrações)
 ├── store.py          conexão, pragmas, migração atômica
 ├── security.py       token de serviço
-├── config/
-│   ├── schema.py     parâmetros do experimento + config_hash
-│   └── service.py    versionamento e as três travas
+├── config/           parâmetros versionados no banco + config_hash
+├── dataset/          ingestão da Binance, integridade, reserva
+├── ledger/           partidas dobradas, dois livros, contas por run
+├── simulador/        execução pessimista, custos decompostos
+├── regra/            catálogo fechado de 3 famílias, hash de conteúdo
+├── maos_rapidas/     executor por barra, B1/B2/B3, curva — SEM LLM
+├── cerebro/          grafo de 4 nós, adaptadores, custo, cache, tetos
+│   └── avaliacao.py  a avaliação posterior: evento filho da decisão
+├── relatorio/        fechamento da 0A: montar · texto · vínculo · R12
 ├── api/routes.py     HTTP, sem lógica de negócio
 └── main.py           boot
 ```
+
+**A fronteira que não é convenção:** `maos_rapidas/` não importa `cerebro/`,
+nem LangGraph, nem provedor — e há teste lendo o código-fonte para provar
+(§3.2). Um import dentro de função escaparia da inspeção em tempo de execução,
+então a verificação é sobre o texto, não sobre o processo.
 
 ## Docker
 

@@ -749,3 +749,32 @@ def test_a_comparacao_usa_uma_unidade_so(
     for marcador in ("B2", "B3"):
         bloco = r["comparado"][marcador]
         assert bloco["idas_e_voltas"] * 2 <= bloco["execucoes"] + 1
+
+
+def test_o_readme_descreve_todas_as_rotas() -> None:
+    """Criterio 5: o README de operacao tem de descrever a api que existe.
+
+    Este teste nasceu de um defeito: a tabela listava 6 endpoints quando
+    havia 26. Uma tabela de endpoints que ninguem confere e mais uma forma do
+    padrao que este projeto ja corrigiu seis vezes - descrevia a api, parou de
+    descrever, e nada indicou a mudanca.
+
+    Confere nos DOIS sentidos: rota sem linha no README, e linha no README sem
+    rota correspondente. So o primeiro sentido deixaria a tabela acumular
+    endpoints que deixaram de existir.
+    """
+    import pathlib
+    import re
+
+    from app.api.routes import router
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    documentadas = set(re.findall(r"\|\s*`(/api/[^`]+)`\s*\|", readme))
+    reais = {r.path for r in router.routes}
+
+    faltando = sorted(reais - documentadas)
+    sobrando = sorted(documentadas - reais)
+    assert not faltando, f"rotas sem linha no README: {faltando}"
+    assert not sobrando, f"linhas no README sem rota: {sobrando}"
