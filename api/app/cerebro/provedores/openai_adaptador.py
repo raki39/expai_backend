@@ -1,10 +1,10 @@
 """Adaptador da OpenAI. O segundo provedor exigido pela secao 3.9.
 
-**Estado honesto: escrito, coberto por teste com transporte falso, e ainda
-NAO exercitado contra a API real** - falta chave e falta a decisao de qual
-modelo usar, que e configuracao versionada e nao escolha deste arquivo. O
-criterio 7b nao esta cumprido enquanto isso nao acontecer, e "viabilidade
-nunca exercitada e suposicao" e literalmente o texto do criterio.
+**Exercitado contra a API real em 2026-09-02** (criterio 7b, ADR 0009): a
+resposta validou contra o MESMO schema da regra e os campos de uso chegaram ao
+normalizador. "Viabilidade nunca exercitada e suposicao" - agora nao e mais.
+O teste que faz isso e marcado `rede` e so roda com o interruptor ligado,
+porque gasta dinheiro de verdade.
 
 Usa **chat.completions**, e nao a API de respostas, por estabilidade: e a
 superficie que menos mudou de forma entre versoes do SDK, e este adaptador
@@ -28,7 +28,7 @@ import logging
 from typing import Any
 
 from ...ledger.livro import Uso
-from .base import ErroDoProvedor, Pedido, Resposta
+from .base import Credenciais, ErroDoProvedor, Pedido, Resposta
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +39,14 @@ MAX_RETRIES = 2
 class AdaptadorOpenAI:
     provider = "openai"
 
-    def chamar(self, pedido: Pedido, *, api_key: str) -> Resposta:
+    def chamar(self, pedido: Pedido, *, credenciais: Credenciais) -> Resposta:
         import openai  # local de proposito: ver provedores/__init__.py
 
         cliente = openai.OpenAI(
-            api_key=api_key, timeout=TIMEOUT_S, max_retries=MAX_RETRIES
+            api_key=credenciais.api_key,
+            default_headers=credenciais.cabecalhos or None,
+            timeout=TIMEOUT_S,
+            max_retries=MAX_RETRIES,
         )
         try:
             resposta = cliente.chat.completions.create(

@@ -29,7 +29,7 @@ from ..config.schema import ExperimentConfig
 from ..ledger.livro import Uso, fx_micro, registrar_custo_reflexao
 from ..settings import Settings
 from . import cache, custo as precificacao, tetos
-from .provedores import Adaptador, adaptador_de, chave_do_provedor
+from .provedores import Adaptador, adaptador_de, credenciais_do_provedor
 from .provedores.base import ErroDoProvedor, Pedido, Resposta
 
 log = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ def executar(
     else:
         adaptador = adaptador or adaptador_de(provider)
         resposta = adaptador.chamar(
-            pedido, api_key=chave_do_provedor(settings, provider)
+            pedido, credenciais=credenciais_do_provedor(settings, provider)
         )
         conta = precificacao.calcular(resposta.uso, preco)
         custo_micro = conta.total_micro

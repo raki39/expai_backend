@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
 
+    # Nao e segredo: e o identificador do workspace em que a chave age. Uma
+    # chave ligada a identidade (e nao ao workspace) e recusada com 400 sem
+    # ele. Fica fora de `SECRET_FIELDS` de proposito - redigir um id que nao
+    # e credencial so atrapalharia o diagnostico -, mas tambem nao aparece em
+    # `/api/health`: nada de identificar conta de terceiro numa pagina.
+    anthropic_workspace_id: str = ""
+
     # ------------------------------------------------------------- CORS
     # Lista separada por virgula. Vazio = nenhuma origem liberada.
     #

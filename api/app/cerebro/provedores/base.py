@@ -54,6 +54,23 @@ class Pedido:
 
 
 @dataclass(frozen=True)
+class Credenciais:
+    """O que um provedor exige para autenticar. Nem sempre e so uma chave.
+
+    Descoberto na primeira chamada real: uma chave da Anthropic ligada a
+    IDENTIDADE (e nao ao workspace) e recusada com 400 sem o cabecalho
+    `anthropic-workspace-id`. Um parametro `api_key` solto teria obrigado a
+    contrabandear isso por variavel global ou por um segundo argumento
+    especifico de um provedor dentro da interface de todos.
+
+    Nada daqui e gravado, logado ou devolvido em qualquer resposta.
+    """
+
+    api_key: str
+    cabecalhos: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Resposta:
     """O que voltou. `texto` e o JSON cru; `uso` ja esta normalizado."""
 
@@ -69,5 +86,5 @@ class ErroDoProvedor(Exception):
 class Adaptador(Protocol):
     provider: str
 
-    def chamar(self, pedido: Pedido, *, api_key: str) -> Resposta:
+    def chamar(self, pedido: Pedido, *, credenciais: Credenciais) -> Resposta:
         ...

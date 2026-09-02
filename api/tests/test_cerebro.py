@@ -30,7 +30,12 @@ from app.cerebro.contrato import (
     PropostaBruta,
     montar_regra,
 )
-from app.cerebro.provedores.base import ErroDoProvedor, Pedido, Resposta
+from app.cerebro.provedores.base import (
+    Credenciais,
+    ErroDoProvedor,
+    Pedido,
+    Resposta,
+)
 from app.config.schema import ExperimentConfig, PrecoModelo
 from app.ledger import contas
 from app.ledger.livro import (
@@ -100,9 +105,9 @@ class AdaptadorFalso:
         self.pedidos: list[Pedido] = []
         self.chaves_recebidas: list[str] = []
 
-    def chamar(self, pedido: Pedido, *, api_key: str) -> Resposta:
+    def chamar(self, pedido: Pedido, *, credenciais: Credenciais) -> Resposta:
         self.pedidos.append(pedido)
-        self.chaves_recebidas.append(api_key)
+        self.chaves_recebidas.append(credenciais.api_key)
         if self.erro is not None:
             raise self.erro
         if not self.respostas:
@@ -1019,16 +1024,47 @@ def test_o_bloco_de_sistema_e_identico_nas_duas_chamadas(
 # ===========================================================================
 
 
-def _sem_chave(nome: str) -> bool:
+# Interruptor explicito, e nao uma segunda copia da chave. A garantia que
+# importa e "rodar a suite nao gasta dinheiro por descuido", e a forma honesta
+# de escrever isso e um campo que diz exatamente isso - nao um segredo
+# duplicado no mesmo arquivo, que so multiplica o lugar de onde ele pode
+# vazar.
+#
+#   RODAR_TESTES_DE_REDE=1 python -m pytest -m rede
+INTERRUPTOR = "RODAR_TESTES_DE_REDE"
+
+
+def _rede_desligada() -> bool:
     import os
 
-    return not os.getenv(nome)
+    return os.getenv(INTERRUPTOR, "") not in ("1", "true", "sim")
+
+
+def _chave_do_arquivo(nome: str) -> str:
+    """Le a chave do `.env` do servico, sem passar pelo ambiente.
+
+    Tem de ser assim: a fixture `ambiente` injeta chaves FALSAS em variavel de
+    ambiente para provar que segredo nao vaza, e variavel de ambiente vence o
+    arquivo. Um teste de rede que lesse do ambiente autenticaria com a chave
+    falsa e falharia com 401 - dizendo "o adaptador nao funciona" quando o que
+    nao funcionou foi o teste.
+
+    A chave lida aqui nunca e gravada, logada nem devolvida em nada.
+    """
+    arquivo = pathlib.Path(__file__).resolve().parents[1] / ".env"
+    if not arquivo.exists():
+        return ""
+    for linha in arquivo.read_text(encoding="utf-8").splitlines():
+        despida = linha.strip()
+        if despida.startswith(f"{nome}="):
+            return despida.split("=", 1)[1].strip().strip("\"'")
+    return ""
 
 
 @pytest.mark.rede
 @pytest.mark.skipif(
-    _sem_chave("ANTHROPIC_API_KEY_REAL"),
-    reason="criterio 6 exige chamada real; defina ANTHROPIC_API_KEY_REAL",
+    _rede_desligada(),
+    reason=f"criterio 6 gasta dinheiro de verdade; ligue com {INTERRUPTOR}=1",
 )
 def test_cache_de_prompt_funciona_na_segunda_reflexao(
     conn: sqlite3.Connection, cenario, settings
@@ -1038,15 +1074,20 @@ def test_cache_de_prompt_funciona_na_segunda_reflexao(
     Zero aqui NAO e para ser ignorado: significa invalidador silencioso no
     prefixo, e o defeito e nosso.
     """
-    import os
-
     from pydantic import SecretStr
 
+    chave = _chave_do_arquivo("ANTHROPIC_API_KEY")
+    if not chave:
+        pytest.skip("ANTHROPIC_API_KEY ausente do .env do servico")
     reais = settings.model_copy(
         update={
-            "anthropic_api_key": SecretStr(os.environ["ANTHROPIC_API_KEY_REAL"])
+            "anthropic_api_key": SecretStr(chave),
+            # Chave ligada a identidade exige o id do workspace junto; chave
+            # de workspace ignora o cabecalho. Manda-se quando existe.
+            "anthropic_workspace_id": _chave_do_arquivo("ANTHROPIC_WORKSPACE_ID"),
         }
     )
+
     resultado = _rodar_ciclo(conn, cenario, reais, None)
     leituras = [
         l["tokens_cache_read"]
@@ -1056,39 +1097,49 @@ def test_cache_de_prompt_funciona_na_segunda_reflexao(
             (resultado.run_id,),
         )
     ]
-    assert len(leituras) >= 2
+    # O grafo engole falha de provedor num evento de parada, de proposito -
+    # o run tem de terminar mesmo assim. Mas um teste que so dissesse
+    # "esperava 2 chamadas, houve 0" mandaria procurar no lugar errado, que e
+    # exatamente o modo de falha que este projeto ja registrou quatro vezes.
+    assert len(leituras) >= 2, (
+        f"o cerebro nao chegou a chamar: parou em {resultado.parou_em!r} "
+        f"porque {resultado.motivo!r}"
+    )
     assert leituras[1] and leituras[1] > 0, (
-        "cache_read zero na segunda chamada: ha invalidador no prefixo"
+        "cache_read zero na segunda chamada: ha invalidador no prefixo, "
+        "ou o prefixo esta abaixo do minimo cacheavel do modelo"
     )
 
 
 @pytest.mark.rede
 @pytest.mark.skipif(
-    _sem_chave("OPENAI_API_KEY_REAL"),
-    reason="criterio 7b exige chamada real ao segundo provedor",
+    _rede_desligada(),
+    reason=f"criterio 7b gasta dinheiro de verdade; ligue com {INTERRUPTOR}=1",
 )
 def test_segundo_provedor_valida_contra_o_mesmo_schema(
     conn: sqlite3.Connection, cenario, settings
 ) -> None:
     """Criterio 7b: viabilidade nunca exercitada e suposicao (ADR 0009)."""
-    import os
-
     from app.cerebro.provedores import adaptador_de
 
     _, cfg = cenario
-    modelo = os.environ.get("OPENAI_MODEL_REAL", "")
-    assert modelo, "defina OPENAI_MODEL_REAL para exercitar o segundo provedor"
+    # O modelo vem da CONFIGURACAO, como tudo (secao 3.9): o teste nao escolhe
+    # modelo, ele exercita o tier alternativo que a config declara.
+    provedor, modelo = reflexao.resolver_tier(cfg, "padrao_alt")
+    chave = _chave_do_arquivo("OPENAI_API_KEY")
+    if not chave:
+        pytest.skip("OPENAI_API_KEY ausente do .env do servico")
 
     pedido = Pedido(
-        provider="openai", model=modelo, sistema=prompts.SISTEMA,
+        provider=provedor, model=modelo, sistema=prompts.SISTEMA,
         mensagens=(("user", prompts.mensagem_propor(
             contexto.resumir(executor.carregar_janela(conn, cenario[0]), cfg),
             Interpretacao.model_validate_json(INTERPRETACAO_OK),
         )),),
         schema=SCHEMA_PROPOSTA, schema_nome="proposta_de_regra", max_tokens=2_000,
     )
-    resposta = adaptador_de("openai").chamar(
-        pedido, api_key=os.environ["OPENAI_API_KEY_REAL"]
+    resposta = adaptador_de(provedor).chamar(
+        pedido, credenciais=Credenciais(api_key=chave)
     )
     bruta = PropostaBruta.model_validate_json(resposta.texto)
     montar_regra(bruta, cfg)

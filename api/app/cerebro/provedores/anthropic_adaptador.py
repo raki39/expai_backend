@@ -27,7 +27,7 @@ import logging
 from typing import Any
 
 from ...ledger.livro import Uso
-from .base import ErroDoProvedor, Pedido, Resposta
+from .base import Credenciais, ErroDoProvedor, Pedido, Resposta
 
 log = logging.getLogger(__name__)
 
@@ -44,11 +44,14 @@ def _inteiro_ou_nulo(fonte: Any, campo: str) -> int | None:
 class AdaptadorAnthropic:
     provider = "anthropic"
 
-    def chamar(self, pedido: Pedido, *, api_key: str) -> Resposta:
+    def chamar(self, pedido: Pedido, *, credenciais: Credenciais) -> Resposta:
         import anthropic  # local de proposito: ver provedores/__init__.py
 
         cliente = anthropic.Anthropic(
-            api_key=api_key, timeout=TIMEOUT_S, max_retries=MAX_RETRIES
+            api_key=credenciais.api_key,
+            default_headers=credenciais.cabecalhos or None,
+            timeout=TIMEOUT_S,
+            max_retries=MAX_RETRIES,
         )
         try:
             resposta = cliente.messages.create(

@@ -17,14 +17,15 @@ confere que nenhum id de modelo aparece fora de `app/config`.
 from __future__ import annotations
 
 from ...settings import Settings
-from .base import Adaptador, Pedido, Resposta
+from .base import Adaptador, Credenciais, Pedido, Resposta
 
 __all__ = [
     "Adaptador",
+    "Credenciais",
     "Pedido",
     "Resposta",
     "adaptador_de",
-    "chave_do_provedor",
+    "credenciais_do_provedor",
 ]
 
 
@@ -32,15 +33,16 @@ class ProvedorIndisponivel(Exception):
     """Nao ha adaptador, ou nao ha chave, para este provedor."""
 
 
-def chave_do_provedor(settings: Settings, provider: str) -> str:
-    """A chave vive so em env, e so passa daqui para o SDK (secao 10.2.4).
+def credenciais_do_provedor(settings: Settings, provider: str) -> Credenciais:
+    """O que este provedor exige para autenticar. Vive so em env (secao 10.2.4).
 
-    Nunca e gravada, nunca entra em log, nunca entra na chave do cache.
+    Nunca e gravado, nunca entra em log, nunca entra na chave do cache.
 
     Mora aqui, e nao no motor de reflexao, porque saber que a chave da
-    Anthropic se chama ANTHROPIC_API_KEY e conhecimento sobre QUEM ATENDE -
-    a mesma razao pela qual os adaptadores existem. Com isto o motor de
-    reflexao ficou sem uma unica mencao a provedor, e ha teste que confere.
+    Anthropic se chama ANTHROPIC_API_KEY - e que ela pode exigir um id de
+    workspace junto - e conhecimento sobre QUEM ATENDE, a mesma razao pela
+    qual os adaptadores existem. Com isto o motor de reflexao ficou sem uma
+    unica mencao a provedor, e ha teste que confere.
     """
     campo = {"anthropic": "anthropic_api_key", "openai": "openai_api_key"}.get(
         provider
@@ -52,7 +54,15 @@ def chave_do_provedor(settings: Settings, provider: str) -> str:
         raise ProvedorIndisponivel(
             f"chave do provedor {provider} ausente do ambiente"
         )
-    return valor
+
+    cabecalhos: dict[str, str] = {}
+    if provider == "anthropic" and settings.anthropic_workspace_id:
+        # Obrigatorio quando a chave e ligada a identidade e nao ao workspace;
+        # ignorado quando nao e. Mandar sempre que estiver configurado e mais
+        # simples que adivinhar o tipo da chave.
+        cabecalhos["anthropic-workspace-id"] = settings.anthropic_workspace_id
+
+    return Credenciais(api_key=valor, cabecalhos=cabecalhos)
 
 
 def adaptador_de(provider: str) -> Adaptador:
