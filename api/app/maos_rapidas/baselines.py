@@ -512,6 +512,8 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
     esquecer de atualiza-la (regra 16).
     """
     saida: dict = {"existe": False}
+    # ORDER BY id crescente com dict: o ultimo de cada marcador vence, que e
+    # o que se quer - reexecutar a comparacao mostra a nova, nao a antiga.
     runs = {
         l["agent_id"]: dict(l)
         for l in conn.execute(
@@ -540,17 +542,25 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
             "digest": executor.digest_do_run(conn, r["id"]),
         }
 
+    # SO a ultima comparacao. Agregar todas as linhas de B1 do banco misturaria
+    # comparacoes distintas, e o p50 passaria a descrever a soma de duas
+    # distribuicoes - um numero que nao corresponde a experimento nenhum.
+    ultimo_b1 = conn.execute(
+        "SELECT MAX(run_id) AS run_id FROM baseline_result WHERE baseline = 'B1'"
+    ).fetchone()
     linha = conn.execute(
         "SELECT COUNT(*) AS n, MIN(equity_final_cents) AS minimo,"
         " MAX(equity_final_cents) AS maximo, MAX(operacoes) AS operacoes"
-        " FROM baseline_result WHERE baseline = 'B1'"
+        " FROM baseline_result WHERE baseline = 'B1' AND run_id = ?",
+        (ultimo_b1["run_id"],),
     ).fetchone()
     if linha and linha["n"]:
         equities = [
             int(l["equity_final_cents"])
             for l in conn.execute(
                 "SELECT equity_final_cents FROM baseline_result"
-                " WHERE baseline = 'B1'"
+                " WHERE baseline = 'B1' AND run_id = ?",
+                (ultimo_b1["run_id"],),
             )
         ]
         saida["B1"] = {

@@ -768,3 +768,23 @@ def test_resumo_e_derivado_e_nao_guardado_em_duplicata(
     }
     assert "comparacao" not in tabelas
     assert "comparison_summary" not in tabelas
+
+
+def test_reexecutar_nao_mistura_duas_distribuicoes(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """O p50 de duas comparacoes somadas nao descreve experimento nenhum."""
+    criar_dataset(conn, precos_passeio(2_500))
+    client.post("/api/comparacao", json={"author": "t", "semente": 1})
+    segunda = client.post("/api/comparacao", json={"author": "t", "semente": 2}).json()
+
+    # Ha 2000 linhas de B1 no banco, de duas comparacoes distintas...
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM baseline_result WHERE baseline = 'B1'"
+    ).fetchone()["n"] == 2_000
+
+    # ...e o resumo descreve SO a ultima.
+    resumo = client.get("/api/comparacao").json()
+    assert resumo["B1"]["repeticoes"] == 1_000
+    assert resumo["B1"]["p50"] == segunda["B1"]["p50"]
+    assert resumo["B3"]["digest"] == segunda["B3"]["digest"]
