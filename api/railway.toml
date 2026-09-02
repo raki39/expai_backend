@@ -1,31 +1,31 @@
 # Servico `api` da Fase 0A - Railway.
 #
-# O repositorio `backend` abriga mais de um servico. Cada servico e
-# auto-contido: Dockerfile, compose e este arquivo vivem na pasta do servico.
-# Na Railway, cada servico aponta para a sua pasta via Root Directory.
+# O repositorio `backend` abriga mais de um servico. O contexto de build e a
+# RAIZ do repositorio, e cada servico e identificado pelo caminho do seu
+# Dockerfile. Assim NAO e preciso configurar Root Directory.
 #
-# A Railway constroi UM servico a partir do Dockerfile. Ela NAO orquestra
-# docker-compose: o docker-compose.yml aqui e so para desenvolvimento local.
+# A Railway constroi UM servico por vez a partir do Dockerfile. Ela NAO
+# orquestra docker-compose: o compose da raiz e so para desenvolvimento local.
 #
 # ===========================================================================
-# CONFIGURACAO NO PAINEL DA RAILWAY - os dois campos abaixo sao OBRIGATORIOS
+# CONFIGURACAO NO PAINEL DA RAILWAY
 # ===========================================================================
 #
-#   Settings > Source > Root Directory .............. /api
+#   Settings > Source > Root Directory ......... VAZIO (raiz do repositorio)
+#   Settings > Build  > Builder ................ Dockerfile
+#   Settings > Build  > Dockerfile Path ........ api/Dockerfile
+#   Settings > Source > Watch Paths ............ /api/**
+#
+# Os tres ultimos ja vem deste arquivo (secao [build] abaixo), desde que voce
+# aponte o config em:
 #   Settings > Config-as-code > Railway Config File .. /api/railway.toml
 #
-# Watch Paths ja vem deste arquivo (watchPatterns, abaixo). Se preferir pela
-# interface: Settings > Source > Watch Paths = /api/**
+# Se preferir configurar tudo pela interface, ignore este arquivo - os valores
+# sao os mesmos.
 #
-# O Root Directory define o contexto de build. Sem ele, a Railway analisa a
-# raiz do repositorio, nao encontra Python nem Dockerfile, e falha com
+# Como confirmar que pegou: no log de build deve aparecer
+# "load build definition from Dockerfile" e as camadas de pip install - e NAO
 # "Railpack could not determine how to build the app".
-#
-# O caminho do config NAO segue o Root Directory - precisa ser absoluto a
-# partir da raiz do repositorio.
-#
-# Como confirmar que pegou: no log de build, a arvore de arquivos analisada
-# deve mostrar `app/`, `requirements.txt` e `Dockerfile` - e NAO `api/`.
 #
 # ---------------------------------------------------------------------------
 #   Volume ...........: mount path /data
@@ -44,10 +44,14 @@
 #   CORS_ALLOWED_ORIGINS=               vazio: o painel faz proxy no servidor
 #   ANTHROPIC_API_KEY / OPENAI_API_KEY  so a partir do incremento 5
 #
-# NAO defina PORT: a Railway injeta, e o CMD do Dockerfile usa ${PORT}.
+# NAO defina PORT: a Railway injeta, e o start-backend.sh usa ${PORT}.
 
 [build]
 builder = "DOCKERFILE"
+
+# Caminho do Dockerfile, relativo a raiz do repositorio. E o que identifica
+# qual servico este arquivo configura, sem depender de Root Directory.
+dockerfilePath = "api/Dockerfile"
 
 # Watch paths: padroes estilo gitignore, RELATIVOS A RAIZ DO REPOSITORIO
 # (nao ao Root Directory). Decidem se um push dispara redeploy - nada a ver
@@ -61,9 +65,10 @@ watchPatterns = ["/api/**"]
 [deploy]
 # SEM `startCommand` de proposito.
 #
-# Com Dockerfile, o start command da Railway sobrescreve o ENTRYPOINT em forma
-# EXEC - e ai `${PORT}` deixa de ser expandido, a menos que voce embrulhe tudo
-# em shell. O `CMD` do Dockerfile ja esta em forma shell e resolve isso.
-# Um lugar so, sem armadilha.
+# Com Dockerfile, o start command da Railway SOBRESCREVE o CMD da imagem - e
+# o CMD aqui chama o start-backend.sh, que faz o pre-voo do volume e usa
+# `exec` para o uvicorn virar PID 1 e receber SIGTERM no redeploy.
+#
+# Definir startCommand puliria o pre-voo e devolveria o problema de sinais.
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

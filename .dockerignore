@@ -1,0 +1,23 @@
+# Lido da RAIZ DO CONTEXTO de build, que e a raiz deste repositorio.
+# Por isso os caminhos sao prefixados com a pasta do servico.
+.git/
+.gitignore
+.gitattributes
+docker-compose.yml
+.dockerignore
+
+api/.venv/
+api/venv/
+api/var/
+api/.env
+api/.env.local
+api/README.md
+api/railway.toml
+
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm

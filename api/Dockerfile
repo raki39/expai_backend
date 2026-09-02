@@ -1,10 +1,14 @@
 # Fase 0A - servico `api`
 #
-# Este servico e auto-contido: Dockerfile, compose e railway.toml vivem aqui,
-# nao na raiz do repositorio. O repositorio `backend` abriga mais de um
-# servico, e cada um constroi o seu.
+# O repositorio `backend` abriga mais de um servico. Cada servico tem o seu
+# Dockerfile, mas o CONTEXTO DE BUILD e a raiz do repositorio - por isso todo
+# COPY aqui vem prefixado com `api/`.
 #
-# Contexto de build: esta pasta (api/).
+# Quem aponta para este arquivo:
+#   - docker-compose.yml da raiz:  dockerfile: api/Dockerfile
+#   - Railway:                     Dockerfile Path = api/Dockerfile
+#
+# Consequencia pratica: nao e preciso configurar Root Directory na Railway.
 
 FROM python:3.12-slim AS base
 
@@ -18,15 +22,15 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Camada de dependencias separada do codigo: mexer no app nao reinstala tudo.
-COPY requirements.txt ./
+COPY api/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
-COPY pytest.ini ./
+COPY api/app ./app
+COPY api/pytest.ini ./
 
 # chmod aqui, e nao via bit de permissao do git: repositorio desenvolvido no
 # Windows nao preserva o bit executavel de forma confiavel.
-COPY start-backend.sh ./
+COPY api/start-backend.sh ./
 RUN chmod +x ./start-backend.sh
 
 # Diretorio do volume. Em producao a Railway monta o volume aqui e substitui
