@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routes import router
+from .api.rotas import router
 from .config import service as config_service
 from .ledger import contas as ledger_contas
 from .logging_setup import configurar_logging

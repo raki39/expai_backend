@@ -555,7 +555,7 @@ def test_rota_simulador_sem_run(client: TestClient) -> None:
 def test_rota_simulador_com_execucoes(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
-    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "teste"}).json()["run_id"]
     dataset_id = criar_dataset(conn, [50_000] * 100)
     cfg = ExperimentConfig()
     comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0), config=cfg)
@@ -573,12 +573,12 @@ def test_rota_simulador_com_execucoes(
 def test_rota_execucoes_lista_com_a_decomposicao(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
-    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "teste"}).json()["run_id"]
     dataset_id = criar_dataset(conn, [50_000] * 100)
     comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
             config=ExperimentConfig())
 
-    corpo = client.get("/api/execucoes").json()
+    corpo = client.get("/api/simulador/execucoes").json()
     item = corpo["items"][0]
     assert item["side"] == "compra"
     assert item["execution_bar_ms"] > item["decision_bar_ms"]
@@ -592,13 +592,13 @@ def test_carteira_do_painel_e_a_do_run_ativo(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
     """Regressao: contas globais fariam o segundo run herdar o primeiro."""
-    primeiro = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    primeiro = client.post("/api/ledger/run", json={"author": "t"}).json()["run_id"]
     dataset_id = criar_dataset(conn, [50_000] * 100)
     comprar(conn, run_id=primeiro, dataset_id=dataset_id, decision_bar_ms=barra(0),
             config=ExperimentConfig())
-    client.post(f"/api/run/{primeiro}/encerrar", json={"estado": "concluido"})
+    client.post(f"/api/ledger/run/{primeiro}/encerrar", json={"estado": "concluido"})
 
-    client.post("/api/run", json={"author": "t"})
+    client.post("/api/ledger/run", json={"author": "t"})
     carteira = client.get("/api/ledger").json()["carteira"]
     assert carteira["simulado_usd"]["caixa_minor"] == SEMENTE_USD
     assert carteira["simulado_usd"]["posicao_btc_minor"] == 0
@@ -625,7 +625,7 @@ def test_rota_simulador_mostra_o_ultimo_run_quando_nao_ha_ativo(
     """"Nao ha run ativo" nao e "nao houve execucao nenhuma"."""
     from app.ledger.livro import encerrar_run
 
-    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "t"}).json()["run_id"]
     dataset_id = criar_dataset(conn, [50_000] * 100)
     comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
             config=ExperimentConfig())
@@ -681,7 +681,7 @@ def test_condicoes_do_run_vem_da_config_DELE_e_nao_da_vigente(
     E o que torna um resultado comparavel muito depois de produzido - e o que
     impede que mudar a config reescreva o significado do que ja foi medido.
     """
-    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "t"}).json()["run_id"]
     dataset_id = criar_dataset(conn, [50_000] * 100)
     comprar(conn, run_id=run_id, dataset_id=dataset_id, decision_bar_ms=barra(0),
             config=ExperimentConfig())

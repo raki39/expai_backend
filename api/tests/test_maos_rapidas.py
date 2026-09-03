@@ -733,12 +733,12 @@ def test_janela_curta_demais_falha_alto(conn: sqlite3.Connection) -> None:
 
 
 def test_rota_comparacao_antes_de_rodar(client: TestClient) -> None:
-    assert client.get("/api/comparacao").json()["existe"] is False
+    assert client.get("/api/baselines").json()["existe"] is False
 
 
 def test_rota_recusa_comparacao_sem_dataset(client: TestClient) -> None:
     """Melhor recusar que comparar contra nada."""
-    resposta = client.post("/api/comparacao", json={"author": "t"})
+    resposta = client.post("/api/baselines", json={"author": "t"})
     assert resposta.status_code == 409
     assert "dataset" in resposta.json()["detail"]
 
@@ -747,8 +747,8 @@ def test_rota_recusa_comparacao_com_run_ativo(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
     criar_dataset(conn, precos_passeio(2_500))
-    client.post("/api/run", json={"author": "t"})
-    resposta = client.post("/api/comparacao", json={"author": "t"})
+    client.post("/api/ledger/run", json={"author": "t"})
+    resposta = client.post("/api/baselines", json={"author": "t"})
     assert resposta.status_code == 409
 
 
@@ -756,14 +756,14 @@ def test_rota_roda_a_comparacao_completa(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
     criar_dataset(conn, precos_passeio(2_500))
-    resposta = client.post("/api/comparacao", json={"author": "t", "semente": 42})
+    resposta = client.post("/api/baselines", json={"author": "t", "semente": 42})
     assert resposta.status_code == 201
     corpo = resposta.json()
     assert corpo["B1"]["repeticoes"] == 1_000
     assert corpo["B1"]["operacoes_alvo"] == corpo["B3"]["operacoes"]
     assert corpo["B2"]["operacoes"] == 1
 
-    resumo = client.get("/api/comparacao").json()
+    resumo = client.get("/api/baselines").json()
     assert resumo["existe"] is True
     assert resumo["B2"]["equity_final_cents"] == corpo["B2"]["equity_final_cents"]
     assert resumo["B3"]["digest"] == corpo["B3"]["digest"]
@@ -778,7 +778,7 @@ def test_resumo_e_derivado_e_nao_guardado_em_duplicata(
 ) -> None:
     """Um resumo guardado a parte diverge no dia em que alguem esquecer."""
     criar_dataset(conn, precos_passeio(2_500))
-    client.post("/api/comparacao", json={"author": "t", "semente": 42})
+    client.post("/api/baselines", json={"author": "t", "semente": 42})
     tabelas = {
         l["name"]
         for l in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -792,8 +792,8 @@ def test_reexecutar_nao_mistura_duas_distribuicoes(
 ) -> None:
     """O p50 de duas comparacoes somadas nao descreve experimento nenhum."""
     criar_dataset(conn, precos_passeio(2_500))
-    client.post("/api/comparacao", json={"author": "t", "semente": 1})
-    segunda = client.post("/api/comparacao", json={"author": "t", "semente": 2}).json()
+    client.post("/api/baselines", json={"author": "t", "semente": 1})
+    segunda = client.post("/api/baselines", json={"author": "t", "semente": 2}).json()
 
     # Ha 2000 linhas de B1 no banco, de duas comparacoes distintas...
     assert conn.execute(
@@ -801,7 +801,7 @@ def test_reexecutar_nao_mistura_duas_distribuicoes(
     ).fetchone()["n"] == 2_000
 
     # ...e o resumo descreve SO a ultima.
-    resumo = client.get("/api/comparacao").json()
+    resumo = client.get("/api/baselines").json()
     assert resumo["B1"]["repeticoes"] == 1_000
     assert resumo["B1"]["p50"] == segunda["B1"]["p50"]
     assert resumo["B3"]["digest"] == segunda["B3"]["digest"]
@@ -943,7 +943,7 @@ def test_rota_da_curva_desenha_agente_e_baselines_na_mesma_janela(
     baselines.rodar_comparacao(
         conn, dataset_id=dataset_id, config=cfg, config_version_id=1, semente=42
     )
-    corpo = client.get("/api/curva").json()
+    corpo = client.get("/api/baselines/curva").json()
     assert corpo["existe"] is True
     assert set(corpo["curvas"]) >= {"B2", "B3"}
     # Mesma janela: as curvas comecam e terminam no mesmo instante.

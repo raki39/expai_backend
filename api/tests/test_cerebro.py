@@ -1337,7 +1337,7 @@ def test_a_rota_do_agente_mostra_o_caminho_percorrido(
 
 
 def test_nenhuma_rota_expoe_a_chave_do_provedor(client, conn, settings) -> None:
-    """Secao 10.2.4: segredo nao aparece em pagina, log ou /api/health."""
+    """Secao 10.2.4: segredo nao aparece em pagina, log ou /api/substrato/health."""
     dataset_id = criar_dataset(conn, precos_passeio(2_500))
     ciclo.rodar(
         conn, dataset_id=dataset_id, config=ExperimentConfig(),
@@ -1345,7 +1345,7 @@ def test_nenhuma_rota_expoe_a_chave_do_provedor(client, conn, settings) -> None:
         adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
     )
     segredo = settings.anthropic_api_key.get_secret_value()
-    for rota in ("/api/health", "/api/agente", "/api/config", "/api/ledger"):
+    for rota in ("/api/substrato/health", "/api/agente", "/api/config", "/api/ledger"):
         assert segredo not in client.get(rota).text
 
 

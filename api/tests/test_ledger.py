@@ -646,7 +646,7 @@ def test_rota_ledger_traz_saldo_e_conferencias(client: TestClient) -> None:
 
 
 def test_rota_abre_run_e_credita_semente(client: TestClient) -> None:
-    resposta = client.post("/api/run", json={"author": "teste"})
+    resposta = client.post("/api/ledger/run", json={"author": "teste"})
     assert resposta.status_code == 201
     corpo = resposta.json()
     assert corpo["seed_capital_usd_cents"] == 100_000
@@ -657,14 +657,14 @@ def test_rota_abre_run_e_credita_semente(client: TestClient) -> None:
 
 
 def test_nao_abre_dois_runs_ativos(client: TestClient) -> None:
-    client.post("/api/run", json={"author": "teste"})
-    segunda = client.post("/api/run", json={"author": "teste"})
+    client.post("/api/ledger/run", json={"author": "teste"})
+    segunda = client.post("/api/ledger/run", json={"author": "teste"})
     assert segunda.status_code == 409
 
 
 def test_run_ativo_congela_a_configuracao(client: TestClient) -> None:
     """A trava do ADR 0008 agora tem um run de verdade para exercita-la."""
-    client.post("/api/run", json={"author": "teste"})
+    client.post("/api/ledger/run", json={"author": "teste"})
     resposta = client.post(
         "/api/config",
         json={"author": "teste", "changes": {"b3_fast": 5}},
@@ -673,8 +673,8 @@ def test_run_ativo_congela_a_configuracao(client: TestClient) -> None:
 
 
 def test_encerrar_run_libera_a_configuracao(client: TestClient) -> None:
-    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
-    client.post(f"/api/run/{run_id}/encerrar", json={"estado": "concluido"})
+    run_id = client.post("/api/ledger/run", json={"author": "teste"}).json()["run_id"]
+    client.post(f"/api/ledger/run/{run_id}/encerrar", json={"estado": "concluido"})
     assert client.get("/api/ledger").json()["run_ativo"] is None
     assert client.post(
         "/api/config", json={"author": "teste", "changes": {"b3_fast": 5}}
@@ -684,7 +684,7 @@ def test_encerrar_run_libera_a_configuracao(client: TestClient) -> None:
 def test_historico_mostra_original_e_estorno(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:
-    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "teste"}).json()["run_id"]
     tx = registrar(
         conn, kind="operacao", run_id=run_id,
         lancamentos=[
@@ -766,7 +766,7 @@ def test_a_rota_declara_QUAL_carteira_esta_mostrando(
     corpo = client.get("/api/ledger").json()
     assert corpo["escopo"] == "livro_inteiro"
 
-    run_id = client.post("/api/run", json={"author": "t"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "t"}).json()["run_id"]
     corpo = client.get("/api/ledger").json()
     assert corpo["escopo"] == "run"
     assert corpo["runs_somados"] == 1
@@ -800,7 +800,7 @@ def test_na_0a_nenhum_caminho_leva_ao_estado_pausado(
 
     from app.ledger.livro import encerrar_run
 
-    run_id = client.post("/api/run", json={"author": "teste"}).json()["run_id"]
+    run_id = client.post("/api/ledger/run", json={"author": "teste"}).json()["run_id"]
 
     with pytest.raises(TransacaoInvalida):
         encerrar_run(conn, run_id, "pausado")

@@ -55,48 +55,106 @@ a ser ignorado** para esses campos.
 ## Endpoints
 
 Todos exigem `Authorization: Bearer <API_SERVICE_TOKEN>`. Sem exceção —
-`/api/health` inclusive. Com a api pública, isto é o que a protege.
+`/api/substrato/health` inclusive. Com a api pública, isto é o que a protege.
 
 Esta tabela é **conferida por teste** (`test_o_readme_descreve_todas_as_rotas`):
 toda rota do router aparece aqui, e toda rota citada aqui existe. Uma tabela de
 endpoints que ninguém confere envelhece em silêncio — esta já tinha
 envelhecido, listando 6 rotas quando existiam 26.
 
+**Um domínio por seção, e o domínio está no caminho.** Antes eram 33 rotas
+soltas na raiz de `/api`: `/api/lote` e `/api/creditos` são do validador e
+ficavam ao lado de `/api/curva`; a separação de dados existia como
+`POST /api/dataset/separacao` **e** `GET /api/separacao`, a mesma coisa em dois
+lugares. Cada domínio é um módulo em `app/api/rotas/`, com prefixo e tag — e a
+tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
+
+### substrato — o processo está de pé?
+
 | Método | Rota | Função |
 |---|---|---|
-| GET | `/api/health` | substrato: banco, volume, schema, config vigente |
+| GET | `/api/substrato/health` | banco, volume, schema, config vigente |
+
+### config — configuração versionada (§10.2.3)
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/config` | configuração vigente e se o catálogo está defasado |
-| GET | `/api/config/history` | versões com autor, data, valor anterior e novo |
+| GET | `/api/config/historico` | versões com autor, data, valor anterior e novo |
 | POST | `/api/config` | nova versão (recusada durante run ativo ou acima do teto) |
 | POST | `/api/config/catalogo` | adota o catálogo de provedores vigente |
 | POST | `/api/config/reancorar` | regrava a config sob o hash correto após deriva de schema |
+
+### dataset — ingestão imutável e separação por finalidade (§8.5.1)
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
-| `/api/separacao` | GET | Os quatro conjuntos por finalidade, as janelas de walk-forward e o uso do holdout. Nao devolve barra nenhuma |
-| `/api/dataset/separacao` | POST | Cria a divisao por finalidade de um dataset ja ingerido; idempotente |
-| `/api/validador` | GET | Maquina de estados do conhecimento, contador de tentativas e as transicoes legais |
-| `/api/lote` | GET | Procedimento de lote (BH/BY) sobre a familia fechada, mais o DSR por hipotese |
-| `/api/creditos` | GET | Saldo de creditos por braco e os quatro numeros de calibracao da secao 8.6.1 |
-| `/api/validador/hipotese/{hypothesis_id}` | GET | O caminho inteiro de uma hipotese: pre-registro, estado e historico |
-| POST | `/api/dataset/ingest` | baixa e fixa o dataset (~35 s, 46 arquivos) |
+| POST | `/api/dataset/ingestao` | baixa e fixa o dataset (~35 s, 46 arquivos) |
+| GET | `/api/dataset/separacao` | os quatro conjuntos, janelas de walk-forward e uso do holdout — **não devolve barra nenhuma** |
+| POST | `/api/dataset/separacao` | cria a divisão de um dataset já ingerido; idempotente |
+
+### ledger — partidas dobradas, dois livros, ciclo do run
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/ledger` | carteira e escopo (run ativo, ou livro inteiro) |
 | GET | `/api/ledger/transacoes` | histórico, com estornos |
-| POST | `/api/run` | abre run e credita capital semente |
-| POST | `/api/run/{run_id}/encerrar` | encerra num dos três estados terminais |
+| POST | `/api/ledger/run` | abre run e credita capital semente |
+| POST | `/api/ledger/run/{run_id}/encerrar` | encerra num dos três estados terminais |
+
+### simulador — execução pessimista (§8.4.1)
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/simulador` | parâmetros efetivos e condições de validade |
-| GET | `/api/execucoes` | ordens e execuções simuladas |
-| GET | `/api/comparacao` | última comparação B1, B2, B3 |
-| POST | `/api/comparacao` | roda a comparação (sem LLM) |
-| GET | `/api/curva` | curva de patrimônio e excesso sobre baseline |
+| GET | `/api/simulador/execucoes` | ordens e execuções simuladas |
+
+### baselines — o grupo de controle (§14.3)
+
+| Método | Rota | Função |
+|---|---|---|
+| GET | `/api/baselines` | última comparação B1, B2, B3 |
+| POST | `/api/baselines` | roda a comparação (sem LLM) |
+| GET | `/api/baselines/curva` | curva de patrimônio e excesso sobre baseline |
+
+### agente — o ciclo do cérebro lento
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/agente` | caminho percorrido, propostas, gasto |
 | POST | `/api/agente` | **roda o ciclo com LLM — gasta dinheiro de verdade** |
+
+### validador — independente do agente (§8.1)
+
+| Método | Rota | Função |
+|---|---|---|
+| GET | `/api/validador` | máquina de estados, contador de tentativas, transições legais |
+| GET | `/api/validador/hipotese/{hypothesis_id}` | o caminho inteiro de uma hipótese: pré-registro, estado e histórico |
+| GET | `/api/validador/lote` | procedimento de lote (BH/BY) sobre a família fechada, mais o DSR |
+| GET | `/api/validador/creditos` | saldo por braço e os quatro números de calibração de §8.6.1 |
+
+### relatorio — fechamento derivado, vínculo e export
+
+| Método | Rota | Função |
+|---|---|---|
 | GET | `/api/relatorio` | relatório de fechamento da 0A, em JSON |
 | GET | `/api/relatorio/markdown` | o mesmo relatório, para humano |
-| GET | `/api/exportar` | baixa um JSON com o estado inteiro, para anexar |
-| POST | `/api/reprodutibilidade` | prova de R12: três digests, sem LLM |
-| GET | `/api/vinculo/execucao/{execution_id}` | da execução ao evento cognitivo (R25.2) |
-| GET | `/api/vinculo/evento/{event_id}` | da decisão ao custo, regra, execuções e resultado |
-| POST | `/api/sentinel` | grava marcador de persistência |
-| GET | `/api/sentinel` | lista marcadores |
+| GET | `/api/relatorio/exportar` | baixa um JSON com o estado inteiro, para anexar |
+| POST | `/api/relatorio/reprodutibilidade` | prova de R12: três digests, sem LLM |
+| GET | `/api/relatorio/vinculo/execucao/{execution_id}` | da execução ao evento cognitivo (R25.2) |
+| GET | `/api/relatorio/vinculo/evento/{event_id}` | da decisão ao custo, regra, execuções e resultado |
+
+### diagnostico — existe para provar o substrato, **não** para o experimento
+
+A sentinela foi criada no incremento 0 para demonstrar que o volume persiste
+entre deploys. Nenhum run a lê e nenhum resultado depende dela. Fica separada
+porque, misturada com as rotas do experimento, parecia parte dele.
+
+| Método | Rota | Função |
+|---|---|---|
+| POST | `/api/diagnostico/sentinela` | grava marcador de persistência |
+| GET | `/api/diagnostico/sentinela` | lista marcadores |
 
 Sem `/docs`, `/redoc` ou `/openapi.json`: a superfície é consumida pelo proxy
 do `web`, e um endpoint a menos é uma coisa a menos para proteger.
@@ -117,10 +175,10 @@ Bearer e ele nao bateu com `API_SERVICE_TOKEN`.
 
 ```bash
 # direto na api, com o token de servico
-curl -H "Authorization: Bearer $API_SERVICE_TOKEN" https://<api>/api/separacao
+curl -H "Authorization: Bearer $API_SERVICE_TOKEN" https://<api>/api/dataset/separacao
 
 # pelo painel, que repassa QUALQUER rota (GET e POST) autenticando por sessao
-#   https://<painel>/api/proxy/separacao
+#   https://<painel>/api/proxy/dataset/separacao
 ```
 
 O proxy existe para o token de servico nunca chegar ao navegador (ADR 0011).
@@ -147,16 +205,16 @@ T="Authorization: Bearer $API_SERVICE_TOKEN"
 API=http://localhost:8000
 
 # 1. o substrato responde, e o volume PERSISTE (não apenas aceita escrita)
-curl -sH "$T" $API/api/health
+curl -sH "$T" $API/api/substrato/health
 
 # 2. o dataset, uma vez só. ~35 s. Fixa janela, sha256 e reserva.
-curl -sH "$T" -XPOST $API/api/dataset/ingest -d '{"author":"voce"}'
+curl -sH "$T" -XPOST $API/api/dataset/ingestao -d '{"author":"voce"}'
 
 # 3. a comparação sem LLM: B1, B2 e B3. Nenhum centavo gasto.
-curl -sH "$T" -XPOST $API/api/comparacao -d '{"author":"voce"}'
+curl -sH "$T" -XPOST $API/api/baselines -d '{"author":"voce"}'
 
 # 4. a prova de reprodutibilidade: três digests. Também sem LLM.
-curl -sH "$T" -XPOST $API/api/reprodutibilidade -d '{}'
+curl -sH "$T" -XPOST $API/api/relatorio/reprodutibilidade -d '{}'
 
 # 5. o ciclo do agente. ESTE gasta dinheiro de verdade.
 curl -sH "$T" -XPOST $API/api/agente -d '{"author":"voce"}'

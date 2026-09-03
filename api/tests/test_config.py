@@ -54,7 +54,7 @@ def test_post_cria_versao_2_com_autor_data_antes_e_depois(client: TestClient) ->
     assert r.json()["material"] is True
     assert "invalida comparacao" in r.json()["aviso"]
 
-    hist = client.get("/api/config/history").json()["versions"]
+    hist = client.get("/api/config/historico").json()["versions"]
     assert [v["version_id"] for v in hist] == [2, 1]
 
     v2 = hist[0]
@@ -300,10 +300,10 @@ def test_run_e_recusado_sob_hash_divergente(client) -> None:
         " VALUES ('x','teste',?,?,'hash-que-nao-descreve-mais',1,'')",
         (atual.id, atual.config.model_dump_json()),
     )
-    resposta = client.post("/api/run", json={"author": "teste"})
+    resposta = client.post("/api/ledger/run", json={"author": "teste"})
     assert resposta.status_code == 409
     assert "schema da configuracao mudou" in resposta.json()["detail"]
-    assert client.get("/api/health").json()["config_hash_confere"] is False
+    assert client.get("/api/substrato/health").json()["config_hash_confere"] is False
 
 
 # ============================================================================
@@ -387,15 +387,15 @@ def test_run_volta_a_ser_permitido_depois_de_reancorar(client) -> None:
     conn = client.app.state.conn
     _versao_de_schema_antigo(conn)
 
-    assert client.post("/api/run", json={"author": "t"}).status_code == 409
-    assert client.get("/api/health").json()["config_hash_confere"] is False
+    assert client.post("/api/ledger/run", json={"author": "t"}).status_code == 409
+    assert client.get("/api/substrato/health").json()["config_hash_confere"] is False
 
     resposta = client.post("/api/config/reancorar", json={"author": "t"})
     assert resposta.status_code == 201
     assert "invalida" in resposta.json()["aviso"]
 
-    assert client.get("/api/health").json()["config_hash_confere"] is True
-    assert client.post("/api/run", json={"author": "t"}).status_code == 201
+    assert client.get("/api/substrato/health").json()["config_hash_confere"] is True
+    assert client.post("/api/ledger/run", json={"author": "t"}).status_code == 201
 
 
 def test_rota_de_reancoragem_recusa_sem_deriva(client) -> None:
@@ -406,7 +406,7 @@ def test_rota_de_reancoragem_recusa_sem_deriva(client) -> None:
 
 def test_reancorar_recusa_com_run_ativo(client) -> None:
     conn = client.app.state.conn
-    client.post("/api/run", json={"author": "t"})
+    client.post("/api/ledger/run", json={"author": "t"})
     _versao_de_schema_antigo(conn)
     resposta = client.post("/api/config/reancorar", json={"author": "t"})
     assert resposta.status_code == 409

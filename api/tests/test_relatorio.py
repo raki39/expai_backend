@@ -772,10 +772,10 @@ def test_as_rotas_de_vinculo_navegam_nos_dois_sentidos(
         "SELECT id FROM execution WHERE run_id = ? LIMIT 1", (resultado.run_id,)
     ).fetchone()["id"]
 
-    volta = client.get(f"/api/vinculo/execucao/{execucao}").json()
+    volta = client.get(f"/api/relatorio/vinculo/execucao/{execucao}").json()
     assert volta["autorizada_por"]
 
-    ida = client.get(f"/api/vinculo/evento/{volta['autorizada_por']}").json()
+    ida = client.get(f"/api/relatorio/vinculo/evento/{volta['autorizada_por']}").json()
     assert ida["execucoes"]["quantas"] > 0
     assert ida["regra"]["regra_hash"] == resultado.regra_hash
 
@@ -788,7 +788,7 @@ def test_a_prova_de_reprodutibilidade_pela_rota_nao_chama_provedor(
         "SELECT COUNT(*) AS n FROM agent_event WHERE provider IS NOT NULL"
     ).fetchone()["n"]
 
-    corpo = client.post("/api/reprodutibilidade", json={}).json()
+    corpo = client.post("/api/relatorio/reprodutibilidade", json={}).json()
     assert corpo["provado"] is True
 
     depois = conn.execute(
@@ -807,14 +807,14 @@ def test_a_prova_e_recusada_com_run_ativo(
     client, conn: sqlite3.Connection, cenario  # noqa: F811
 ) -> None:
     """Tres runs novos no meio de um run aberto embaralhariam a leitura."""
-    client.post("/api/run", json={"author": "teste"})
-    assert client.post("/api/reprodutibilidade", json={}).status_code == 409
+    client.post("/api/ledger/run", json={"author": "teste"})
+    assert client.post("/api/relatorio/reprodutibilidade", json={}).status_code == 409
 
 
 def test_nenhuma_rota_do_fechamento_expoe_a_chave(
     client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
 ) -> None:
-    """Regra 15: segredo nunca aparece em log, em /api/health ou em pagina."""
+    """Regra 15: segredo nunca aparece em log, em /api/substrato/health ou em pagina."""
     resultado = _rodar_ciclo(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
@@ -832,8 +832,8 @@ def test_nenhuma_rota_do_fechamento_expoe_a_chave(
     for caminho in (
         "/api/relatorio",
         "/api/relatorio/markdown",
-        f"/api/vinculo/execucao/{execucao}",
-        f"/api/vinculo/evento/{evento}",
+        f"/api/relatorio/vinculo/execucao/{execucao}",
+        f"/api/relatorio/vinculo/evento/{evento}",
     ):
         corpo = client.get(caminho).text
         for chave in chaves:
@@ -891,13 +891,16 @@ def test_o_readme_descreve_todas_as_rotas() -> None:
     import pathlib
     import re
 
-    from app.api.routes import router
+    from app.api.rotas import MODULOS
 
     readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
         encoding="utf-8"
     )
     documentadas = set(re.findall(r"\|\s*`(/api/[^`]+)`\s*\|", readme))
-    reais = {r.path for r in router.routes}
+    # De cada MODULO, e nao do router raiz: com routers aninhados o raiz
+    # guarda `_IncludedRouter`, nao rotas. Percorrer os modulos tambem faz o
+    # teste falhar quando alguem cria um modulo e esquece de inclui-lo.
+    reais = {r.path for m in MODULOS for r in m.router.routes}
 
     faltando = sorted(reais - documentadas)
     sobrando = sorted(documentadas - reais)
@@ -916,7 +919,7 @@ def test_o_export_reune_as_telas_e_baixa_como_arquivo(
     _rodar_ciclo(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
-    resposta = client.get("/api/exportar")
+    resposta = client.get("/api/relatorio/exportar")
     assert resposta.status_code == 200
     assert "attachment" in resposta.headers["content-disposition"]
     assert ".json" in resposta.headers["content-disposition"]
@@ -949,7 +952,8 @@ def test_o_export_nao_tem_leitor_proprio(conn: sqlite3.Connection) -> None:
     import pathlib
 
     fonte = (
-        pathlib.Path(__file__).resolve().parents[1] / "app" / "api" / "routes.py"
+        pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "api" / "rotas" / "relatorio.py"
     ).read_text(encoding="utf-8")
     arvore = ast.parse(fonte)
     alvo = next(
@@ -974,7 +978,7 @@ def test_o_export_nao_tem_leitor_proprio(conn: sqlite3.Connection) -> None:
 def test_o_export_nao_carrega_segredo(
     client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
 ) -> None:
-    """Regra 15: segredo nunca aparece em log, em /api/health ou em pagina.
+    """Regra 15: segredo nunca aparece em log, em /api/substrato/health ou em pagina.
 
     O export e o caso mais perigoso dos tres: e um arquivo feito para ser
     ENVIADO a outra pessoa. Um vazamento aqui sai da maquina junto.
@@ -982,7 +986,7 @@ def test_o_export_nao_carrega_segredo(
     _rodar_ciclo(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
-    bruto = client.get("/api/exportar").text
+    bruto = client.get("/api/relatorio/exportar").text
 
     for chave in (
         settings.anthropic_api_key.get_secret_value(),
@@ -993,7 +997,7 @@ def test_o_export_nao_carrega_segredo(
             assert chave not in bruto
 
     # E o que aparece sobre credencial e PRESENCA, nunca valor.
-    corpo = client.get("/api/exportar").json()
+    corpo = client.get("/api/relatorio/exportar").json()
     credenciais = corpo["partes"]["health"]["credenciais_configuradas"]
     assert set(map(type, credenciais.values())) == {bool}
 
@@ -1005,13 +1009,15 @@ def test_uma_tela_quebrada_nao_derruba_o_export_inteiro(
 
     Um export vazio por causa de uma tela e pior que um que diz qual tela.
     """
-    from app.api import routes
+    from app.api.rotas import relatorio as rotas_relatorio
 
     def explode(*_args, **_kwargs):
         raise RuntimeError("tela quebrada de proposito")
 
-    monkeypatch.setattr(routes, "simulador_estado", explode)
-    corpo = client.get("/api/exportar").json()
+    # No modulo que MONTA o export, e nao no que define a rota do simulador:
+    # e a referencia que `exportar` resolve na hora de chamar.
+    monkeypatch.setattr(rotas_relatorio, "simulador_estado", explode)
+    corpo = client.get("/api/relatorio/exportar").json()
 
     assert "simulador" in corpo["partes_que_falharam"]
     assert "tela quebrada" in corpo["partes_que_falharam"]["simulador"]

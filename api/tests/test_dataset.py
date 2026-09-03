@@ -539,7 +539,7 @@ def test_rota_dataset_depois_da_ingestao(
 
 def test_rota_de_ingestao_exige_token(client: TestClient) -> None:
     resposta = client.post(
-        "/api/dataset/ingest",
+        "/api/dataset/ingestao",
         json={"author": "teste"},
         headers={"Authorization": ""},
     )
@@ -570,7 +570,7 @@ def test_rota_de_ingestao_devolve_relatorio(
     """Caminho feliz de ponta a ponta, pela rota HTTP."""
     _instalar_baixador(monkeypatch, {m: barras_do_mes(m) for m in meses_da_config()})
 
-    resposta = client.post("/api/dataset/ingest", json={"author": "teste"})
+    resposta = client.post("/api/dataset/ingestao", json={"author": "teste"})
     assert resposta.status_code == 201
     corpo = resposta.json()
     assert corpo["ja_existia"] is False
@@ -578,7 +578,7 @@ def test_rota_de_ingestao_devolve_relatorio(
     assert len(corpo["sha256"]) == 64
 
     # Idempotente tambem pela rota.
-    segunda = client.post("/api/dataset/ingest", json={"author": "teste"})
+    segunda = client.post("/api/dataset/ingestao", json={"author": "teste"})
     assert segunda.status_code == 201
     assert segunda.json()["ja_existia"] is True
 
@@ -592,7 +592,7 @@ def test_rota_responde_409_com_o_relatorio_quando_ha_lacuna(
     todos[meses[3]] = barras_do_mes(meses[3], pular={50, 51, 52, 53})
     _instalar_baixador(monkeypatch, todos)
 
-    resposta = client.post("/api/dataset/ingest", json={"author": "teste"})
+    resposta = client.post("/api/dataset/ingestao", json={"author": "teste"})
     assert resposta.status_code == 409
     detalhe = resposta.json()["detail"]
     assert detalhe["erro"] == "lacunas_nao_aceitas"
@@ -600,7 +600,7 @@ def test_rota_responde_409_com_o_relatorio_quando_ha_lacuna(
     assert "aceitar_lacunas=true" in detalhe["como_prosseguir"]
 
     aceita = client.post(
-        "/api/dataset/ingest", json={"author": "teste", "aceitar_lacunas": True}
+        "/api/dataset/ingestao", json={"author": "teste", "aceitar_lacunas": True}
     )
     assert aceita.status_code == 201
 
@@ -614,7 +614,7 @@ def test_rota_traduz_bloqueio_por_jurisdicao(
         raise binance.BloqueioPorJurisdicao("HTTP 451 em ...")
 
     monkeypatch.setattr("app.dataset.ingest.baixar_mes", bloqueado)
-    resposta = client.post("/api/dataset/ingest", json={"author": "teste"})
+    resposta = client.post("/api/dataset/ingestao", json={"author": "teste"})
     assert resposta.status_code == 502
     assert resposta.json()["detail"]["erro"] == "bloqueio_por_jurisdicao"
     assert resposta.json()["detail"]["referencia"] == "ADR 0012"
@@ -629,10 +629,10 @@ def test_rota_separa_dado_inconsistente_de_falha_de_rede(
         raise DadosInconsistentes("grade desalinhada")
 
     monkeypatch.setattr("app.dataset.ingest.baixar_mes", incoerente)
-    assert client.post("/api/dataset/ingest", json={"author": "t"}).status_code == 422
+    assert client.post("/api/dataset/ingestao", json={"author": "t"}).status_code == 422
 
     def rede(*a, **kw):
         raise binance.ErroDeFonte("timeout")
 
     monkeypatch.setattr("app.dataset.ingest.baixar_mes", rede)
-    assert client.post("/api/dataset/ingest", json={"author": "t"}).status_code == 502
+    assert client.post("/api/dataset/ingestao", json={"author": "t"}).status_code == 502

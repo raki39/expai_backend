@@ -33,7 +33,7 @@ def test_dado_sobrevive_a_reabertura_do_banco(client: TestClient, ambiente: Path
     Aqui fechamos e reabrimos o arquivo, que e o mesmo mecanismo sem a
     plataforma no meio.
     """
-    r = client.post("/api/sentinel", json={"label": "antes-do-redeploy"})
+    r = client.post("/api/diagnostico/sentinela", json={"label": "antes-do-redeploy"})
     assert r.status_code == 201
     sentinel_id = r.json()["id"]
 
@@ -88,7 +88,7 @@ def test_pragmas_aplicados(ambiente: Path) -> None:
 
 
 def test_health_reporta_substrato(client: TestClient) -> None:
-    corpo = client.get("/api/health").json()
+    corpo = client.get("/api/substrato/health").json()
     assert corpo["status"] == "ok"
     assert corpo["schema_version"] >= 1
     assert corpo["config_version"] == 1
@@ -109,18 +109,18 @@ def _texto(obj: object) -> str:
 
 @pytest.mark.parametrize("segredo", SEGREDOS)
 def test_health_nao_expoe_segredo(client: TestClient, segredo: str) -> None:
-    assert segredo not in _texto(client.get("/api/health").json())
+    assert segredo not in _texto(client.get("/api/substrato/health").json())
 
 
 @pytest.mark.parametrize("segredo", SEGREDOS)
 def test_config_nao_expoe_segredo(client: TestClient, segredo: str) -> None:
     assert segredo not in _texto(client.get("/api/config").json())
-    assert segredo not in _texto(client.get("/api/config/history").json())
+    assert segredo not in _texto(client.get("/api/config/historico").json())
 
 
 def test_health_reporta_presenca_e_nao_valor(client: TestClient) -> None:
     """Secao 10.2.4: o painel mostra o ESTADO da credencial, nunca o valor."""
-    creds = client.get("/api/health").json()["credenciais_configuradas"]
+    creds = client.get("/api/substrato/health").json()["credenciais_configuradas"]
     assert creds == {"anthropic": True, "openai": True}
 
 
@@ -192,9 +192,9 @@ def test_formatter_serializa_tipos_incomuns() -> None:
 
 
 def test_sentinela_lista_o_que_gravou(client: TestClient) -> None:
-    client.post("/api/sentinel", json={"label": "a"})
-    client.post("/api/sentinel", json={"label": "b"})
-    corpo = client.get("/api/sentinel").json()
+    client.post("/api/diagnostico/sentinela", json={"label": "a"})
+    client.post("/api/diagnostico/sentinela", json={"label": "b"})
+    corpo = client.get("/api/diagnostico/sentinela").json()
     assert corpo["total"] == 2
     assert [i["label"] for i in corpo["items"]] == ["b", "a"]
 
@@ -385,11 +385,11 @@ def test_producao_sobe_com_volume_montado(
 
     with TestClient(criar_app()) as c:
         c.headers.update({"Authorization": f"Bearer {TOKEN}"})
-        assert c.get("/api/health").status_code == 200
+        assert c.get("/api/substrato/health").status_code == 200
 
 
 def test_health_separa_gravavel_de_montado(client: TestClient) -> None:
-    corpo = client.get("/api/health").json()
+    corpo = client.get("/api/substrato/health").json()
     assert "volume_gravavel" in corpo
     assert "volume_montado" in corpo
 
@@ -404,7 +404,7 @@ def test_cada_thread_tem_a_propria_conexao(ambiente) -> None:
     tempo, e `sqlite3.Connection` nao suporta isso.
 
     Medido antes do conserto: 3 falhas em 208 requisicoes concorrentes -
-    `sqlite3.InterfaceError` virando `500` em `/api/curva` e `503` em
+    `sqlite3.InterfaceError` virando `500` em `/api/baselines/curva` e `503` em
     `/api/config`, cerca de 1,4%.
 
     A suite nunca viu porque `TestClient` chama uma rota de cada vez. O
@@ -481,10 +481,10 @@ def test_o_painel_inteiro_em_paralelo_nao_derruba_rota_nenhuma(
     import concurrent.futures as cf
 
     rotas = [
-        "/api/health", "/api/config", "/api/dataset", "/api/ledger",
-        "/api/ledger/transacoes", "/api/sentinel", "/api/simulador",
-        "/api/execucoes", "/api/comparacao", "/api/agente", "/api/curva",
-        "/api/relatorio", "/api/exportar",
+        "/api/substrato/health", "/api/config", "/api/dataset", "/api/ledger",
+        "/api/ledger/transacoes", "/api/diagnostico/sentinela", "/api/simulador",
+        "/api/simulador/execucoes", "/api/baselines", "/api/agente", "/api/baselines/curva",
+        "/api/relatorio", "/api/relatorio/exportar",
     ]
 
     def bater(rota: str) -> tuple[str, int]:
@@ -578,8 +578,8 @@ def test_as_rotas_continuam_exigindo_token_com_docs_ligados(
     get_settings.cache_clear()
     try:
         with TC(criar_app()) as c:
-            assert c.get("/api/health").status_code == 401
-            assert c.get("/api/separacao").status_code == 401
+            assert c.get("/api/substrato/health").status_code == 401
+            assert c.get("/api/dataset/separacao").status_code == 401
     finally:
         get_settings.cache_clear()
 
@@ -696,9 +696,9 @@ def test_o_openapi_publica_o_esquema_de_seguranca(monkeypatch, ambiente) -> None
 def test_a_fase_vem_de_um_lugar_so(monkeypatch, ambiente) -> None:
     """Quatro lugares declaravam a fase, e TRES discordavam entre si.
 
-    O `/api/health` foi corrigido no incremento 9 com um comentario dizendo
+    O `/api/substrato/health` foi corrigido no incremento 9 com um comentario dizendo
     "a fase vem daqui e de nenhum outro lugar". Era falso quando foi escrito:
-    o liveness em `main.py` dizia "0A", o `/api/exportar` dizia "0A", e so o
+    o liveness em `main.py` dizia "0A", o `/api/relatorio/exportar` dizia "0A", e so o
     health dizia "0B".
 
     Um comentario afirmando unicidade nao produz unicidade. `app/fase.py`
@@ -730,3 +730,111 @@ def test_a_fase_vem_de_um_lugar_so(monkeypatch, ambiente) -> None:
     from app import fase
 
     assert fase.FASE == "0B"
+
+
+# ===========================================================================
+# Organizacao das rotas: dominio no caminho, e nada solto na raiz
+# ===========================================================================
+
+
+def test_toda_rota_vive_sob_um_dominio() -> None:
+    """Nenhuma rota solta em `/api/<coisa>` sem dominio.
+
+    Antes do split havia 33 handlers num arquivo de 1.138 linhas com os
+    caminhos na raiz: `/api/lote` e `/api/creditos` sao do validador e
+    ficavam ao lado de `/api/curva`; a separacao de dados aparecia como
+    `POST /api/dataset/separacao` E `GET /api/separacao` - a mesma coisa em
+    dois lugares.
+
+    O dominio no caminho e o que torna a api navegavel sem ler o codigo. Esta
+    guarda existe porque a proxima rota sera escrita por alguem com pressa, e
+    "so esta uma na raiz" e como as 33 comecaram.
+    """
+    from app.api.rotas import MODULOS
+
+    dominios = {m.__name__.rsplit(".", 1)[-1] for m in MODULOS}
+    fora: list[str] = []
+    for modulo in MODULOS:
+        for rota in modulo.router.routes:
+            partes = rota.path.strip("/").split("/")
+            if len(partes) < 2 or partes[0] != "api" or partes[1] not in dominios:
+                fora.append(rota.path)
+    assert not fora, f"rota sem dominio no caminho: {fora}"
+
+    # E a guarda nao pode ser vazia.
+    assert len(dominios) >= 10
+
+
+def test_o_prefixo_do_modulo_bate_com_o_nome_dele() -> None:
+    """`rotas/validador.py` serve `/api/validador`, e nao outra coisa.
+
+    Sem isto, um modulo poderia declarar `prefix="/api/outracoisa"` e a
+    organizacao viraria aparencia: a pasta diria uma coisa e a url outra.
+    """
+    from app.api.rotas import MODULOS
+
+    for modulo in MODULOS:
+        nome = modulo.__name__.rsplit(".", 1)[-1]
+        assert modulo.router.prefix == f"/api/{nome}", (
+            f"{nome}.py serve {modulo.router.prefix}"
+        )
+
+
+def test_cada_modulo_declara_a_propria_tag() -> None:
+    """A tag e o que faz o Swagger desenhar SECOES em vez de 33 linhas.
+
+    Um modulo sem tag cai num balde generico, e a organizacao some
+    exatamente onde ela deveria aparecer - na pagina que existe para
+    navegar.
+    """
+    from app.api.rotas import MODULOS
+
+    for modulo in MODULOS:
+        nome = modulo.__name__.rsplit(".", 1)[-1]
+        assert modulo.router.tags == [nome], f"{nome}.py: {modulo.router.tags}"
+
+
+def test_o_que_e_so_diagnostico_vive_em_diagnostico() -> None:
+    """A sentinela existe para PROVAR o substrato, e nao participa do experimento.
+
+    Ela foi criada no incremento 0 para demonstrar que o volume persiste
+    entre deploys. Nenhum run a le, nenhum resultado depende dela.
+
+    Misturada com as rotas do experimento, ela parecia parte dele - e quem
+    abrisse a api pela primeira vez nao teria como saber que nao era.
+    """
+    from app.api.rotas import diagnostico
+
+    caminhos = {r.path for r in diagnostico.router.routes}
+    assert caminhos == {"/api/diagnostico/sentinela"}
+
+    # E nenhum modulo do experimento serve sentinela.
+    from app.api.rotas import MODULOS
+
+    for modulo in MODULOS:
+        if modulo is diagnostico:
+            continue
+        for rota in modulo.router.routes:
+            assert "sentinel" not in rota.path, rota.path
+
+
+def test_a_dependencia_de_token_vive_no_router_raiz() -> None:
+    """Repetida por modulo, um esquecimento abriria uma SECAO inteira.
+
+    A ausencia de uma linha e o defeito mais dificil de ver numa revisao -
+    e aqui ela nao apareceria como erro, apareceria como dez rotas abertas.
+    """
+    import inspect
+
+    from app.api import rotas
+
+    fonte = inspect.getsource(rotas)
+    assert "exigir_token_de_servico" in fonte
+
+    # Nenhum modulo declara a dependencia por conta propria: se um declarasse,
+    # o proximo copiaria o padrao e o seguinte esqueceria.
+    for modulo in rotas.MODULOS:
+        assert not modulo.router.dependencies, (
+            f"{modulo.__name__} declara dependencia propria; a do token vive"
+            " no router raiz, e uma so"
+        )

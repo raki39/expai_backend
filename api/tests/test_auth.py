@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from .conftest import TOKEN
 
-ROTAS_GET = ["/api/health", "/api/config", "/api/config/history", "/api/sentinel"]
+ROTAS_GET = ["/api/substrato/health", "/api/config", "/api/config/historico", "/api/diagnostico/sentinela"]
 
 
 @pytest.mark.parametrize("rota", ROTAS_GET)
@@ -32,7 +32,7 @@ def test_credencial_certa_200(client: TestClient, rota: str) -> None:
 
 def test_post_tambem_exige_token(client: TestClient) -> None:
     r = client.post(
-        "/api/sentinel", json={"label": "x"}, headers={"Authorization": ""}
+        "/api/diagnostico/sentinela", json={"label": "x"}, headers={"Authorization": ""}
     )
     assert r.status_code == 401
 
@@ -45,13 +45,13 @@ def test_post_tambem_exige_token(client: TestClient) -> None:
 
 
 def test_esquema_diferente_de_bearer_401(client: TestClient) -> None:
-    r = client.get("/api/health", headers={"Authorization": f"Basic {TOKEN}"})
+    r = client.get("/api/substrato/health", headers={"Authorization": f"Basic {TOKEN}"})
     assert r.status_code == 401
 
 
 def test_health_nao_e_excecao(client: TestClient) -> None:
     """Um endpoint aberto e um endpoint aberto, mesmo so com metadados."""
-    assert client.get("/api/health", headers={"Authorization": ""}).status_code == 401
+    assert client.get("/api/substrato/health", headers={"Authorization": ""}).status_code == 401
 
 
 def test_liveness_responde_sem_credencial(client: TestClient) -> None:
@@ -85,8 +85,8 @@ def test_liveness_nao_vaza_nada(client: TestClient) -> None:
 
 
 def test_dados_reais_continuam_exigindo_token(client: TestClient) -> None:
-    """Liveness aberta nao afrouxa nada: /api/health segue fechado."""
-    assert client.get("/api/health", headers={"Authorization": ""}).status_code == 401
+    """Liveness aberta nao afrouxa nada: /api/substrato/health segue fechado."""
+    assert client.get("/api/substrato/health", headers={"Authorization": ""}).status_code == 401
 
 
 def test_sem_documentacao_publica(client: TestClient) -> None:
@@ -105,9 +105,9 @@ def test_cors_desligado_por_padrao(client: TestClient) -> None:
     e exercitado. O default fechado garante que ligar CORS seja um ato
     explicito, nunca um acidente.
     """
-    r = client.get("/api/health", headers={"Origin": "https://qualquer.app"})
+    r = client.get("/api/substrato/health", headers={"Origin": "https://qualquer.app"})
     assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
-    assert client.get("/api/health").json()["cors_allowed_origins"] == []
+    assert client.get("/api/substrato/health").json()["cors_allowed_origins"] == []
 
 
 def test_cors_libera_apenas_origem_da_lista(
@@ -126,16 +126,16 @@ def test_cors_libera_apenas_origem_da_lista(
         c.headers.update({"Authorization": f"Bearer {TOKEN}"})
 
         permitida = c.get(
-            "/api/health", headers={"Origin": "https://painel.vercel.app"}
+            "/api/substrato/health", headers={"Origin": "https://painel.vercel.app"}
         )
         assert permitida.headers["access-control-allow-origin"] == (
             "https://painel.vercel.app"
         )
 
-        outra = c.get("/api/health", headers={"Origin": "http://localhost:3000"})
+        outra = c.get("/api/substrato/health", headers={"Origin": "http://localhost:3000"})
         assert outra.headers["access-control-allow-origin"] == "http://localhost:3000"
 
-        negada = c.get("/api/health", headers={"Origin": "https://invasor.app"})
+        negada = c.get("/api/substrato/health", headers={"Origin": "https://invasor.app"})
         assert "access-control-allow-origin" not in {
             k.lower() for k in negada.headers
         }
@@ -151,7 +151,7 @@ def test_cors_nunca_usa_curinga(ambiente, monkeypatch: pytest.MonkeyPatch) -> No
 
     with TestClient(criar_app()) as c:
         c.headers.update({"Authorization": f"Bearer {TOKEN}"})
-        r = c.get("/api/health", headers={"Origin": "https://painel.vercel.app"})
+        r = c.get("/api/substrato/health", headers={"Origin": "https://painel.vercel.app"})
         assert r.headers["access-control-allow-origin"] != "*"
 
 
@@ -169,5 +169,5 @@ def test_cors_nao_substitui_autenticacao(
     get_settings.cache_clear()
 
     with TestClient(criar_app()) as c:
-        r = c.get("/api/health", headers={"Origin": "https://painel.vercel.app"})
+        r = c.get("/api/substrato/health", headers={"Origin": "https://painel.vercel.app"})
         assert r.status_code == 401
