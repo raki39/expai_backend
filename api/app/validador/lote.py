@@ -60,6 +60,13 @@ class Membro:
     run_id: int
     content_hash: str
     estado: str
+    #: De qual braco. O lote e onde os dois sao comparados (§14.3), e sem isto
+    #: quarenta e oito linhas misturadas nao respondem "quantas sobreviveram
+    #: de cada lado" - que e a pergunta do Portao A.
+    #:
+    #: Sem valor padrao de proposito: um `Membro` construido sem dizer o braco
+    #: apareceria no lote como "?" e a comparacao contaria errado em silencio.
+    agente_origem: str
     p_valor_ppm: int | None
     por_que_sem_p: str | None = None
     dsr: dict | None = None
@@ -70,6 +77,7 @@ class Membro:
             "hypothesis_id": self.hypothesis_id,
             "run_id": self.run_id,
             "content_hash": self.content_hash[:12],
+            "agente_origem": self.agente_origem,
             "estado": self.estado,
             "p_valor_ppm": self.p_valor_ppm,
             "por_que_sem_p": self.por_que_sem_p,
@@ -87,7 +95,12 @@ def membros(conn: sqlite3.Connection, config_version_id: int) -> list[Membro]:
     linhas = list(
         conn.execute(
             "SELECT h.id AS hid, h.run_id AS run_id,"
-            "       h.content_hash AS hash, h.testavel AS testavel"
+            "       h.content_hash AS hash, h.testavel AS testavel,"
+            # De qual BRACO. O lote e onde os dois sao comparados, e um
+            # membro que nao diz de onde veio torna a comparacao ilegivel:
+            # com 48 linhas misturadas, "quantas sobreviveram de cada lado"
+            # deixa de ser uma pergunta que a tabela responde.
+            "       h.agente_origem AS agente_origem"
             "  FROM hypothesis h JOIN run r ON r.id = h.run_id"
             " WHERE r.config_version_id = ?"
             " ORDER BY h.id",
@@ -106,6 +119,7 @@ def membros(conn: sqlite3.Connection, config_version_id: int) -> list[Membro]:
                     hypothesis_id=hid,
                     run_id=run_id,
                     content_hash=l["hash"],
+                    agente_origem=l["agente_origem"],
                     estado=nome,
                     p_valor_ppm=None,
                     por_que_sem_p=(
@@ -124,6 +138,7 @@ def membros(conn: sqlite3.Connection, config_version_id: int) -> list[Membro]:
                     hypothesis_id=hid,
                     run_id=run_id,
                     content_hash=l["hash"],
+                    agente_origem=l["agente_origem"],
                     estado=nome,
                     p_valor_ppm=None,
                     # `ValidationError` entra aqui de proposito. Uma linha
@@ -141,6 +156,7 @@ def membros(conn: sqlite3.Connection, config_version_id: int) -> list[Membro]:
                 hypothesis_id=hid,
                 run_id=run_id,
                 content_hash=l["hash"],
+                agente_origem=l["agente_origem"],
                 estado=nome,
                 p_valor_ppm=est.get("p_valor_ppm"),
                 por_que_sem_p=est.get("por_que"),

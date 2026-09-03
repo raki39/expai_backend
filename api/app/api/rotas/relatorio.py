@@ -5,6 +5,7 @@ Fechamento derivado, vinculo nos dois sentidos e export do estado.
 
 from __future__ import annotations
 
+import json
 import logging
 from ... import fase as fase_mod
 from ...config import service as config_service
@@ -22,7 +23,8 @@ from ...store import (
 from datetime import datetime, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi import Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import PlainTextResponse
 from typing import Any
 from ..modelos import PedidoProva
 from ..comum import _conn
@@ -142,8 +144,21 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
     }
 
     nome = f"fase0a-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-    return JSONResponse(
-        corpo,
+    # INDENTADO, e nao pelo `JSONResponse` padrao.
+    #
+    # `JSONResponse` serializa compacto - `separators=(",", ":")` -, o que e
+    # certo para resposta de API e errado para isto: o export existe para uma
+    # PESSOA abrir num editor e ler. Trezentos kB numa linha unica nao sao
+    # legiveis em editor nenhum, e o arquivo era a forma de tirar o estado da
+    # tela sem perder estrutura - perde-la na serializacao anula o motivo.
+    #
+    # `ensure_ascii=False` mantem os simbolos de secao e os acentos como
+    # caracteres, em vez de escapes: o texto e para ler.
+    return Response(
+        content=json.dumps(
+            jsonable_encoder(corpo), indent=2, ensure_ascii=False
+        ),
+        media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{nome}"'},
     )
 

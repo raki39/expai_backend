@@ -45,6 +45,7 @@ from ..maos_rapidas import executor
 from ..regra import registro as registro_de_regra
 from ..settings import Settings
 from ..simulador import execucao as simulador
+from ..validador import estados as validador_estados
 from ..validador import promocao as validador_promocao
 from . import busca
 
@@ -112,6 +113,24 @@ class ResultadoDoBraco:
         sustentadas = [h for h in self.hipoteses if h.veredito == "sustentada"]
         return {
             "braco": BRACO,
+            # A LINHA que o painel mostra na caixa de resultado.
+            #
+            # Ela existe porque o corpo inteiro tem ~8.000 caracteres e o
+            # painel o passa pela URL do redirect, cortado em 4.000: o JSON
+            # chega truncado e nao parseavel, e a caixa mostraria um blob
+            # numa linha so. Quem resume e a API, e nao a tela - escolher
+            # quais campos importam e decidir sobre o experimento, e isso nao
+            # acontece no painel (regra 19).
+            #
+            # O corpo completo continua em `GET /api/b4` e no export.
+            "mensagem": (
+                f"{len(self.hipoteses)} hipoteses de B4,"
+                f" {sum(h.creditos_cobrados or 0 for h in self.hipoteses)}"
+                f" creditos, zero reflexoes."
+                f" {sum(1 for h in self.hipoteses if h.veredito == 'sustentada')}"
+                f" sustentada(s)."
+                f" Busca: {self.digest_das_hipoteses[:12]}"
+            ),
             "config_version_id": self.config_version_id,
             "dataset_id": self.dataset_id,
             "semente": self.semente,
@@ -388,24 +407,61 @@ def resumo(conn: sqlite3.Connection, config_version_id: int) -> dict:
     gravado aqui seria a segunda fonte de verdade sobre quantas tentativas o
     controle fez - e o contador global do DSR le a primeira.
     """
-    linhas = [
-        dict(l)
-        for l in conn.execute(
-            "SELECT h.id AS hypothesis_id, h.run_id AS run_id,"
-            "       h.testavel AS testavel, h.content_hash AS content_hash,"
-            "       h.rule_id AS rule_id"
-            "  FROM hypothesis h JOIN run r ON r.id = h.run_id"
-            " WHERE h.agente_origem = ? AND r.config_version_id = ?"
-            " ORDER BY h.id",
-            (hipotese_registro.AGENTE_ORIGEM_B4, config_version_id),
+    linhas = []
+    for l in conn.execute(
+        "SELECT h.id AS hypothesis_id, h.run_id AS run_id,"
+        "       h.testavel AS testavel, h.content_hash AS content_hash,"
+        "       h.rule_id AS rule_id, h.enunciado AS enunciado,"
+        "       h.n_minimo AS n_minimo, h.efeito_minimo AS efeito_minimo,"
+        "       h.metrica_primaria AS metrica_primaria"
+        "  FROM hypothesis h JOIN run r ON r.id = h.run_id"
+        " WHERE h.agente_origem = ? AND r.config_version_id = ?"
+        " ORDER BY h.id",
+        (hipotese_registro.AGENTE_ORIGEM_B4, config_version_id),
+    ):
+        linha = dict(l)
+        # O VEREDITO e o CREDITO de cada uma. Sem eles, o resumo devolvia
+        # dezesseis ids e nenhum resultado - e o export do painel mostraria
+        # que B4 rodou sem dizer o que ele concluiu.
+        #
+        # Quarta vez que um campo existe no POST e falta no GET, depois de
+        # `motivo`, `regra_veio_do_cerebro` e `parecer_do_validador`. Aqui
+        # entra na primeira escrita porque a lista `CAMPOS_QUE_JA_SUMIRAM` do
+        # incremento 11b existe justamente para a pergunta ser feita.
+        linha["parecer"] = validador_promocao.parecer_derivado(
+            conn, int(l["hypothesis_id"])
         )
-    ]
+        linha["testes"] = creditos_mod.testes_da_hipotese(
+            conn, int(l["hypothesis_id"])
+        )
+        linha["estado"] = (
+            e.estado
+            if (e := validador_estados.atual(conn, int(l["hypothesis_id"])))
+            else None
+        )
+        linhas.append(linha)
     saldo = creditos_mod.saldo(conn, braco=BRACO, config_version_id=config_version_id)
+    sustentadas = sum(
+        1 for l in linhas if (l["parecer"] or {}).get("veredito") == "sustentada"
+    )
+    consumido = saldo.consumido if saldo else 0
     return {
         "braco": BRACO,
         "config_version_id": config_version_id,
         "hipoteses": linhas,
         "quantas": len(linhas),
+        "sustentadas": sustentadas,
+        # A comparacao da fase, no GET tambem. Estava so no corpo do POST -
+        # que acontece uma vez, no clique, enquanto todo o resto da vida do
+        # braco e lido por aqui.
+        "sustentadas_por_credito_ppm": (
+            sustentadas * 1_000_000 // consumido if consumido else None
+        ),
+        "por_que_sem_taxa": (
+            None if consumido else
+            "nenhum credito consumido: sem denominador nao ha taxa, e devolver"
+            " zero afirmaria que ela foi medida"
+        ),
         "creditos": saldo,
         "agente_origem": hipotese_registro.AGENTE_ORIGEM_B4,
         "nota": (

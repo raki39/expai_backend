@@ -747,3 +747,111 @@ def test_b4_recusa_com_run_ativo(client, conn: sqlite3.Connection, cenario_b4) -
     resposta = client.post("/api/b4", json={"author": "teste"})
     assert resposta.status_code == 409
     assert "run ativo" in resposta.json()["detail"]
+
+
+def test_o_export_traz_o_RESULTADO_de_b4_e_nao_so_os_ids(
+    client, conn: sqlite3.Connection, cenario_b4
+) -> None:
+    """A parte `b4` do export tem de responder o que o braco CONCLUIU.
+
+    A guarda do incremento 11b garante que a rota esta no pacote; ela nao
+    garante que a rota diz algo util. `resumo` devolvia dezesseis ids, um
+    hash e um contador de creditos - o export mostraria que B4 rodou sem
+    dizer o resultado de nada, e a comparacao da fase e sobre resultado.
+
+    Quarta vez que um campo existe no POST e falta no GET. Entra na primeira
+    escrita porque `CAMPOS_QUE_JA_SUMIRAM` existe para a pergunta ser feita.
+    """
+    client.post("/api/b4", json={"author": "teste"})
+    corpo = client.get("/api/relatorio/exportar").json()
+
+    b = corpo["partes"]["b4"]
+    assert b["quantas"] == busca.QUANTAS
+    assert "sustentadas" in b and "sustentadas_por_credito_ppm" in b
+
+    for h in b["hipoteses"]:
+        # O que a hipotese AFIRMOU, e nao so o id dela.
+        assert h["enunciado"] and h["metrica_primaria"]
+        assert h["n_minimo"] and h["efeito_minimo"]
+        # O que o validador CONCLUIU, recalculado.
+        assert "parecer" in h
+        assert h["parecer"] is None or "veredito" in h["parecer"]
+        # E o registro datado de que houve teste, com o custo.
+        assert isinstance(h["testes"], list)
+        assert h["estado"] is not None
+
+
+def test_o_lote_do_export_diz_de_qual_braco_cada_membro_e(
+    client, conn: sqlite3.Connection, cenario_b4
+) -> None:
+    """Com 48 linhas misturadas, "quantas de cada lado" tem de ser respondivel.
+
+    O lote e onde os dois bracos sao comparados (§14.3, e o criterio "supera
+    B4 por credito consumido" de §14.4). Um membro que nao diz de onde veio
+    torna a tabela ilegivel exatamente na pergunta que ela existe para
+    responder.
+    """
+    client.post("/api/b4", json={"author": "teste"})
+    corpo = client.get("/api/relatorio/exportar").json()
+
+    membros = corpo["partes"]["lote"]["fechamento"]["membros"]
+    assert membros, "o lote veio vazio: o teste passaria por vacuidade"
+    assert all(m["agente_origem"] for m in membros)
+    assert {m["agente_origem"] for m in membros} == {
+        hipotese_registro.AGENTE_ORIGEM_B4
+    }, "so B4 rodou neste cenario; o agente entraria como origem propria"
+
+
+def test_o_json_do_export_e_legivel_por_uma_pessoa(client) -> None:
+    """Indentado, e nao compacto.
+
+    `JSONResponse` serializa com `separators=(",", ":")` - certo para resposta
+    de API, errado para isto: o export existe para uma pessoa abrir num editor.
+    Trezentos kB numa linha unica nao sao legiveis em editor nenhum, e o
+    arquivo era justamente a forma de tirar o estado da tela **sem perder
+    estrutura**.
+    """
+    resposta = client.get("/api/relatorio/exportar")
+    assert resposta.status_code == 200
+    texto = resposta.text
+
+    assert "\n" in texto, "o export saiu numa linha unica"
+    assert '\n  "fase"' in texto, "sem indentacao de dois espacos"
+    assert texto.count("\n") > 100, (
+        f"so {texto.count(chr(10))} linhas: a indentacao nao chegou ao fundo"
+    )
+    # E continua sendo JSON valido, com os acentos como caracteres e nao como
+    # escapes - o texto e para ler.
+    import json as _json
+
+    _json.loads(texto)
+    # O simbolo de secao aparece como CARACTERE, e nao como escape: e o que
+    # `ensure_ascii=False` garante, e "\u00a714.3" nao se le.
+    assert chr(0xA7) in texto, "os simbolos sairam escapados"
+    assert "u00a7" not in texto
+
+
+def test_o_post_de_b4_traz_uma_linha_de_resumo(
+    client, conn: sqlite3.Connection, cenario_b4
+) -> None:
+    """`mensagem`, porque o corpo inteiro nao cabe na URL do painel.
+
+    O painel passa a resposta do POST pela URL do redirect, cortada em 4.000
+    caracteres. O corpo de B4 tem ~8.000: chegava truncado, nao parseavel, e a
+    caixa mostrava um blob numa linha so. Aumentar o corte nao resolve -
+    `encodeURIComponent` triplica JSON e o header de um redirect nao aguenta.
+
+    Quem resume e a API. Escolher quais campos importam e decidir sobre o
+    experimento, e isso nao acontece no painel (regra 19).
+    """
+    import json as _json
+
+    corpo = client.post("/api/b4", json={"author": "teste"}).json()
+    assert corpo["mensagem"]
+    assert len(corpo["mensagem"]) < 200, "a linha de resumo tem de caber na tela"
+    assert "zero reflexoes" in corpo["mensagem"]
+    assert str(busca.QUANTAS) in corpo["mensagem"]
+
+    # E o corpo inteiro de fato nao cabe - senao este campo seria desnecessario
+    # e o teste passaria por vacuidade.
+    assert len(_json.dumps(corpo)) > 4_000
