@@ -236,8 +236,24 @@ def hash_do_conteudo(
 # onde as implementacoes de saida estruturada mais divergem entre provedores.
 #
 # Aqui `condicoes_falseamento` e um array de objetos, que os dois provedores
-# suportam. O `minItems` vai junto e e conselho; quem recusa de verdade e o
-# `min_length` do pydantic acima, e depois dele o CHECK da migracao 9.
+# suportam.
+#
+# **`minItems` e `maxItems` NAO vao junto, e a suposicao contraria custou uma
+# chamada paga.** O comentario que estava aqui dizia "o `minItems` vai junto e
+# e conselho" - por analogia com o `maxLength`, que a nota de API registra como
+# aceito e nao imposto. A analogia era falsa: a Anthropic **recusa com 400**,
+#
+#   output_config.format.schema: For 'array' type, property 'maxItems' is not
+#   supported
+#
+# Nada se perde tirando os dois: quem recusa de verdade sempre foi o
+# `min_length`/`max_length` do pydantic acima, e depois dele o CHECK com
+# `json_array_length >= 1` da migracao 9. O que se perde e a DICA ao modelo -
+# e por isso o limite vai para a `description`, que e o texto que ele le.
+#
+# Ha guarda agora: `tests/test_paradas.py` compara as palavras-chave usadas
+# aqui com uma lista de palavras que ja vimos aceitas de verdade. Palavra nova
+# quebra a suite ate alguem exercita-la contra o provedor.
 
 SCHEMA_PRE_REGISTRO: dict = {
     "type": "object",
@@ -296,12 +312,19 @@ SCHEMA_PRE_REGISTRO: dict = {
         },
         "condicoes_falseamento": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": MAX_CLAUSULAS,
+            # O limite vai no TEXTO, e nao em `maxItems`: o provedor recusa a
+            # palavra-chave, e `MAX_CLAUSULAS` entra por interpolacao para que
+            # o numero que o modelo le seja o mesmo que o pydantic impoe. Um
+            # numero so, em tres lugares - a licao 4 do incremento 5, quando um
+            # diagnostico de 812 caracteres morreu num limite de 800 que
+            # ninguem precisava.
             "description": (
                 "O que precisaria ser OBSERVADO para considerar esta hipotese"
                 " falsa. Obrigatorio: hipotese que nao pode ser refutada nao"
-                " entra. Ao menos uma clausula precisa incidir sobre a metrica"
+                " entra."
+                f" De 1 a {MAX_CLAUSULAS} clausulas - fora dessa faixa a"
+                " proposta inteira e rejeitada."
+                " Ao menos uma clausula precisa incidir sobre a metrica"
                 " primaria, com comparador 'menor_que' e valor maior ou igual"
                 " ao efeito minimo declarado."
             ),

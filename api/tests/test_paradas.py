@@ -597,6 +597,109 @@ def test_resposta_sem_texto_vira_categoria_max_tokens() -> None:
     assert "max_tokens" in str(capturado.value)
 
 
+#: Palavras-chave de JSON Schema que **ja vimos aceitas de verdade** por uma
+#: chamada real. Nao e a lista do que a especificacao JSON Schema permite, nem
+#: a do que a documentacao promete: e a do que foi exercitado.
+#:
+#: A distincao custou uma chamada paga. `minItems`/`maxItems` estavam no
+#: schema sob um comentario afirmando que iam "junto e sao conselho", por
+#: analogia com `maxLength` - que a nota de API registra como aceito e nao
+#: imposto. A Anthropic recusa os dois com 400:
+#:
+#:   output_config.format.schema: For 'array' type, property 'maxItems' is
+#:   not supported
+#:
+#: Acrescentar palavra aqui exige exercita-la contra o provedor primeiro.
+PALAVRAS_JA_ACEITAS = frozenset(
+    {
+        "type",
+        "properties",
+        "items",
+        "required",
+        "additionalProperties",
+        "enum",
+        "description",
+        # Aceito e NAO imposto - a licao 4 do incremento 5. Quem impoe e o
+        # pydantic.
+        "maxLength",
+    }
+)
+
+
+def test_o_schema_so_usa_palavras_chave_ja_exercitadas() -> None:
+    """A guarda que faltava, e que teria evitado a chamada de 400.
+
+    O teste anterior conferia a ESTRUTURA - `additionalProperties: false` e
+    `required` completo em todo objeto - e passava com `maxItems` no meio,
+    porque `maxItems` nao viola estrutura nenhuma: ele viola o conjunto de
+    palavras que o provedor implementa. Sao conferencias diferentes, e eu
+    tinha escrito so uma.
+    """
+    from app.cerebro import contrato
+
+    usadas: dict[str, list[str]] = {}
+
+    def andar(no: object, caminho: str) -> None:
+        if not isinstance(no, dict):
+            return
+        for chave in no:
+            usadas.setdefault(chave, []).append(caminho)
+        for nome, valor in (no.get("properties") or {}).items():
+            andar(valor, f"{caminho}.{nome}")
+        if "items" in no:
+            andar(no["items"], f"{caminho}[]")
+
+    schemas = [
+        (nome, getattr(contrato, nome))
+        for nome in dir(contrato)
+        if nome.startswith("SCHEMA")
+    ]
+    assert schemas, "nenhum schema encontrado: a varredura ficou vazia"
+
+    for nome, schema in schemas:
+        usadas.clear()
+        andar(schema, "raiz")
+        assert usadas, f"{nome}: varredura vazia"
+        fora = {k: v for k, v in usadas.items() if k not in PALAVRAS_JA_ACEITAS}
+        assert not fora, (
+            f"{nome} usa palavra-chave nunca exercitada contra o provedor:"
+            f" { 
+                {k: v[:2] for k, v in fora.items()} }."
+            " Exercite contra o provedor antes de acrescentar a"
+            " PALAVRAS_JA_ACEITAS - foi por assumir que `minItems` era"
+            " conselho que o run 28 gastou uma reflexao e morreu com 400."
+        )
+
+
+def test_o_limite_de_clausulas_esta_no_texto_que_o_modelo_le() -> None:
+    """Tirar `maxItems` nao pode virar "o modelo nao sabe o limite".
+
+    O provedor recusa a palavra-chave, entao o limite tem de viajar na
+    `description`. E tem de ser o MESMO numero que o pydantic impoe: um limite
+    escrito a mao ao lado de outro imposto no codigo e a forma exata de os dois
+    divergirem - foi o que aconteceu no incremento 5 com um `maxLength` de 800
+    que ninguem precisava.
+    """
+    from app.cerebro.contrato import SCHEMA_PROPOSTA
+    from app.hipotese.schema import MAX_CLAUSULAS, PreRegistroBruto
+
+    texto = (
+        SCHEMA_PROPOSTA["properties"]["pre_registro"]["properties"]
+        ["condicoes_falseamento"]["description"]
+    )
+    assert str(MAX_CLAUSULAS) in texto, (
+        "o limite que o modelo le tem de ser o numero que o pydantic impoe"
+    )
+    # E o pydantic realmente impoe - senao o texto seria a unica barreira.
+    campo = PreRegistroBruto.model_fields["condicoes_falseamento"]
+    limites = [
+        (getattr(m, "min_length", None), getattr(m, "max_length", None))
+        for m in campo.metadata
+    ]
+    assert any(mx == MAX_CLAUSULAS for _, mx in limites), limites
+    assert any(mn == 1 for mn, _ in limites), limites
+
+
 def test_o_teto_de_saida_deixa_folga_larga_para_o_pensamento() -> None:
     """O texto do contrato cabe em ~300 tokens; o resto do teto e pensamento.
 
