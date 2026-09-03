@@ -59,17 +59,25 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-BRACOS = ("agente", "b4")
+BRACOS = ("agente", "b4", "a1a", "a1b")
 
 #: De qual BRACO uma hipotese e, a partir da `agente_origem` dela.
 #:
-#: As chaves sao `hipotese.registro.AGENTE_ORIGEM` e `AGENTE_ORIGEM_B4`,
+#: As chaves sao as constantes `AGENTE_ORIGEM*` de `hipotese.registro`,
 #: escritas aqui como literais para nao importar `app/hipotese` neste modulo -
 #: e ha teste comparando as duas listas, porque duas copias de um mapa fechado
 #: divergem.
+#:
+#: Os controles tem braco proprio porque §14.4 os manda injetar "pelo mesmo
+#: caminho das reais", e o mesmo caminho COBRA. Cobra-los do agente drenaria o
+#: orcamento do que a fase mede - o defeito que o incremento 12 encontrou -, e
+#: isenta-los exigiria um ramo no validador que reconhece controle, o que
+#: quebraria "mesmo caminho" justamente onde ele e a garantia.
 ORIGEM_PARA_BRACO: dict[str, str] = {
     "transacao@0b": "agente",
     "b4@0b": "b4",
+    "a1a@0b": "a1a",
+    "a1b@0b": "a1b",
 }
 
 

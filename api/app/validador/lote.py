@@ -167,6 +167,92 @@ def membros(conn: sqlite3.Connection, config_version_id: int) -> list[Membro]:
 
 
 @dataclass(frozen=True)
+class Entrada:
+    """Uma candidata do lote, reduzida ao que a DECISÃO precisa.
+
+    Existe para que A1b — as execuções repetidas de §14.4 — passe pelo mesmo
+    procedimento de decisão que o lote real, e não por uma cópia dele. Duas
+    implementações do mesmo procedimento divergem, e aqui a divergência seria
+    invisível do pior jeito: o calibre mediria um procedimento que não é o que
+    promove.
+    """
+
+    chave: str
+    p_valor_ppm: int | None
+    #: `sharpe_por_observacao_milionesimos`, `n`, `assimetria_milesimos`,
+    #: `curtose_milesimos` — o bloco de momentos, ou `None` quando a série é
+    #: curta demais para ter quarto momento.
+    momentos: dict | None
+
+
+@dataclass(frozen=True)
+class Decisao:
+    fdr: dict
+    #: As chaves que passaram em BY **e** no DSR.
+    sobreviventes: list[str]
+    #: Por chave, o bloco do DSR — inclusive as indisponíveis, com o motivo.
+    dsr_por_chave: dict[str, dict]
+
+
+def decidir(
+    entradas: list[Entrada],
+    *,
+    procedimento: str,
+    alfa_bps: int,
+    m: int,
+    dsr_minimo_milesimos: int,
+    tentativas: int,
+) -> Decisao:
+    """BY e depois o DSR. **Uma definição, usada pelo lote real e por A1b.**
+
+    Pura: não toca no banco e não move estado nenhum. O que ela decide é
+    "quantas destas podem ser promovidas sem estourar o orçamento de falsas
+    descobertas de todas juntas", que é a pergunta do lote — e é exatamente a
+    pergunta que A1b calibra.
+    """
+    com_p = {
+        e.chave: e.p_valor_ppm for e in entradas if e.p_valor_ppm is not None
+    }
+    resultado_fdr = fdr_mod.aplicar(
+        com_p, procedimento=procedimento, alfa_bps=alfa_bps, m=m
+    )
+    rejeitadas = set(resultado_fdr.rejeitadas)
+
+    sobreviventes: list[str] = []
+    dsr_por_chave: dict[str, dict] = {}
+    for e in entradas:
+        if e.chave not in rejeitadas:
+            continue
+        est = e.momentos or {}
+        n = est.get("n")
+        if not n or n < 2:
+            dsr_por_chave[e.chave] = {"disponivel": False}
+            continue
+        try:
+            bloco = dsr_mod.calcular(
+                sharpe_por_observacao=(
+                    est["sharpe_por_observacao_milionesimos"] / 1_000_000
+                ),
+                n=n,
+                tentativas=tentativas,
+                assimetria=est["assimetria_milesimos"] / 1_000,
+                curtose_bruta=est["curtose_milesimos"] / 1_000,
+                limiar_milesimos=dsr_minimo_milesimos,
+            ).como_dict()
+        except dsr_mod.DSRImpossivel as erro:
+            bloco = {"disponivel": False, "por_que": str(erro)}
+        dsr_por_chave[e.chave] = bloco
+        if bloco.get("aprovado"):
+            sobreviventes.append(e.chave)
+
+    return Decisao(
+        fdr=resultado_fdr.como_dict(),
+        sobreviventes=sobreviventes,
+        dsr_por_chave=dsr_por_chave,
+    )
+
+
+@dataclass(frozen=True)
 class Fechamento:
     config_version_id: int
     familia_max: int
@@ -221,14 +307,6 @@ def fechar(
         if mb.p_valor_ppm is not None
     }
 
-    resultado_fdr = fdr_mod.aplicar(
-        com_p,
-        procedimento=procedimento,
-        alfa_bps=alfa_bps,
-        m=familia_max,
-    )
-    rejeitadas = set(resultado_fdr.rejeitadas)
-
     # O N do DSR é o contador GLOBAL, e não o tamanho deste lote.
     #
     # §8.6: "o contador global é registro histórico (...) alimenta o cálculo do
@@ -237,43 +315,47 @@ def fechar(
     # um Sharpe de 1,5 após 5.000 tentativas não são a mesma evidência".
     tentativas = max(1, contador.total(conn))
 
-    finais: list[Membro] = []
-    sobreviventes: list[int] = []
-    for mb in todos:
-        if str(mb.hypothesis_id) not in rejeitadas:
-            finais.append(mb)
-            continue
-        est = (mb.detalhe.get("estatistica") or {}).get("momentos") or {}
-        n = est.get("n")
-        if not n or n < 2:
-            finais.append(
-                Membro(**{**mb.__dict__, "dsr": {"disponivel": False}})
+    # A DECISÃO sai de `decidir`, que A1b também usa. Antes ela estava escrita
+    # aqui dentro, e o calibre teria de reimplementá-la - duas versões do
+    # mesmo procedimento, com a divergência invisível justamente onde ela
+    # importaria: o calibre mediria um procedimento que não é o que promove.
+    decisao = decidir(
+        [
+            Entrada(
+                chave=str(mb.hypothesis_id),
+                p_valor_ppm=mb.p_valor_ppm,
+                momentos=(mb.detalhe.get("estatistica") or {}).get("momentos"),
             )
-            continue
-        try:
-            r = dsr_mod.calcular(
-                sharpe_por_observacao=(
-                    est["sharpe_por_observacao_milionesimos"] / 1_000_000
-                ),
-                n=n,
-                tentativas=tentativas,
-                assimetria=est["assimetria_milesimos"] / 1_000,
-                curtose_bruta=est["curtose_milesimos"] / 1_000,
-                limiar_milesimos=dsr_minimo_milesimos,
-            )
-            bloco = r.como_dict()
-        except dsr_mod.DSRImpossivel as erro:
-            bloco = {"disponivel": False, "por_que": str(erro)}
-        finais.append(Membro(**{**mb.__dict__, "dsr": bloco}))
-        if bloco.get("aprovado"):
-            sobreviventes.append(mb.hypothesis_id)
+            for mb in todos
+        ],
+        procedimento=procedimento,
+        alfa_bps=alfa_bps,
+        m=familia_max,
+        dsr_minimo_milesimos=dsr_minimo_milesimos,
+        tentativas=tentativas,
+    )
+    resultado_fdr = decisao.fdr
+    rejeitadas = set(resultado_fdr["rejeitadas"])
+    sobreviventes = [int(c) for c in decisao.sobreviventes]
+
+    finais: list[Membro] = [
+        mb
+        if str(mb.hypothesis_id) not in rejeitadas
+        else Membro(
+            **{
+                **mb.__dict__,
+                "dsr": decisao.dsr_por_chave.get(str(mb.hypothesis_id), {}),
+            }
+        )
+        for mb in todos
+    ]
 
     log.info(
         "lote.fechado",
         extra={
             "config_version_id": config_version_id,
             "procedimento": procedimento,
-            "k": resultado_fdr.k,
+            "k": resultado_fdr["k"],
             "sobreviventes": len(sobreviventes),
         },
     )
@@ -282,7 +364,7 @@ def fechar(
         familia_max=familia_max,
         testadas=len(com_p),
         sem_p_valor=sum(1 for mb in todos if mb.p_valor_ppm is None),
-        fdr=resultado_fdr.como_dict(),
+        fdr=resultado_fdr,
         membros=[mb.como_dict() for mb in finais],
         sobreviventes=sobreviventes,
         tentativas_globais=tentativas,

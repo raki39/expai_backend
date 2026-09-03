@@ -36,6 +36,8 @@ from ..comum import _conn
 # E ela e real e vale manter visivel: `exportar` nao recalcula nada, so chama
 # as funcoes que ja servem cada tela. Se recalculasse, o export poderia
 # discordar do painel, e a divergencia so apareceria em quem exportou.
+from .a1a import a1a_estado
+from .a1b import a1b_estado
 from .agente import agente_estado
 from .b4 import b4_estado
 from .baselines import comparacao_atual, curva
@@ -110,6 +112,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # comparacao entre os dois e o produto da fase, e um export com um
         # braco so responderia metade da pergunta.
         ("b4", "/api/b4", lambda: b4_estado(request)),
+        # Os dois controles do PROTOCOLO. B4 e o controle do agente; A1a e
+        # A1b sao o controle de quem julga - e o Portao A e sobre eles.
+        # Um export sem eles mostraria o placar e nao mostraria se o juiz
+        # funciona, que e a pergunta que a 0B faz (§14.4).
+        ("a1a", "/api/a1a", lambda: a1a_estado(request)),
+        ("a1b", "/api/a1b", lambda: a1b_estado(request)),
         # As quatro partes da 0B. Faltavam: este export foi escrito no
         # incremento 7 com uma tupla literal, e parou de descrever o sistema
         # no instante em que a 0B acrescentou rota - em silencio, que e o

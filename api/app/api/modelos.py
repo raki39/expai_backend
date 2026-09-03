@@ -74,3 +74,32 @@ class PedidoB4(BaseModel):
 
     author: str = Field(min_length=1, max_length=120)
     semente: int | None = None
+
+
+class PedidoA1b(BaseModel):
+    """Um pedaço das execuções repetidas de A1b.
+
+    `quantas` existe porque são 400 execuções (D29) a ~0,85 s cada: uma
+    requisição só levaria quase seis minutos, e a regra 1 proíbe worker na
+    Fase 0. O teto real está em `a1b.braco.MAX_POR_PEDIDO`.
+
+    `semente` **não** troca o experimento: ela entra no hash de cada execução,
+    e mudar de semente no meio produziria execuções que não pertencem ao mesmo
+    conjunto. Existe para reprodução, e o registro grava a semente de cada
+    linha justamente para que a mistura apareça em `divergencias`.
+    """
+
+    author: str = Field(min_length=1, max_length=120)
+    quantas: int = Field(default=25, ge=1, le=50)
+    semente: int | None = None
+
+
+class PedidoA1a(BaseModel):
+    """Os controles negativos determinísticos. Sem gasto e sem semente.
+
+    **Sem semente de propósito.** As seis injeções de §14.4 são construídas,
+    não sorteadas: uma semente aqui sugeriria que existe variação a explorar
+    entre execuções, e o que varia num controle determinístico é nada.
+    """
+
+    author: str = Field(min_length=1, max_length=120)

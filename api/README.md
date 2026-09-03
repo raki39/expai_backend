@@ -126,6 +126,10 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 | POST | `/api/agente` | **roda o ciclo com LLM — gasta dinheiro de verdade** |
 | GET | `/api/b4` | o braço de controle não cognitivo (§14.3) sob a config vigente |
 | POST | `/api/b4` | **roda as 16 hipóteses de B4 — não gasta dinheiro, só CPU** |
+| GET | `/api/a1a` | os seis controles negativos determinísticos (§14.4) e o que aconteceu com cada um |
+| POST | `/api/a1a` | **injeta os seis controles pelo mesmo caminho das reais — tolerância zero** |
+| GET | `/api/a1b` | o calibre acumulado das nulas estocásticas, nos dois desenhos |
+| POST | `/api/a1b` | **roda um pedaço das 200 execuções por desenho (D29); idempotente por índice** |
 
 ### validador — independente do agente (§8.1)
 

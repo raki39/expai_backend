@@ -1927,6 +1927,305 @@ MIGRACOES: list[tuple[int, str, str]] = [
         -- O painel e o validador reportam a ausencia com essa palavra.
         """,
     ),
+    (
+        15,
+        "incremento 13: os controles negativos ganham braco de creditos",
+        """
+        -- ==================================================================
+        -- A1a e A1b sao "injetados pelo mesmo caminho das reais" (§14.4), e
+        -- o mesmo caminho COBRA CREDITO: `promocao._avaliar` cobra sempre,
+        -- pelo braco derivado da `agente_origem` da hipotese.
+        --
+        -- Sem braco proprio havia duas saidas, e as duas eram defeito:
+        --
+        --   1. cobrar os controles do braco do agente - o que drenaria o
+        --      orcamento do que a fase mede, e e exatamente o defeito que o
+        --      incremento 12 encontrou quando `_avaliar` cobrava
+        --      `braco="agente"` fixo;
+        --   2. isentar os controles - o que exigiria um ramo no validador
+        --      que reconhece controle, e "mesmo caminho" deixaria de ser
+        --      verdade justamente onde ela e a garantia.
+        --
+        -- Sao DOIS bracos, e nao um "controle": A1a tem tolerancia zero e
+        -- A1b e avaliado contra o FDR pre-registrado. Somar o consumo dos
+        -- dois num bolso so faria a comparacao por credito de §14.3 misturar
+        -- duas perguntas com tolerancias diferentes.
+        --
+        -- O `CHECK (braco IN (...))` e de tabela, e o SQLite nao altera
+        -- CHECK: as duas tabelas sao reconstruidas. Elas sao apenas por
+        -- acrescimo, entao copiar e seguro, e os gatilhos que morrem com o
+        -- DROP sao recriados aqui identicos - identicos de fato, porque o
+        -- estado final de um banco novo e o desta migracao, e nao o da 12.
+        -- ==================================================================
+
+        -- A view referencia as duas tabelas: sai primeiro para que o
+        -- ALTER TABLE ... RENAME nao tropece num objeto quebrado.
+        DROP VIEW test_credit_balance;
+
+        CREATE TABLE test_credit_budget_novo (
+            braco             TEXT    NOT NULL
+                                      CHECK (braco IN ('agente', 'b4',
+                                                       'a1a', 'a1b')),
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+            creditos          INTEGER NOT NULL CHECK (creditos > 0),
+            created_at        TEXT    NOT NULL,
+            PRIMARY KEY (braco, config_version_id)
+        );
+
+        INSERT INTO test_credit_budget_novo
+            (braco, config_version_id, creditos, created_at)
+        SELECT braco, config_version_id, creditos, created_at
+          FROM test_credit_budget;
+
+        CREATE TABLE test_credit_entry_novo (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            braco             TEXT    NOT NULL
+                                      CHECK (braco IN ('agente', 'b4',
+                                                       'a1a', 'a1b')),
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+            hypothesis_id     INTEGER NOT NULL REFERENCES hypothesis(id),
+            tipo TEXT NOT NULL
+                 CHECK (tipo IN ('in_sample', 'reteste_parametro',
+                                 'out_of_sample', 'quarentena')),
+            creditos    INTEGER NOT NULL CHECK (creditos > 0),
+            occurred_at TEXT    NOT NULL,
+            impacto_fdr_bps   INTEGER NOT NULL CHECK (impacto_fdr_bps >= 0),
+            cpu_micros        INTEGER NOT NULL CHECK (cpu_micros >= 0),
+            barras_reservadas INTEGER NOT NULL CHECK (barras_reservadas >= 0)
+        );
+
+        INSERT INTO test_credit_entry_novo
+            (id, braco, config_version_id, hypothesis_id, tipo, creditos,
+             occurred_at, impacto_fdr_bps, cpu_micros, barras_reservadas)
+        SELECT id, braco, config_version_id, hypothesis_id, tipo, creditos,
+               occurred_at, impacto_fdr_bps, cpu_micros, barras_reservadas
+          FROM test_credit_entry;
+
+        DROP TABLE test_credit_entry;
+        DROP TABLE test_credit_budget;
+
+        ALTER TABLE test_credit_budget_novo RENAME TO test_credit_budget;
+        ALTER TABLE test_credit_entry_novo  RENAME TO test_credit_entry;
+
+        CREATE INDEX idx_credit_braco
+            ON test_credit_entry(braco, config_version_id);
+        CREATE INDEX idx_credit_hyp ON test_credit_entry(hypothesis_id);
+
+        CREATE TRIGGER test_credit_budget_sem_update
+        BEFORE UPDATE ON test_credit_budget
+        BEGIN
+            SELECT RAISE(ABORT,
+                'aumentar o orcamento no meio do lote e comprar tentativas depois de ver resultado');
+        END;
+
+        CREATE TRIGGER test_credit_budget_sem_delete
+        BEFORE DELETE ON test_credit_budget
+        BEGIN
+            SELECT RAISE(ABORT, 'test_credit_budget e apenas por acrescimo');
+        END;
+
+        CREATE TRIGGER test_credit_entry_sem_update
+        BEFORE UPDATE ON test_credit_entry
+        BEGIN
+            SELECT RAISE(ABORT,
+                'consumo de credito e imutavel: e ele que prova quantas tentativas foram compradas');
+        END;
+
+        CREATE TRIGGER test_credit_entry_sem_delete
+        BEFORE DELETE ON test_credit_entry
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar consumo de credito e devolver tentativa ja gasta, que e a forma exata de burlar a escassez da secao 8.6.1');
+        END;
+
+        CREATE TRIGGER credito_usa_o_peso_do_documento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NEW.creditos <> (
+            CASE NEW.tipo
+                WHEN 'in_sample'         THEN 1
+                WHEN 'reteste_parametro' THEN 3
+                WHEN 'out_of_sample'     THEN 5
+                WHEN 'quarentena'        THEN 10
+            END
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'peso errado: a secao 8.6.1 fixa 1 in-sample, 3 reteste com parametro, 5 out-of-sample, 10 quarentena');
+        END;
+
+        CREATE TRIGGER credito_exige_orcamento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NOT EXISTS (
+            SELECT 1 FROM test_credit_budget
+             WHERE braco = NEW.braco
+               AND config_version_id = NEW.config_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'nao ha orcamento de creditos para este braco nesta config: testar sem orcamento e testar de graca');
+        END;
+
+        CREATE TRIGGER credito_nao_estoura_orcamento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NEW.creditos > (
+            SELECT b.creditos - COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = NEW.braco
+                   AND e.config_version_id = NEW.config_version_id
+            ), 0)
+              FROM test_credit_budget b
+             WHERE b.braco = NEW.braco
+               AND b.config_version_id = NEW.config_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'creditos insuficientes: o orcamento do braco acabou, e a secao 8.6.1 existe para que acabar signifique parar');
+        END;
+
+        CREATE VIEW test_credit_balance AS
+        SELECT
+            b.braco,
+            b.config_version_id,
+            b.creditos AS orcamento,
+            COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = b.braco
+                   AND e.config_version_id = b.config_version_id
+            ), 0) AS consumido,
+            b.creditos - COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = b.braco
+                   AND e.config_version_id = b.config_version_id
+            ), 0) AS restante
+        FROM test_credit_budget b;
+
+        -- ==================================================================
+        -- O EMBARGO deixa de ser conferido e passa a ser impossivel.
+        --
+        -- `conferir_sem_vazamento` ja acusava janela com intervalo menor que
+        -- purga + embargo - mas ACUSAVA, na leitura, e a linha ficava gravada.
+        -- Uma das seis familias de defeito de §14.4 e "violacao conhecida do
+        -- embargo", e um controle que injeta a janela e depois e pego por uma
+        -- conferencia que alguem precisa lembrar de rodar nao mede a mesma
+        -- coisa que um que e recusado na insercao.
+        --
+        -- E havia uma porta aberta que so o controle revelou: o CHECK da
+        -- tabela e `purga_barras >= 0`, entao uma janela declarando purga ZERO
+        -- passava pela conferencia - `removidas (0) < barras_removidas (0)` e
+        -- falso. A purga e DERIVADA do maior lookback do catalogo (D28, 400
+        -- barras); zero nao e um valor que o gerador produza, e aceita-lo
+        -- fazia a conferencia parecer satisfeita por nao ter o que comparar.
+        -- ==================================================================
+        CREATE TRIGGER purga_zero_nao_e_purga
+        BEFORE INSERT ON walk_forward_window
+        WHEN NEW.purga_barras <= 0
+        BEGIN
+            SELECT RAISE(ABORT,
+                'purga zero nao separa treino de teste: ela e derivada do maior lookback do catalogo (D28), e nao um numero livre');
+        END;
+
+        -- O intervalo REALMENTE removido, contado em barras do dataset, tem
+        -- de cobrir o que a janela declara. Sem isto a janela podia declarar
+        -- 400 e deixar zero, e a declaracao viraria enfeite.
+        CREATE TRIGGER janela_respeita_a_purga_declarada
+        BEFORE INSERT ON walk_forward_window
+        WHEN (
+            SELECT COUNT(*) FROM bar
+             WHERE dataset_id = NEW.dataset_id
+               AND open_time_ms >= NEW.treino_ate_ms
+               AND open_time_ms <  NEW.teste_de_ms
+        ) < NEW.purga_barras + NEW.embargo_barras
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a janela declara purga e embargo maiores que o intervalo que ela de fato remove entre treino e teste');
+        END;
+        """,
+    ),
+    (
+        16,
+        "incremento 13: as execucoes repetidas de A1b, apenas por acrescimo",
+        """
+        -- ==================================================================
+        -- A1b sao 400 execucoes (D29: 200 por desenho), e elas sao REGISTRO,
+        -- e nao calculo transitorio.
+        --
+        -- Duas razoes, e a segunda e a que obrigou a tabela:
+        --
+        --   1. §8.6 diz que descartar tentativas fracassadas "e o mecanismo
+        --      exato que produz falsas descobertas". Uma calibragem que
+        --      existisse so enquanto a requisicao durasse permitiria rodar de
+        --      novo ate o numero agradar, sem que nada acusasse.
+        --
+        --   2. A ~0,85 s por execucao, as 400 levam quase seis minutos. Uma
+        --      requisicao HTTP de seis minutos nao e desenho, e aposta no
+        --      timeout - e a regra 1 proibe worker na Fase 0. Com o registro,
+        --      as execucoes rodam em pedacos e o conjunto continua sendo um
+        --      experimento so.
+        --
+        -- Cada execucao e reproduzivel por (semente, desenho, indice): rodar
+        -- a de indice 7 de novo produz a mesma linha. O UNIQUE impede que ela
+        -- seja gravada duas vezes e conte em dobro na proporcao.
+        -- ==================================================================
+        CREATE TABLE a1b_execucao (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+
+            desenho TEXT NOT NULL
+                    CHECK (desenho IN ('nula_global',
+                                       'nulas_com_sinal_sintetico')),
+            indice  INTEGER NOT NULL CHECK (indice >= 0),
+
+            -- As condicoes sob as quais esta execucao rodou. Gravadas na
+            -- linha, e nao lidas da config na hora de agregar: a config pode
+            -- mudar, e uma proporcao que misturasse execucoes de lotes de
+            -- tamanhos diferentes nao descreveria calibre nenhum.
+            semente     INTEGER NOT NULL,
+            lote        INTEGER NOT NULL CHECK (lote >= 2),
+            n_barras    INTEGER NOT NULL CHECK (n_barras > 0),
+            tentativas_globais INTEGER NOT NULL CHECK (tentativas_globais >= 1),
+
+            r_lote      INTEGER NOT NULL CHECK (r_lote >= 0),
+            v_lote      INTEGER NOT NULL CHECK (v_lote >= 0),
+            r_com_portao INTEGER NOT NULL CHECK (r_com_portao >= 0),
+            v_com_portao INTEGER NOT NULL CHECK (v_com_portao >= 0),
+
+            sinais_piso            INTEGER NOT NULL CHECK (sinais_piso >= 0),
+            promovidos_piso        INTEGER NOT NULL CHECK (promovidos_piso >= 0),
+            sinais_detectavel      INTEGER NOT NULL CHECK (sinais_detectavel >= 0),
+            promovidos_detectavel  INTEGER NOT NULL CHECK (promovidos_detectavel >= 0),
+
+            created_at TEXT NOT NULL,
+
+            -- V <= R por definicao: falsas descobertas sao um subconjunto das
+            -- descobertas. Uma linha que violasse isso daria FDR acima de 1.
+            CHECK (v_lote <= r_lote),
+            CHECK (v_com_portao <= r_com_portao),
+            -- O portao de amostra so pode TIRAR promocoes, nunca acrescentar.
+            CHECK (r_com_portao <= r_lote),
+            CHECK (promovidos_piso <= sinais_piso),
+            CHECK (promovidos_detectavel <= sinais_detectavel),
+
+            UNIQUE (config_version_id, desenho, indice)
+        );
+
+        CREATE INDEX idx_a1b_config
+            ON a1b_execucao(config_version_id, desenho);
+
+        CREATE TRIGGER a1b_execucao_sem_update
+        BEFORE UPDATE ON a1b_execucao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'execucao de calibre e imutavel: reescreve-la seria rodar de novo ate o numero agradar');
+        END;
+
+        CREATE TRIGGER a1b_execucao_sem_delete
+        BEFORE DELETE ON a1b_execucao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar execucao de calibre e descartar tentativa fracassada, que a secao 8.6 chama de mecanismo exato que produz falsas descobertas');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

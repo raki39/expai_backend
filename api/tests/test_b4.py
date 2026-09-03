@@ -647,6 +647,8 @@ def test_o_mapa_de_origem_para_braco_cobre_as_origens_que_existem() -> None:
     origens = {
         hipotese_registro.AGENTE_ORIGEM,
         hipotese_registro.AGENTE_ORIGEM_B4,
+        hipotese_registro.AGENTE_ORIGEM_A1A,
+        hipotese_registro.AGENTE_ORIGEM_A1B,
     }
     assert set(creditos_mod.ORIGEM_PARA_BRACO) == origens
     assert set(creditos_mod.ORIGEM_PARA_BRACO.values()) == set(creditos_mod.BRACOS)

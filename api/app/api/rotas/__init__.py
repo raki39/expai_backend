@@ -18,6 +18,8 @@ from fastapi import APIRouter, Depends
 
 from ...security import exigir_token_de_servico
 from . import (
+    a1a,
+    a1b,
     agente,
     b4,
     baselines,
@@ -38,7 +40,9 @@ from . import (
 #
 # `b4` fica DEPOIS de `agente` de proposito: ele e o grupo de controle do
 # agente, e a ordem da tela e a ordem em que as coisas fazem sentido de ler,
-# nao a alfabetica.
+# nao a alfabetica. `a1a` vem depois de `b4` e antes de `validador` pelo mesmo
+# criterio: e o controle do PROTOCOLO, e o que ele produz e insumo do portao
+# que o validador reporta.
 MODULOS = (
     substrato,
     config,
@@ -48,6 +52,8 @@ MODULOS = (
     baselines,
     agente,
     b4,
+    a1a,
+    a1b,
     validador,
     relatorio,
     diagnostico,

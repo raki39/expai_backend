@@ -57,29 +57,27 @@ from ..regra.schema import (
 
 #: A metrica primaria de TODA hipotese de B4. Fixa.
 #:
-#: **Nao e `excesso_sobre_b1_p50_cents`, e a razao e um defeito herdado.** O
-#: excesso sobre a mediana do acaso com o mesmo giro seria a melhor metrica -
-#: e a unica que isola escolha de momento, e e a que §14.4 gateia no criterio
-#: "acima do p95 de B1". Mas o VALIDADOR nao consegue ve-la:
-#: `promocao._b1_do_run` procura `baseline_result` no run da hipotese, e o B1
-#: casado roda no **proprio run** (`baseline-B1-agente`), como toda historia
-#: economica independente desde o incremento 3. Nao existe ligacao entre os
-#: dois runs, e o validador devolve a metrica como indisponivel.
+#: **Nao e `excesso_sobre_b1_p50_cents`, e a razao MUDOU no incremento 13.**
 #:
-#: Medido, nao suposto: `_b1_do_run` devolve `None` enquanto as 1.000 linhas
-#: do B1 estao noutro run. Declarar essa metrica aqui faria as 16 hipoteses de
-#: B4 sairem inconclusivas por motivo errado - "nao ha contra o que medir" em
-#: vez de "a amostra nao alcanca o minimo".
+#: Ate o incremento 12 a razao era um defeito: o validador nao enxergava o B1
+#: casado, porque nada ligava o run do controle ao run que ele casa. O
+#: incremento 13 ligou (`run.casa_run_id`, migracao 14) e o defeito acabou.
 #:
-#: Consertar exige ligar o run do B1 ao run que ele casa, e isso e trabalho do
-#: incremento 13, onde o criterio de §14.4 vira PORTAO e cada braco precisa do
-#: seu proprio B1 casado. Ha teste fixando a limitacao para que o 13 tenha de
-#: encara-la.
+#: A metrica de B4 continua sendo o excesso sobre B3, agora por dois motivos
+#: que nao sao defeito:
+#:
+#:   1. **B4 nao produz B1 casado.** Casar o acaso com o giro de cada uma das
+#:      16 hipoteses custaria 16 distribuicoes de 1.000 repeticoes, e nenhum
+#:      criterio de §14.4 pede isso do controle: o criterio do B1 e sobre o
+#:      resultado do agente, e a comparacao com B4 e "por credito consumido".
+#:   2. **Trocar a regua do controle agora seria escolher a regua depois de
+#:      ver o placar.** As 16 hipoteses de B4 ja rodaram em producao sob esta
+#:      metrica. A quinta pergunta do teste de escopo da 0B vale para nos.
 #:
 #: `excesso_sobre_b3_cents` cumpre a regra 14 - desempenho sempre como excesso
-#: sobre baseline -, o validador ja a avalia de ponta a ponta, e ela e a mesma
-#: que o agente declarou no run 30: os dois bracos ficam comparaveis na mesma
-#: regua, o que e melhor que comparaveis em reguas diferentes.
+#: sobre baseline -, o validador a avalia de ponta a ponta, e e a mesma que o
+#: agente declarou no run 30: os dois bracos ficam comparaveis na mesma regua,
+#: o que e melhor que comparaveis em reguas diferentes.
 METRICA = "excesso_sobre_b3_cents"
 
 #: `efeito_minimo` como fracao do capital semente, em bps. 500 bps = 5%.

@@ -43,6 +43,17 @@ AGENTE_ORIGEM = "transacao@0b"
 #: repeticao da outra subestimaria a multiplicidade.
 AGENTE_ORIGEM_B4 = "b4@0b"
 
+#: Os controles negativos de §14.4, cada um com origem propria.
+#:
+#: A1a sao os DETERMINISTICOS - "construidas para revelar defeito", tolerancia
+#: zero. A1b sao as NULAS ESTOCASTICAS do lote real, avaliadas contra o FDR
+#: pre-registrado. Duas origens e nao uma porque as tolerancias sao
+#: diferentes: uma promocao de A1a reprova a fase, e uma promocao ocasional de
+#: A1b e o comportamento esperado de um procedimento com FDR positivo. Somar
+#: as duas num rotulo so faria "controle promovido" perder o significado.
+AGENTE_ORIGEM_A1A = "a1a@0b"
+AGENTE_ORIGEM_A1B = "a1b@0b"
+
 
 def _agora() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

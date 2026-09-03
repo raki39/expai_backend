@@ -77,6 +77,31 @@ TERMINAIS: frozenset[str] = frozenset({"invalidado", "nao_testavel"})
 # chegar - retrofitar a máquina depois exigiria reprocessar o histórico.
 QUARENTENA = "em_quarentena"
 
+# O que NÃO conta como promoção. A tolerância zero de §14.4 é sobre o
+# complemento disto, e por isso ele mora num lugar só.
+#
+# Escrito como a **ausência**, e não como a lista dos estados promovidos, de
+# propósito. Uma lista positiva precisaria nomear cada estado adiante no
+# caminho de §8.1 — e um estado novo que ninguém lembrasse de acrescentar
+# sairia calado da contagem, o que faria um controle promovido passar
+# despercebido exatamente onde a tolerância é zero.
+#
+# Pela ausência, o erro cai na direção certa: um estado novo conta como
+# promoção até que alguém decida o contrário, e o portão reprova em vez de
+# aprovar por omissão.
+NAO_PROMOVIDOS: frozenset[str] = frozenset({ENTRADA}) | TERMINAIS
+
+
+def promovida(estado: str | None) -> bool:
+    """A hipótese saiu da entrada e não terminou em recusa? Então foi promovida.
+
+    Promover é MOVER a hipótese adiante no caminho principal de §8.1, e é a
+    transição que fica gravada. Ler o veredito em texto em vez do estado
+    deixaria de fora uma promoção que acontecesse por outro caminho — e é
+    exatamente essa promoção que a tolerância zero de §14.4 existe para pegar.
+    """
+    return bool(estado) and estado not in NAO_PROMOVIDOS
+
 
 class TransicaoRecusada(Exception):
     """O banco recusou. A mensagem dele é a explicação."""

@@ -107,3 +107,381 @@ def test_a_guarda_nao_e_vazia(conn: sqlite3.Connection) -> None:
     """
     colunas = {l["name"] for l in conn.execute("PRAGMA table_info(run)")}
     assert "casa_run_id" in colunas
+
+
+# ===========================================================================
+# A1a — os seis controles negativos determinísticos (§14.4, R45)
+# ===========================================================================
+
+
+@pytest.fixture
+def cenario(conn: sqlite3.Connection):
+    """Dataset dividido, com os baselines rodados.
+
+    A mesma ordem do painel — Dataset, Baselines, e só depois o braço —, e a
+    mesma exigência de B4: sem B3 sob esta `config_version` a métrica dos
+    controles estatísticos não tem contra o que ser medida.
+    """
+    from app.maos_rapidas import baselines
+    from tests.test_maos_rapidas import criar_dataset, precos_passeio
+
+    from app.b4 import braco as b4_braco
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    cfg = ExperimentConfig()
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        semente=cfg.default_seed,
+    )
+    # B4 antes, porque o controle de DUPLICAÇÃO precisa de uma hipótese real
+    # para duplicar. Duplicar a si mesmo mediria outra coisa — e é o caso que
+    # o próprio módulo recusa, dizendo por quê.
+    b4_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    return dataset_id, cfg
+
+
+@pytest.fixture
+def a1a(conn: sqlite3.Connection, cenario):
+    from app.a1a import braco
+
+    dataset_id, cfg = cenario
+    return braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+
+
+def test_as_seis_familias_sao_as_do_documento() -> None:
+    """Lista fechada e citada, e não uma escolha nossa.
+
+    Acrescentar uma sétima seria inventar critério; deixar uma de fora seria
+    não testar uma família de defeito que §14.4 manda testar.
+    """
+    from app.a1a import catalogo
+
+    assert catalogo.QUANTAS == 6
+    esperadas = {
+        "acesso explícito ao futuro",
+        "duplicação disfarçada de hipótese",
+        "operação que só lucra quando custos são ignorados",
+        "violação conhecida do embargo",
+        "preço impossível no nível de fidelidade declarado",
+        "adulteração proposital do ledger",
+    }
+    assert {f.familia_de_defeito for f in catalogo.FAMILIAS} == esperadas
+    # Chaves únicas: duas famílias com a mesma chave colapsariam no relatório
+    # sem que a contagem mudasse.
+    assert len(catalogo.POR_CHAVE) == 6
+
+
+def test_nenhum_controle_deterministico_e_promovido(a1a) -> None:
+    """§14.4: tolerância zero. **Este é o portão.**
+
+    E ele é sobre PROMOÇÃO — o estado da hipótese na máquina de §8.1 —, e não
+    sobre o veredito em texto: promover é mover a hipótese adiante, e é a
+    transição que fica gravada.
+    """
+    promovidos = [c.chave for c in a1a.controles if c.promovido]
+    assert promovidos == [], (
+        "controle determinístico promovido: existe um defeito no pipeline"
+        f" ({promovidos})"
+    )
+
+
+def test_os_seis_passam_pelo_mesmo_caminho_das_reais(
+    conn: sqlite3.Connection, a1a
+) -> None:
+    """Injetado *pelo mesmo caminho das reais* é a exigência inteira.
+
+    Um controle num lote separado não enfrentaria a multiplicidade do lote
+    real — e o defeito que só se manifesta sob ela é justamente o que a
+    tolerância zero existe para pegar.
+    """
+    from app.hipotese import registro as hipotese_registro
+    from app.validador import estados
+
+    assert len(a1a.controles) == 6
+    for c in a1a.controles:
+        # Run próprio, hipótese registrada e ADMITIDA na máquina de estados.
+        assert c.run_id > 0
+        assert c.hypothesis_id is not None
+        assert estados.atual(conn, c.hypothesis_id) is not None
+        linha = hipotese_registro.por_id(conn, c.hypothesis_id)
+        assert linha["agente_origem"] == hipotese_registro.AGENTE_ORIGEM_A1A
+        # E o enunciado declara a procedência em maiúsculas, como o de B4:
+        # duas afirmações indistinguíveis no registro — uma pensada e uma
+        # construída para revelar defeito — arruinariam a leitura do lote.
+        assert "CONTROLE NEGATIVO DETERMINISTICO" in linha["enunciado"]
+
+
+def test_as_injecoes_estruturais_sao_todas_barradas(a1a) -> None:
+    """`barrado: true` é prova POSITIVA de que a guarda existe e disparou.
+
+    Sem esta asserção, "nenhum promovido" poderia estar passando porque nada
+    chegou a acontecer — que é a forma de teste vazio deste projeto.
+    """
+    from app.a1a import catalogo
+
+    estruturais = [c for c in a1a.controles if c.tipo == catalogo.ESTRUTURAL]
+    assert len(estruturais) == 4
+    for c in estruturais:
+        assert c.tentativas, f"{c.chave} nao injetou nada"
+        for t in c.tentativas:
+            assert t["barrada"], f"{c.chave}: {t['o_que']} NAO foi barrada"
+            assert t["mecanismo"], f"{c.chave}: barrada sem dizer por quem"
+
+
+def test_o_controle_do_futuro_barra_as_duas_portas(a1a) -> None:
+    """Ler o que é do validador, e executar na barra em que se decidiu.
+
+    São dois vazamentos diferentes e as guardas são de camadas diferentes: uma
+    é fronteira de Python, a outra é CHECK do banco. Um controle que testasse
+    só uma delas deixaria a outra sem cobertura sob um nome que sugere as duas.
+    """
+    c = next(x for x in a1a.controles if x.chave == "acesso_ao_futuro")
+    mecanismos = " | ".join(t["mecanismo"] or "" for t in c.tentativas)
+    assert "FinalidadeProibida" in mecanismos
+    assert "IntegrityError" in mecanismos
+
+
+def test_o_controle_do_embargo_barra_purga_zero(a1a) -> None:
+    """A porta que só o controle revelou: `purga_barras >= 0` aceitava zero.
+
+    Com purga e embargo zerados, `conferir_sem_vazamento` comparava
+    `removidas (0) < 0` e não tinha o que acusar — a conferência parecia
+    satisfeita por não ter o que comparar.
+    """
+    c = next(x for x in a1a.controles if x.chave == "violacao_do_embargo")
+    zero = next(t for t in c.tentativas if "ZERO" in t["o_que"])
+    assert zero["barrada"]
+    assert "purga zero" in (zero["mecanismo"] or "")
+
+
+def test_o_controle_de_preco_barra_o_preenchimento_generoso(a1a) -> None:
+    """Fidelidade 1 não pode afirmar preenchimento melhor que o limite adverso.
+
+    É o defeito mais silencioso da lista: melhora o resultado sem que nenhuma
+    linha diga que houve otimismo.
+    """
+    c = next(x for x in a1a.controles if x.chave == "preco_impossivel")
+    assert len(c.tentativas) == 2
+    assert all(t["barrada"] for t in c.tentativas)
+
+
+def test_o_controle_do_ledger_barra_alterar_apagar_e_desequilibrar(a1a) -> None:
+    """Três portas, e a terceira é a que a regra 6 chama de partidas dobradas."""
+    c = next(x for x in a1a.controles if x.chave == "ledger_adulterado")
+    assert len(c.tentativas) == 3
+    assert all(t["barrada"] for t in c.tentativas)
+
+
+def test_o_controle_de_custos_mede_bruto_contra_liquido(a1a) -> None:
+    """O ledger é a autoridade sobre dinheiro, e ele é líquido por construção.
+
+    A diferença entre bruto e líquido sai da DECOMPOSIÇÃO do próprio ledger —
+    taxa, spread, slippage e penalidade são contas próprias desde o incremento
+    3 —, e não de uma segunda simulação que poderia divergir.
+    """
+    c = next(x for x in a1a.controles if x.chave == "lucro_so_sem_custos")
+    eco = c.observado["economia"]
+    assert eco["bruto_cents"] == eco["liquido_cents"] + eco["custo_de_execucao_cents"]
+    assert eco["custo_de_execucao_cents"] > 0, "giro alto sem custo nenhum"
+    # E a métrica sem custo foi recusada pelo enum fechado.
+    assert c.tentativas[0]["barrada"]
+
+
+def test_a_duplicata_disfarcada_ocupa_lugar_na_familia(
+    conn: sqlite3.Connection, a1a
+) -> None:
+    """O que protege não é o hash: é a multiplicidade.
+
+    O disfarce DERROTA o `content_hash`, porque `enunciado` entra nele — então
+    a duplicata é cobrada como hipótese nova, 1 crédito em vez dos 3 de
+    §8.6.1. A consequência é de PREÇO, e não de multiplicidade: a linha ocupa
+    lugar na família de 48 e entra no contador global do DSR do mesmo jeito, e
+    é a multiplicidade que BY corrige.
+
+    Registrado com o número ao lado porque mudar o hash agora mudaria o custo
+    das 16 hipóteses de B4 que já rodaram em produção — o denominador da
+    comparação de §14.3 — depois de ver o resultado delas.
+    """
+    from app.validador import contador
+
+    c = next(x for x in a1a.controles if x.chave == "duplicacao_disfarcada")
+    dup = c.observado["duplicata"]
+    assert dup["content_hash_original"] != dup["content_hash_da_duplicata"]
+    assert dup["reconhecida_como_reteste"] is False
+    # A linha existe no contador global, que §8.6 diz que nunca é zerado.
+    assert contador.total(conn) >= 6
+
+
+# ===========================================================================
+# A1b — as nulas estocásticas em execuções repetidas (§14.4, R46, D29)
+# ===========================================================================
+
+
+def _base_sintetica(n: int = 3_000) -> list[int]:
+    """Retornos com cauda gorda, na escala de uma barra de 15 min.
+
+    Mistura de normais: 80% do tempo desvio 30 bps, 20% desvio 90. Não é
+    modelo de nada — é uma série com curtose acima de 3, que é o que faz o
+    DSR ter o que descontar.
+    """
+    import random as _r
+
+    rng = _r.Random(7)
+    return [
+        round(rng.gauss(0, 30) + (rng.gauss(0, 90) if rng.random() < 0.2 else 0))
+        for _ in range(n)
+    ]
+
+
+def test_as_duas_magnitudes_de_sinal_sao_derivadas_e_diferentes() -> None:
+    """O achado que só aparece com as duas ao lado.
+
+    O planejamento de amostra de §8.3 é calibrado em `t = 2`; o limiar de BY na
+    primeira posição, com m = 48, exige `t = 3,31`. São réguas diferentes na
+    mesma decisão — e uma hipótese que alcance exatamente o `n_minimo` que ela
+    declarou tem p-valor ~0,023, quase cinquenta vezes o limiar de 467 ppm.
+
+    Implantar só o piso mediria poder zero e pareceria surdez; implantar só o
+    detectável esconderia que o piso não passa.
+    """
+    from app.a1b import calibre
+
+    cfg = ExperimentConfig()
+    m = calibre.magnitudes(
+        config=cfg, duracao_barra_ms=900_000, n_barras=21_024
+    )
+    assert m.piso_milesimos == 2_583
+    assert m.detectavel_milesimos == 4_275
+    assert m.limiar_by_ppm == 467
+    assert m.detectavel_milesimos > m.piso_milesimos
+
+    # E no horizonte que uma hipótese REAL observa — o run 30 esteve com
+    # posição aberta em 11.163 barras — o Sharpe detectável passa do teto que
+    # o schema aceita declarar (5,00). Ou seja: naquela amostra, nenhuma
+    # hipótese declarável seria promovível por BY.
+    curto = calibre.magnitudes(
+        config=cfg, duracao_barra_ms=900_000, n_barras=11_163
+    )
+    from app.hipotese.schema import SHARPE_MAX_MILESIMOS
+
+    assert curto.detectavel_milesimos > SHARPE_MAX_MILESIMOS
+
+
+def test_uma_execucao_e_reproduzivel_pelo_indice() -> None:
+    """Mesma semente, mesmo desenho, mesmo índice: mesma linha.
+
+    É o que permite gravar as 400 em pedaços sem que o conjunto deixe de ser
+    um experimento só (R12).
+    """
+    from app.a1b import calibre
+
+    cfg = ExperimentConfig()
+    base = _base_sintetica()
+    mags = calibre.magnitudes(
+        config=cfg, duracao_barra_ms=900_000, n_barras=1_500
+    )
+    comum = dict(
+        desenho=calibre.COM_SINAL, base_bps=base, config=cfg,
+        duracao_barra_ms=900_000, n_barras=1_500, tentativas_globais=48,
+        semente=42, mags=mags,
+    )
+    a = calibre.uma(indice=3, **comum)
+    b = calibre.uma(indice=3, **comum)
+    c = calibre.uma(indice=4, **comum)
+    assert a.como_dict() == b.como_dict()
+    # E índices diferentes são execuções diferentes: se não fossem, as 200
+    # seriam uma repetida 200 vezes e o intervalo descreveria nada.
+    assert (a.r_lote, a.v_lote) != (c.r_lote, c.v_lote) or a.indice != c.indice
+
+
+def test_o_desenho_2_conta_v_como_subconjunto_de_r() -> None:
+    """`V / max(R,1)` só faz sentido com V ⊆ R, e o banco impõe isso.
+
+    Uma linha com V > R daria FDR acima de 1, o que não é um número alto: é um
+    número impossível, e impossível é o que precisa ser recusado na escrita.
+    """
+    from app.a1b import calibre
+
+    cfg = ExperimentConfig()
+    base = _base_sintetica()
+    mags = calibre.magnitudes(
+        config=cfg, duracao_barra_ms=900_000, n_barras=1_500
+    )
+    for i in range(4):
+        e = calibre.uma(
+            indice=i, desenho=calibre.COM_SINAL, base_bps=base, config=cfg,
+            duracao_barra_ms=900_000, n_barras=1_500, tentativas_globais=48,
+            semente=42, mags=mags,
+        )
+        assert e.v_lote <= e.r_lote
+        assert e.r_com_portao <= e.r_lote
+        assert e.promovidos_piso <= e.sinais_piso
+        assert e.promovidos_detectavel <= e.sinais_detectavel
+
+
+def test_agregar_sem_execucao_nao_inventa_proporcao() -> None:
+    """Zero execuções não é proporção zero.
+
+    Um intervalo sobre nada afirmaria que se mediu — e este relatório é
+    justamente o que decide se a fase passa.
+    """
+    from app.a1b import calibre
+
+    saida = calibre.agregar(
+        [], desenho=calibre.NULA_GLOBAL, config=ExperimentConfig()
+    )
+    assert saida["execucoes"] == 0
+    assert saida["completo"] is False
+    assert "por_que_sem_numero" in saida
+    assert "promocao_do_lote" not in saida
+
+
+def test_wilson_nao_degenera_em_zero() -> None:
+    """`0/200` não é certeza absoluta, e a normal diria que é.
+
+    O critério do desenho 1 é sobre onde o intervalo cai; um intervalo que
+    colapsa a um ponto responde qualquer pergunta com "sim".
+    """
+    from app.estatistica import intervalo
+
+    ic = intervalo.wilson(sucessos=0, n=200)
+    assert ic.ponto_ppm == 0
+    assert ic.baixo_ppm == 0
+    assert 0 < ic.alto_ppm < 30_000  # ~1,9%
+    # E o outro extremo, pelo mesmo motivo.
+    cheio = intervalo.wilson(sucessos=200, n=200)
+    assert cheio.alto_ppm == 1_000_000
+    assert cheio.baixo_ppm < 1_000_000
+
+
+def test_confianca_fora_de_95_e_recusada() -> None:
+    """Aproximar `z` aqui produziria um intervalo que PARECE ser o pedido.
+
+    A D29 fixou 95%; outra confiança é decisão nova, e não um parâmetro que já
+    esteja implementado.
+    """
+    from app.estatistica import intervalo
+
+    with pytest.raises(ValueError, match="95"):
+        intervalo.wilson(sucessos=1, n=10, confianca_bps=9_900)
+
+
+def test_o_calibre_usa_a_MESMA_decisao_do_lote_real() -> None:
+    """Uma cópia do procedimento mediria o calibre de outro procedimento.
+
+    A guarda é de importação: `a1b/calibre.py` chama `lote.decidir`, e não
+    `fdr.aplicar` direto. Se alguém reescrevesse a decisão aqui, o calibre
+    passaria a descrever um caminho que não promove nada em produção.
+    """
+    import pathlib
+
+    fonte = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "app" / "a1b" / "calibre.py"
+    ).read_text(encoding="utf-8")
+    assert "lote_mod.decidir(" in fonte
+    assert "fdr_mod.aplicar(" not in fonte

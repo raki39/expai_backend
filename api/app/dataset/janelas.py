@@ -76,6 +76,26 @@ class Janela:
         }
 
 
+def marcos(
+    conn: sqlite3.Connection, dataset_id: int, quantos: int
+) -> list[int]:
+    """Os `quantos` primeiros instantes de abertura do dataset.
+
+    Não devolve barra: devolve **onde** as barras começam. Existe porque o
+    controle A1a precisa montar uma janela de walk-forward inválida, e montar
+    uma exige conhecer a grade — mas escrever o `SELECT ... FROM bar` no
+    controle furaria a fronteira do incremento 9, que é justamente a fronteira
+    que o controle vizinho testa.
+
+    Mesmo desenho de `selado.barras_do_holdout`: quem quer metadado pergunta
+    ao módulo dono do dado, e a guarda não precisa distinguir intenção — ela
+    não deveria mesmo.
+    """
+    if quantos < 1:
+        raise ValueError("`quantos` precisa ser positivo")
+    return _grade(conn, dataset_id)[:quantos]
+
+
 def _grade(conn: sqlite3.Connection, dataset_id: int) -> list[int]:
     return [
         int(l["open_time_ms"])

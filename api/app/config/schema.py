@@ -219,6 +219,40 @@ class ExperimentConfig(BaseModel):
     # seria reprecificar o que a secao 8.6.1 fixa. O orcamento e nosso.
     creditos_por_braco: int = Field(default=60, ge=1)        # D30
 
+    # ------------------------------------- A1b: o calibre (secao 14.4, D29)
+    #
+    # MATERIAIS, e o criterio 6 do incremento 13 exige que estejam aqui:
+    # "o IC foi definido ANTES do teste e esta na config versionada, com data
+    # anterior a primeira execucao. Verificavel no historico da config, nao
+    # na nossa palavra."
+    #
+    # Um numero de execucoes ou um IC que morassem em constante de codigo
+    # teriam de ser acreditados; aqui eles tem autor, data e valor anterior
+    # (secao 10.2.3), e a primeira execucao de A1b e posterior a linha do
+    # historico que os fixou.
+    a1b_execucoes: int = Field(default=200, ge=1)            # D29
+    a1b_ic_bps: int = Field(default=9_500, ge=1, le=9_999)   # D29: IC 95%
+
+    # O tamanho do lote de cada execucao repetida. **48, o mesmo da familia
+    # real** - a multiplicidade que o calibre mede precisa ser a que a fase
+    # enfrenta. Um lote menor mediria BY sob uma correcao mais fraca do que a
+    # que promove de verdade.
+    a1b_lote: int = Field(default=48, ge=2)
+
+    # Quantas das `a1b_lote` carregam SINAL IMPLANTADO no desenho 2. O
+    # documento pede o desenho, e nao a proporcao; 12 de 48 (25%) foi fixada
+    # antes da primeira execucao porque ela decide o denominador: com poucos
+    # sinais, `R` e quase sempre zero e `V / max(R,1)` deixa de ser uma razao
+    # para virar um indicador de "houve alguma promocao".
+    #
+    # As 12 sao divididas em DUAS magnitudes, e as duas sao DERIVADAS - nao ha
+    # campo de magnitude aqui de proposito. Uma delas sai da conta de poder
+    # (§8.3) e a outra do limiar de BY; fixar qualquer das duas como numero na
+    # config a faria parar de descrever no dia em que o horizonte ou o teto da
+    # familia mudassem, que e o padrao que este projeto ja registrou treze
+    # vezes. Ver `a1b/calibre.magnitudes`.
+    a1b_sinais_implantados: int = Field(default=12, ge=2)
+
     # ------------------------------------------------------ nao materiais
     default_seed: int = 42
     note: str = ""
