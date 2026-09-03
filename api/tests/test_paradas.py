@@ -750,3 +750,62 @@ def test_o_contador_global_e_decomponivel_por_familia(
         " senao a decomposicao descreveria outro numero"
     )
     assert all("config_version_id" in l for l in quebra)
+
+
+#: Campos que o POST do ciclo sabia e o GET nao entregava. **Tres ocorrencias
+#: do mesmo defeito**, e por isso a lista existe nomeada em vez de confiada a
+#: memoria:
+#:
+#:   motivo/categoria da parada  -> ia para log.info e para o POST
+#:   regra_veio_do_cerebro       -> calculado no ciclo, jogado fora
+#:   parecer_do_validador        -> so no POST; e a 0B TRATA do validador
+#:   pre_registro                -> gravado desde o incremento 8, nunca exibido
+#:
+#: Nao e generalizacao: e a lista do que ja falhou. Um campo novo de
+#: `ResultadoDoCiclo` nao entra aqui sozinho, e essa e a limitacao desta
+#: guarda - ela cobre o que ja custou caro, nao o que vai custar.
+CAMPOS_QUE_JA_SUMIRAM = ("parada", "atribuicao", "pre_registro",
+                         "parecer_do_validador", "hypothesis_id")
+
+
+def test_o_get_entrega_o_que_o_post_sabe(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    """O ciclo devolve; o painel le o GET. Os dois tem de contar a mesma coisa.
+
+    Um campo que existe so na resposta do POST e um campo que ninguem olha: o
+    POST acontece uma vez, no clique, e todo o resto da vida daquele run e
+    lido pelo GET. Foi assim que um run sem decisao cognitiva pode aparecer no
+    painel com faixa contra o acaso.
+    """
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    corpo = client.get("/api/agente").json()
+
+    faltando = [c for c in CAMPOS_QUE_JA_SUMIRAM if c not in corpo]
+    assert not faltando, (
+        f"o GET perdeu campos que o POST sabe: {faltando}."
+        " Cada um desta lista ja sumiu uma vez e custou uma leitura errada"
+        " em producao"
+    )
+
+    # E nao basta a chave existir: com hipotese registrada, os dois campos do
+    # protocolo tem de estar POPULADOS. Uma chave com `None` passaria pela
+    # asercao acima e nao diria nada ao leitor.
+    assert resultado.hypothesis_id is not None, "o cenario tem de ter hipotese"
+    assert corpo["hypothesis_id"] == resultado.hypothesis_id
+    assert corpo["pre_registro"]["id"] == resultado.hypothesis_id
+    assert corpo["pre_registro"]["enunciado"]
+    assert corpo["pre_registro"]["condicoes_falseamento"], (
+        "o pre-registro sem clausula nao refuta nada, e o banco recusa isso -"
+        " se chegou vazio aqui, o campo nao esta vindo do banco"
+    )
+    assert "veredito" in (corpo["parecer_do_validador"] or {})
+
+    # O parecer do GET e o do ciclo: recalculado, e nao uma segunda opiniao.
+    if resultado.parecer_do_validador:
+        assert (
+            corpo["parecer_do_validador"]["veredito"]
+            == resultado.parecer_do_validador["veredito"]
+        )

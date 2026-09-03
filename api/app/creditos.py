@@ -318,3 +318,33 @@ def calibracao(conn: sqlite3.Connection) -> dict:
             " depois do resultado"
         ),
     }
+
+
+def testes_da_hipotese(conn: sqlite3.Connection, hypothesis_id: int) -> list[dict]:
+    """Quando esta hipotese foi testada, e a que custo. **O registro do fato.**
+
+    Existe porque um parecer `inconclusiva` nao move a hipotese - §14.4: nem
+    promove nem descarta - e portanto nao deixa transicao. O estado dela fica
+    em `hipotese_registrada`, que e exatamente o mesmo estado de uma hipotese
+    **nunca testada**.
+
+    Em producao isso apareceu como a hipotese 1: avaliada no in-sample,
+    veredito `inconclusiva`, credito cobrado - e nenhuma rota conseguia
+    distingui-la de uma que ninguem tinha olhado. §8.6 e explicito: "Toda
+    hipotese testada e registrada, inclusive as que falharam", e a R51 existe
+    para separar **rejeitado** de **inconclusivo**. Sem esta consulta, o
+    terceiro caso - "nunca testado" - se confundia com o segundo.
+
+    O lancamento de credito ja era o registro; o que faltava era conseguir
+    le-lo por hipotese.
+    """
+    return [
+        dict(l)
+        for l in conn.execute(
+            "SELECT tipo, creditos, occurred_at, braco, config_version_id,"
+            "       cpu_micros, barras_reservadas"
+            "  FROM test_credit_entry WHERE hypothesis_id = ?"
+            " ORDER BY id",
+            (hypothesis_id,),
+        )
+    ]

@@ -347,6 +347,53 @@ def _barras_do_holdout(conn: sqlite3.Connection, run_id: int) -> int:
     return selado.barras_do_holdout(conn, int(linha["ds"]))
 
 
+def parecer_derivado(
+    conn: sqlite3.Connection, hypothesis_id: int
+) -> dict | None:
+    """O veredito desta hipotese, RECALCULADO do que ficou gravado.
+
+    Derivado, e nao lido de coluna, pelo mesmo motivo do saldo e do estado
+    corrente: o veredito e funcao do pre-registro (imutavel), das execucoes
+    (append-only) e do controle do run. Nenhum dos tres muda, entao recalcular
+    da a mesma resposta para sempre - e guardar uma copia criaria a segunda
+    fonte de verdade que a regra 16 proibe.
+
+    **Por que precisou existir.** Um parecer `inconclusiva` nao escreve
+    transicao (§14.4: nem promove nem descarta), entao ele nao aparecia em
+    rota nenhuma: `/api/validador/hipotese/{id}` mostrava estado e historico, e
+    os dois ficam iguais aos de uma hipotese nunca avaliada. O parecer existia
+    no corpo do POST do ciclo e em `log.info`, e morria ali - a terceira vez
+    que este projeto guarda uma resposta so onde ninguem consegue le-la.
+
+    `None` quando nao ha o que julgar (a hipotese nao existe, ou o run dela nao
+    executou nada). E resposta, e nao falha: com a D35, um run sem decisao
+    cognitiva nao executa - e sem execucao nao ha amostra sobre que opinar.
+    """
+    linha = conn.execute(
+        "SELECT run_id FROM hypothesis WHERE id = ?", (hypothesis_id,)
+    ).fetchone()
+    if linha is None:
+        return None
+    try:
+        v, detalhe = _julgar(conn, hypothesis_id, int(linha["run_id"]))
+    except NaoAvaliavel as erro:
+        return {
+            "veredito": None,
+            "motivo": str(erro),
+            "recalculado": True,
+        }
+    return {
+        "veredito": v.veredito,
+        "motivo": v.motivo,
+        "detalhe": detalhe,
+        "recalculado": True,
+        "nota": (
+            "recalculado do banco a cada leitura, e nao gravado: o veredito e"
+            " funcao do pre-registro imutavel e de tabelas append-only"
+        ),
+    }
+
+
 def _exigir_estado(
     conn: sqlite3.Connection, hypothesis_id: int, esperado: str, *, etapa: str
 ) -> estados.Estado:

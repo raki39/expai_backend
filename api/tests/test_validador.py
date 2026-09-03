@@ -643,3 +643,51 @@ def test_populacao_agrega_por_estado(conn: sqlite3.Connection, run) -> None:
     """A visão que o painel de população vai consumir."""
     p = estados.populacao(conn)
     assert sum(p.values()) == contador.total(conn)
+
+
+def test_inconclusiva_e_distinguivel_de_nunca_avaliada(
+    client, conn: sqlite3.Connection, run_testavel
+) -> None:
+    """As duas ficam em `hipotese_registrada`, e nao podem ser o mesmo fato.
+
+    Um parecer `inconclusiva` nao move a hipotese - §14.4: nem promove nem
+    descarta. Logo nao escreve transicao, e `estado` + `historico` de uma
+    hipotese avaliada-e-inconclusiva sao **identicos** aos de uma que ninguem
+    olhou. Foi assim que a hipotese 1 apareceu em producao: credito cobrado,
+    veredito emitido, e nenhuma rota capaz de dizer isso.
+
+    A R51 existe para separar rejeitado de inconclusivo; o terceiro caso -
+    nunca testado - estava colado no segundo. Duas coisas resolvem, e as duas
+    sao conferidas aqui: o **parecer recalculado** (derivado, nunca gravado) e
+    o **lancamento de credito**, que e o fato datado de que houve teste.
+    """
+    from app import creditos as creditos_mod
+    from app.validador import promocao
+
+    hid = run_testavel.hypothesis_id
+    assert hid is not None
+
+    estado = estados.atual(conn, hid)
+    assert estado is not None
+
+    # O parecer existe e nomeia o veredito, qualquer que ele seja.
+    parecer = promocao.parecer_derivado(conn, hid)
+    assert parecer is not None
+    assert "veredito" in parecer and "motivo" in parecer
+    assert parecer["recalculado"] is True
+
+    # E o teste esta registrado como FATO datado, com o custo.
+    testes = creditos_mod.testes_da_hipotese(conn, hid)
+    assert testes, "houve avaliacao e nenhum lancamento de credito a registra"
+    assert testes[0]["tipo"] == "in_sample"
+    assert testes[0]["creditos"] == 1
+    assert testes[0]["occurred_at"]
+
+    # Pela rota, os dois chegam juntos.
+    corpo = client.get(f"/api/validador/hipotese/{hid}").json()
+    assert corpo["parecer"]["veredito"] == parecer["veredito"]
+    assert corpo["testes"] == testes
+
+    # E uma hipotese INEXISTENTE nao produz parecer nenhum - senao o campo
+    # diria algo sobre algo que nunca houve.
+    assert promocao.parecer_derivado(conn, 99_999) is None

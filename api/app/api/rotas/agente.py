@@ -20,10 +20,12 @@ from ...config.service import (
     TetoExcedido,
 )
 from ...dataset import loader as dataset_loader
+from ...hipotese import registro as hipotese_registro
 from ...ledger import livro
 from ...maos_rapidas import baselines
 from ...maos_rapidas import executor as maos_executor
 from ...simulador import execucao as simulador
+from ...validador import promocao as validador_promocao
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from typing import Any
 from ..modelos import PedidoAgente
@@ -71,6 +73,9 @@ def agente_estado(request: Request) -> dict[str, Any]:
         executou=ordens > 0,
     )
     do_agente = bool(atribuicao["atribuivel_ao_agente"])
+    hypothesis_id = conn.execute(
+        "SELECT MAX(id) AS id FROM hypothesis WHERE run_id = ?", (int(run_id),)
+    ).fetchone()["id"]
 
     return {
         "run_id": int(run_id),
@@ -124,6 +129,31 @@ def agente_estado(request: Request) -> dict[str, Any]:
         "propostas": propostas_de_regra.do_run(conn, int(run_id)),
         "regra_ativa": ativa,
         "gasto": livro.gasto_com_reflexao(conn, int(run_id)),
+        # O parecer INDEPENDENTE do validador (§8.1), ao lado da
+        # autoavaliacao do agente. Vinha so no corpo do POST do ciclo: o
+        # painel mostrava a avaliacao do agente sobre si mesmo e **nao** a do
+        # validador - que e justamente a separacao de que a 0B trata. Terceiro
+        # campo desta rota com o mesmo defeito, depois de `motivo` e
+        # `regra_veio_do_cerebro`.
+        # O PRE-REGISTRO de §8.2, estruturado. Ele existe no banco desde o
+        # incremento 8 e nao chegava a tela nenhuma: o painel mostrava a
+        # `expectation` em prosa, que era o campo da 0A. A metade que torna o
+        # veredito uma conta - `efeito_minimo`, `n_minimo`,
+        # `condicoes_falseamento` - ficava invisivel.
+        #
+        # Vem montado daqui, e nao parseado do `raw_response_json` na tela: o
+        # painel nao contem logica de negocio (regra 19).
+        "pre_registro": (
+            hipotese_registro.por_id(conn, int(hypothesis_id))
+            if hypothesis_id is not None
+            else None
+        ),
+        "parecer_do_validador": (
+            validador_promocao.parecer_derivado(conn, int(hypothesis_id))
+            if hypothesis_id is not None
+            else None
+        ),
+        "hypothesis_id": hypothesis_id,
         "sobreposicao_amostral": propostas_de_regra.sobreposicao_amostral(
             conn, int(run_id)
         ),

@@ -12,6 +12,7 @@ from ...dataset import selado as dataset_selado
 from ...hipotese import registro as hipotese_registro
 from ...validador import contador as validador_contador
 from ...validador import estados as validador_estados
+from ...validador import promocao as validador_promocao
 from ...validador import lote as validador_lote
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from typing import Any
@@ -65,6 +66,16 @@ def validador_hipotese(request: Request, hypothesis_id: int) -> dict[str, Any]:
         "estado": estado.como_dict() if estado else None,
         "historico": validador_estados.historico(conn, hypothesis_id),
         "holdout_consumido": dataset_selado.ja_consumiu(conn, hypothesis_id),
+        # O PARECER, recalculado. Sem ele esta rota nao distinguia uma
+        # hipotese `inconclusiva` de uma nunca avaliada: as duas ficam em
+        # `hipotese_registrada` com o mesmo historico, porque inconclusivo nao
+        # move a hipotese (§14.4). Foi assim que a hipotese 1 apareceu em
+        # producao.
+        "parecer": validador_promocao.parecer_derivado(conn, hypothesis_id),
+        # E o registro de QUE foi testada, e quando. O veredito e derivado; o
+        # lancamento de credito e o fato datado. §8.6: "Toda hipotese testada e
+        # registrada, inclusive as que falharam".
+        "testes": creditos_mod.testes_da_hipotese(conn, hypothesis_id),
     }
 
 
