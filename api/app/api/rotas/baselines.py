@@ -17,6 +17,7 @@ from ...config.service import (
 )
 from ...dataset import loader as dataset_loader
 from ...maos_rapidas import baselines
+from ...simulador import execucao as simulador
 from ...maos_rapidas import curva as curva_de_patrimonio
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from typing import Any
@@ -124,9 +125,22 @@ def curva(request: Request, pontos: int = curva_de_patrimonio.PONTOS_PADRAO) -> 
     )
     comparacao = baselines.resumo_comparacao(conn)
 
+    # O patrimonio final vem do LEDGER, e nao do ultimo ponto da curva.
+    #
+    # Os dois divergem, e nao por arredondamento: a curva soma
+    # `execution.delta_caixa` e marca a posicao a mercado; ela **nao desconta
+    # o custo da reflexao**, que e lancado no livro simulado (D21). Num run do
+    # agente com duas reflexoes a diferenca foi de 9 centavos - e o numero-heroi
+    # da tela saia sem o custo do proprio pensamento, ao lado de uma tabela
+    # cuja linha diz, com todas as letras, "com o custo do proprio pensamento
+    # dentro".
+    #
+    # A regra 16 nao deixa margem: o ledger e a autoridade sobre dinheiro. A
+    # curva continua sendo o desenho - e a ressalva de marcacao a mercado que o
+    # painel imprime continua valendo para o MEIO dela, que e onde ela e
+    # otimista.
     finais = {
-        nome: (c[-1]["patrimonio_cents"] if c else None)
-        for nome, c in curvas.items()
+        nome: simulador.caixa_cents(conn, rid) for nome, rid in runs.items()
     }
     # Regra 14: desempenho SEMPRE como excesso sobre baseline. O absoluto
     # responde "quanto sobrou", que nao e a pergunta do experimento.

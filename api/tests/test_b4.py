@@ -1044,3 +1044,59 @@ def test_ninguem_mais_escolhe_o_run_do_agente_por_conta_propria(
     from app.cerebro import ciclo
 
     assert callable(ciclo.ultimo_run_do_agente)
+
+
+def test_o_excesso_da_curva_inclui_o_custo_do_proprio_pensamento(
+    client, conn: sqlite3.Connection, cenario_b4, settings  # noqa: F811
+) -> None:
+    """O numero-heroi saia sem o custo da reflexao. Sao nove centavos, e importa.
+
+    `finais` vinha do ULTIMO PONTO DA CURVA, que soma `execution.delta_caixa`
+    e marca a posicao a mercado. A curva **nao desconta a reflexao**, que e
+    lancada no livro simulado (D21) - entao o excesso sobre o acaso aparecia
+    sem o custo do proprio pensamento, ao lado de uma tabela cuja linha diz,
+    com todas as letras, "com o custo do proprio pensamento dentro".
+
+    Nove centavos nao mudam a leitura deste run. Mudam o significado do numero:
+    o projeto inteiro existe para medir um agente que **paga pela propria
+    cognicao**, e o headline o media sem ela.
+
+    A regra 16 nao deixa margem: o ledger e a autoridade sobre dinheiro.
+    """
+    from app.cerebro import ciclo
+    from app.simulador import execucao as simulador
+    from tests.test_cerebro import (
+        INTERPRETACAO_OK,
+        PROPOSTA_OK,
+        AdaptadorFalso,
+    )
+
+    dataset_id, cfg = cenario_b4
+    r = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
+    )
+    gasto = r.gasto["gasto_cents"]
+    assert gasto > 0, "sem reflexao paga o teste nao exercita o que diz"
+
+    curva = client.get("/api/baselines/curva").json()
+    do_ledger = simulador.caixa_cents(conn, r.run_id)
+
+    assert curva["finais_cents"]["agente"] == do_ledger, (
+        "o final da curva tem de ser o do ledger, e nao o ultimo ponto"
+        " desenhado - a curva nao desconta a reflexao"
+    )
+
+    # E o excesso publicado bate com a subtracao feita sobre o ledger.
+    b1 = client.get("/api/agente").json()["b1_casado"]
+    if b1:
+        assert curva["excesso_cents"]["agente_sobre_B1_casado_p50"] == (
+            do_ledger - b1["p50"]
+        )
+
+    # A diferenca que existia era EXATAMENTE o custo do pensamento.
+    ultimo_ponto = curva["curvas"]["agente"][-1]["patrimonio_cents"]
+    assert ultimo_ponto - do_ledger == gasto, (
+        f"o ponto da curva ({ultimo_ponto}) menos o do ledger ({do_ledger})"
+        f" tinha de ser o gasto com reflexao ({gasto})"
+    )
