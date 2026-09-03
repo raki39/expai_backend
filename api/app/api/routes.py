@@ -26,6 +26,7 @@ from ..cerebro import avaliacao as cerebro_avaliacao
 from ..cerebro import cache as cerebro_cache
 from ..cerebro import ciclo as cerebro_ciclo
 from ..cerebro import propostas as propostas_de_regra
+from .. import fase as fase_mod
 from ..config import service as config_service
 from ..config.service import (
     ConfigCongelada,
@@ -118,16 +119,11 @@ def health(request: Request) -> dict[str, Any]:
             "anthropic": bool(settings.anthropic_api_key.get_secret_value()),
             "openai": bool(settings.openai_api_key.get_secret_value()),
         },
-        # A fase vem daqui e de nenhum outro lugar. Ficou em "0A" por um
-        # commit depois de a 0B abrir, que e a nona vez que um valor deste
-        # projeto para de descrever o que diz - e este seria dos piores, porque
-        # o aviso que o acompanha e sobre o que pode ser afirmado.
-        "fase": "0B",
-        "aviso": (
-            "Fase 0B. O Portao A e o produto da fase; conclusao estatistica "
-            "so pelo validador independente, e 'inconclusivo' nunca vira "
-            "'sucesso'. Nenhuma aprovacao autoriza capital real."
-        ),
+        # De `app.fase`. O comentario que estava aqui afirmava "a fase vem
+        # daqui e de nenhum outro lugar" - e era falso: havia mais dois
+        # lugares, e os tres discordavam. Afirmar unicidade nao a produz.
+        "fase": fase_mod.FASE,
+        "aviso": fase_mod.AVISO,
     }
 
 
@@ -1102,15 +1098,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
 
     corpo = {
         "gerado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "fase": "0A",
+        "fase": fase_mod.FASE,
         "schema_version": versao_schema(conn),
         "build": request.app.state.build_id,
         "partes": partes,
         "partes_que_falharam": falhas,
-        "aviso": (
-            "Estado do experimento na Fase 0A. Nenhuma conclusao estatistica,"
-            " nenhum conhecimento promovido. Numeros em amostra."
-        ),
+        "aviso": fase_mod.AVISO,
     }
 
     nome = f"fase0a-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"

@@ -641,3 +641,92 @@ def test_valor_sem_sentido_continua_sendo_recusado(monkeypatch, ambiente) -> Non
     finally:
         monkeypatch.delenv("HABILITAR_DOCS", raising=False)
         get_settings.cache_clear()
+
+
+def test_o_openapi_publica_o_esquema_de_seguranca(monkeypatch, ambiente) -> None:
+    """Sem isto, os docs sobem SEM o botao `Authorize`.
+
+    O FastAPI so desenha o botao quando a autenticacao e um **esquema de
+    seguranca** declarado no OpenAPI. A primeira versao usava
+    `Header(default=None)`: validava igual, e nao aparecia no schema - entao
+    dava para ler as rotas e nao dava para exercitar nenhuma, que e o oposto
+    do motivo pelo qual os docs foram ligados.
+
+    Trocar de volta para `Header` cru passaria em todos os testes de
+    autenticacao e quebraria os docs em silencio. Por isso este teste olha o
+    SCHEMA, e nao o comportamento.
+    """
+    from fastapi.testclient import TestClient as TC
+
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("HABILITAR_DOCS", "1")
+    get_settings.cache_clear()
+    try:
+        with TC(criar_app()) as c:
+            spec = c.get("/openapi.json").json()
+
+            esquemas = spec["components"]["securitySchemes"]
+            assert "API_SERVICE_TOKEN" in esquemas
+            assert esquemas["API_SERVICE_TOKEN"]["scheme"] == "bearer"
+            # A caixa do `Authorize` e o unico lugar em que da para dizer QUAL
+            # dos dois tokens vai ali.
+            assert "PANEL_TOKEN" in esquemas["API_SERVICE_TOKEN"]["description"]
+
+            # TODA rota exige, com UMA excecao declarada: `GET /` e o
+            # liveness probe, e a plataforma o chama sem credencial nenhuma.
+            # Ele nao devolve dado - so diz que o processo esta de pe.
+            #
+            # A excecao e lista explicita: acrescentar outra exige escrever
+            # aqui por que aquela rota pode ser aberta, e "um endpoint aberto
+            # e um endpoint aberto" continua valendo para todo o resto.
+            LIVENESS = {"GET /"}
+            sem_seguranca = {
+                f"{metodo.upper()} {caminho}"
+                for caminho, metodos in spec["paths"].items()
+                for metodo, op in metodos.items()
+                if not op.get("security")
+            }
+            assert sem_seguranca == LIVENESS, sem_seguranca
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_fase_vem_de_um_lugar_so(monkeypatch, ambiente) -> None:
+    """Quatro lugares declaravam a fase, e TRES discordavam entre si.
+
+    O `/api/health` foi corrigido no incremento 9 com um comentario dizendo
+    "a fase vem daqui e de nenhum outro lugar". Era falso quando foi escrito:
+    o liveness em `main.py` dizia "0A", o `/api/exportar` dizia "0A", e so o
+    health dizia "0B".
+
+    Um comentario afirmando unicidade nao produz unicidade. `app/fase.py`
+    produz - e este teste e o que impede a quinta copia.
+
+    O relatorio do incremento 7 e a excecao legitima e esta declarada: ele E o
+    fechamento da 0A e responde a pergunta DELA, entao o campo dele se chama
+    `fase_do_relatorio`, e nao `fase`.
+    """
+    import pathlib as _p
+
+    app_dir = _p.Path(__file__).resolve().parents[1] / "app"
+    infratores: list[str] = []
+    for arquivo in sorted(app_dir.rglob("*.py")):
+        if arquivo.name == "fase.py":
+            continue
+        for n, linha in enumerate(
+            arquivo.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            despida = linha.strip()
+            if despida.startswith("#"):
+                continue
+            if '"fase":' in despida and ("0A" in despida or "0B" in despida):
+                infratores.append(f"{arquivo.name}:{n}")
+    assert not infratores, (
+        "fase escrita a mao fora de `app/fase.py`: " + "; ".join(infratores)
+    )
+
+    from app import fase
+
+    assert fase.FASE == "0B"

@@ -25,6 +25,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from ..cerebro import avaliacao, ciclo, propostas
+from .. import fase as fase_mod
 from ..config import service as config_service
 from ..dataset import loader as dataset_loader
 from ..ledger import livro
@@ -290,7 +291,16 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
     return {
         "existe": True,
         "gerado_em": _agora(),
-        "fase": "0A",
+        # LEGITIMO, e o unico lugar em que uma fase e escrita a mao: este
+        # relatorio E o fechamento da 0A (incremento 7), e responde a pergunta
+        # DELA. Nao e a fase corrente - por isso o nome do campo diz de qual
+        # relatorio se trata, e nao "fase".
+        #
+        # A fase corrente vem de `app.fase`, e o campo ao lado deixa a
+        # diferenca visivel: um relatorio da 0A lido durante a 0B continua
+        # sendo da 0A.
+        "fase_do_relatorio": "0A",
+        "fase_corrente": fase_mod.FASE,
         "run": run,
         "config": {
             "version_id": versao.id if versao else None,

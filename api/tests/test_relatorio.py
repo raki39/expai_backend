@@ -708,6 +708,28 @@ def test_o_texto_diz_indisponivel_e_nunca_zero(conn: sqlite3.Connection) -> None
 # ===========================================================================
 
 
+def test_o_relatorio_distingue_a_fase_DELE_da_fase_corrente(
+    conn: sqlite3.Connection, run_do_agente
+) -> None:
+    """Um relatorio da 0A aberto durante a 0B continua sendo da 0A.
+
+    Este relatorio E o fechamento do incremento 7 e responde a pergunta da
+    0A. Chamar o campo dele de `fase` faria qualquer leitor supor que era a
+    fase corrente - e foi assim que quatro lugares deste projeto passaram a
+    declarar fases que discordavam entre si.
+
+    Dois campos, com nomes que dizem o que cada um e.
+    """
+    from app import fase
+
+    r = montar.montar(conn)
+    assert r["fase_do_relatorio"] == "0A"
+    assert r["fase_corrente"] == fase.FASE
+    assert r["fase_do_relatorio"] != r["fase_corrente"], (
+        "enquanto forem diferentes, a distincao esta sendo exercitada"
+    )
+
+
 def test_a_rota_e_o_arquivo_saem_da_mesma_funcao(
     client, conn: sqlite3.Connection, cenario, settings, tmp_path  # noqa: F811
 ) -> None:
@@ -900,7 +922,11 @@ def test_o_export_reune_as_telas_e_baixa_como_arquivo(
     assert ".json" in resposta.headers["content-disposition"]
 
     corpo = resposta.json()
-    assert corpo["fase"] == "0A"
+    # O EXPORT descreve o estado atual do experimento, entao a fase dele e a
+    # corrente - e vem da fonte, nao cravada.
+    from app import fase
+
+    assert corpo["fase"] == fase.FASE
     assert corpo["partes_que_falharam"] == {}, corpo["partes_que_falharam"]
     for parte in (
         "health", "config", "config_history", "dataset", "ledger",

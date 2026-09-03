@@ -61,7 +61,16 @@ def test_liveness_responde_sem_credencial(client: TestClient) -> None:
     """
     r = client.get("/", headers={"Authorization": ""})
     assert r.status_code == 200
-    assert r.json() == {"status": "alive", "service": "fase0a-api", "fase": "0A"}
+    # Da FONTE, e nao cravado: um teste que crava a fase envelhece junto com
+    # o codigo que ele deveria proteger - e foi assim que quatro lugares
+    # passaram a discordar entre si.
+    from app import fase
+
+    assert r.json() == {
+        "status": "alive",
+        "service": fase.SERVICO,
+        "fase": fase.FASE,
+    }
 
 
 def test_liveness_nao_vaza_nada(client: TestClient) -> None:

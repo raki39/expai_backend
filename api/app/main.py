@@ -25,6 +25,7 @@ from .api.routes import router
 from .config import service as config_service
 from .ledger import contas as ledger_contas
 from .logging_setup import configurar_logging
+from . import fase
 from .settings import SECRET_FIELDS, get_settings
 from .store import (
     conectar,
@@ -193,7 +194,9 @@ def criar_app() -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/")
     def liveness() -> dict[str, str]:
-        return {"status": "alive", "service": "fase0a-api", "fase": "0A"}
+        # A fase vem de `app.fase`, e o liveness nao e excecao: ele foi um
+        # dos tres lugares que discordavam entre si.
+        return {"status": "alive", "service": fase.SERVICO, "fase": fase.FASE}
 
     app.include_router(router)
 
