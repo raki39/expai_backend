@@ -101,6 +101,42 @@ envelhecido, listando 6 rotas quando existiam 26.
 Sem `/docs`, `/redoc` ou `/openapi.json`: a superfície é consumida pelo proxy
 do `web`, e um endpoint a menos é uma coisa a menos para proteger.
 
+## Dois tokens, e eles nao sao intercambiaveis
+
+O erro `credencial invalida` quase sempre e este:
+
+| Token | Quem usa | Onde vive |
+|---|---|---|
+| `PANEL_TOKEN` | voce -> painel | env da Vercel |
+| `API_SERVICE_TOKEN` | painel -> api | env da Vercel **e** da Railway |
+
+`credencial ausente` = nenhum Bearer chegou. `credencial invalida` = chegou um
+Bearer e ele nao bateu com `API_SERVICE_TOKEN`.
+
+**Duas portas para exercitar uma rota:**
+
+```bash
+# direto na api, com o token de servico
+curl -H "Authorization: Bearer $API_SERVICE_TOKEN" https://<api>/api/separacao
+
+# pelo painel, que repassa QUALQUER rota (GET e POST) autenticando por sessao
+#   https://<painel>/api/proxy/separacao
+```
+
+O proxy existe para o token de servico nunca chegar ao navegador (ADR 0011).
+
+### Docs interativos: interruptor, nao decisao permanente
+
+`/docs` e `/openapi.json` sao servidos **so** com `HABILITAR_DOCS=1`, e o
+padrao e desligado inclusive em producao.
+
+Ligar revela a **lista de rotas** a quem achar o dominio: o Swagger UI busca o
+`openapi.json` sem autenticacao, e nao ha como mudar isso. Nao vaza dado nem
+segredo - toda rota continua exigindo o token, e a regra 15 proibe embutir o
+token na pagina, entao o `Authorize` e preenchido a mao.
+
+Liga, investiga, desliga.
+
 ## Operação: do zero ao relatório
 
 A ordem importa. Cada passo depende do anterior, e pular um faz o seguinte

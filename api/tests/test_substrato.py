@@ -498,3 +498,87 @@ def test_o_painel_inteiro_em_paralelo_nao_derruba_rota_nenhuma(
                     ruins.append((rota, status))
 
     assert not ruins, ruins
+
+
+# ===========================================================================
+# Docs interativos: interruptor, e nao decisao permanente
+# ===========================================================================
+
+
+def test_docs_desligados_por_padrao(client: TestClient) -> None:
+    """Sem `HABILITAR_DOCS`, a superficie nao e revelada.
+
+    O Swagger UI busca `openapi.json` SEM autenticacao - e assim que ele
+    funciona -, entao deixa-lo ligado publicaria a lista de rotas de um
+    servico que exige token em todas elas. Nao vaza dado; revela superficie, e
+    revelar superficie por conveniencia e o tipo de decisao que se toma sem
+    perceber.
+    """
+    for rota in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(rota).status_code == 404, rota
+
+
+def test_docs_ligam_com_a_env_var(monkeypatch, ambiente) -> None:
+    """Liga, usa, desliga. E `/redoc` continua fora: um caminho basta."""
+    from fastapi.testclient import TestClient as TC
+
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("HABILITAR_DOCS", "1")
+    get_settings.cache_clear()
+    try:
+        with TC(criar_app()) as c:
+            assert c.get("/docs").status_code == 200
+            assert c.get("/openapi.json").status_code == 200
+            assert c.get("/redoc").status_code == 404
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_pagina_de_docs_nao_carrega_o_token(monkeypatch, ambiente) -> None:
+    """Regra 15: segredo nunca aparece em pagina. Nem para dar conveniencia.
+
+    Embutir o `API_SERVICE_TOKEN` no HTML do Swagger tornaria o `Authorize`
+    automatico - e poria a credencial de servico numa pagina, que e
+    exatamente o que a regra proibe sem excecao. Quem investiga cola o token
+    a mao.
+    """
+    from fastapi.testclient import TestClient as TC
+
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("HABILITAR_DOCS", "1")
+    monkeypatch.setenv("API_SERVICE_TOKEN", "segredo-que-nao-pode-vazar")
+    get_settings.cache_clear()
+    try:
+        with TC(criar_app()) as c:
+            for rota in ("/docs", "/openapi.json"):
+                assert "segredo-que-nao-pode-vazar" not in c.get(rota).text
+    finally:
+        get_settings.cache_clear()
+
+
+def test_as_rotas_continuam_exigindo_token_com_docs_ligados(
+    monkeypatch, ambiente
+) -> None:
+    """Ligar docs revela a lista de rotas, e SO isso.
+
+    Se ligar os docs afrouxasse a autenticacao, o interruptor deixaria de ser
+    sobre superficie e passaria a ser sobre acesso - coisa completamente
+    diferente da que foi decidida.
+    """
+    from fastapi.testclient import TestClient as TC
+
+    from app.main import criar_app
+    from app.settings import get_settings
+
+    monkeypatch.setenv("HABILITAR_DOCS", "1")
+    get_settings.cache_clear()
+    try:
+        with TC(criar_app()) as c:
+            assert c.get("/api/health").status_code == 401
+            assert c.get("/api/separacao").status_code == 401
+    finally:
+        get_settings.cache_clear()

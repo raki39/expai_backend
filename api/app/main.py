@@ -147,11 +147,18 @@ def criar_app() -> FastAPI:
         ),
         version="0.1.0",
         lifespan=lifespan,
-        # Sem docs interativos: a superficie e consumida pelo painel,
-        # e um endpoint a menos e uma coisa a menos para proteger.
-        docs_url=None,
+        # Docs interativos: DESLIGADOS por padrao, ligados por HABILITAR_DOCS=1.
+        #
+        # O Swagger UI busca `openapi.json` sem autenticacao, entao ligar
+        # revela a lista de rotas a quem achar o dominio. Nao revela dado nem
+        # segredo - toda rota exige o token, e a regra 15 proibe embutir o
+        # token na pagina, entao quem investiga cola o `API_SERVICE_TOKEN` no
+        # botao `Authorize` a mao.
+        #
+        # Interruptor em vez de decisao permanente: liga, usa, desliga.
+        docs_url="/docs" if settings.habilitar_docs else None,
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/openapi.json" if settings.habilitar_docs else None,
     )
 
     # CORS so entra em jogo se o NAVEGADOR chamar a api direto. Com o proxy

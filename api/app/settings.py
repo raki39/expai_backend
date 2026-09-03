@@ -61,6 +61,24 @@ class Settings(BaseSettings):
     # `/api/health`: nada de identificar conta de terceiro numa pagina.
     anthropic_workspace_id: str = ""
 
+    # ------------------------------------------------- docs interativos
+    #
+    # DESLIGADO por padrao, inclusive em producao. Ligado, o FastAPI serve
+    # `/docs` e `/openapi.json` - e o Swagger UI busca o `openapi.json` **sem
+    # autenticacao**, porque e assim que ele funciona. Logo, ligar expoe a
+    # LISTA DE ROTAS a quem achar o dominio da api.
+    #
+    # Isso nao vaza dado nem segredo: toda rota continua exigindo o token de
+    # servico, e a regra 15 proibe embutir o token na pagina, entao o
+    # `Authorize` do Swagger e preenchido a mao por quem esta investigando.
+    # O que se expoe e a superficie, e so enquanto a chave estiver ligada.
+    #
+    # Foi desligado no incremento 0 com o comentario "a superficie e
+    # consumida pelo painel". Aquilo era verdade com 6 rotas; hoje sao mais de
+    # 30, e nao ter como exercita-las e lacuna real. A saida nao e reabrir de
+    # vez: e ter um interruptor que quem opera liga, usa e desliga.
+    habilitar_docs: bool = False
+
     # ------------------------------------------------------------- CORS
     # Lista separada por virgula. Vazio = nenhuma origem liberada.
     #
