@@ -6,6 +6,7 @@ B1, B2 e B3 - o grupo de controle da secao 14.3.
 from __future__ import annotations
 
 import logging
+from ...cerebro import ciclo as cerebro_ciclo
 from ...config import service as config_service
 from ...config.service import (
     ConfigCongelada,
@@ -102,13 +103,16 @@ def curva(request: Request, pontos: int = curva_de_patrimonio.PONTOS_PADRAO) -> 
         if linha and linha["id"]:
             runs[chave] = int(linha["id"])
 
-    # O run do agente e derivado: e o ultimo que tem evento cognitivo. Nao ha
-    # coluna "e do agente" para ficar desatualizada.
-    agente = conn.execute(
-        "SELECT MAX(run_id) AS id FROM agent_event WHERE run_id IS NOT NULL"
-    ).fetchone()
-    if agente and agente["id"]:
-        runs["agente"] = int(agente["id"])
+    # O run do agente, pela MESMA funcao que a rota dele usa.
+    #
+    # Aqui havia a mesma consulta, sob um comentario dizendo "e o ultimo que
+    # tem evento COGNITIVO" - e ela nao filtrava cognitivo nenhum. Com B4
+    # emitindo evento nao cognitivo, a curva passou a desenhar o patrimonio do
+    # controle rotulado como "agente", e o excesso sobre o B1 saiu do run
+    # errado: +US$ 7,01 na tela contra -US$ 137,26 na tabela ao lado.
+    agente = cerebro_ciclo.ultimo_run_do_agente(conn)
+    if agente is not None:
+        runs["agente"] = agente
 
     if not runs:
         return {"existe": False, "motivo": "nenhum run para desenhar"}

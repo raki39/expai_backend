@@ -414,6 +414,37 @@ def rodar(
     return ciclo
 
 
+def ultimo_run_do_agente(conn: sqlite3.Connection) -> int | None:
+    """O ultimo run DO AGENTE. **Uma definicao, e ela precisou existir.**
+
+    Havia duas, identicas, em `/api/agente` e em `/api/baselines/curva`:
+
+        SELECT MAX(run_id) FROM agent_event WHERE run_id IS NOT NULL
+
+    Ate o incremento 12 isso descrevia o agente, porque so o cerebro emitia
+    evento. B4 tambem emite - evento nao cognitivo, provedor nulo - e as duas
+    consultas passaram a alcancar os runs do controle. Em producao a rota do
+    agente mostrou o run 52, de B4, e a curva desenhou o patrimonio dele como
+    "agente".
+
+    **As duas vinham com comentario afirmando o contrario.** A da curva dizia
+    "e o ultimo que tem evento COGNITIVO", e nao filtrava cognitivo nenhum.
+    Consertei a primeira sem procurar a forma; a segunda apareceu na tela
+    seguinte.
+
+    O filtro e POSITIVO - o dono esperado -, e nao a exclusao de B4: excluir
+    por nome falharia calado no dia em que um terceiro braco emitisse evento,
+    que e como este defeito nasceu das duas vezes.
+    """
+    linha = conn.execute(
+        "SELECT MAX(e.run_id) AS run_id FROM agent_event e"
+        " JOIN run r ON r.id = e.run_id"
+        " WHERE r.agent_id = ?",
+        (livro.AGENT_ID_PADRAO,),
+    ).fetchone()
+    return int(linha["run_id"]) if linha and linha["run_id"] else None
+
+
 def parada_do_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
     """A ultima parada deste run, com categoria e motivo. `None` se nao houve.
 

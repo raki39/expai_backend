@@ -40,34 +40,18 @@ router = APIRouter(prefix="/api/agente", tags=["agente"])
 def agente_estado(request: Request) -> dict[str, Any]:
     """O ultimo run do agente: caminho percorrido, propostas e gasto.
 
-    Um run do agente e um run que tem `agent_event` - derivado, e nao uma
-    coluna nova: quem tem evento cognitivo passou pelo cerebro, e quem nao
-    tem, nao passou. Nao ha estado para ficar desatualizado.
+    **Esta docstring afirmava algo falso.** Dizia: "um run do agente e um run
+    que tem `agent_event` - quem tem evento cognitivo passou pelo cerebro, e
+    quem nao tem, nao passou". A primeira metade era o criterio implementado; a
+    segunda era o que ele deveria significar, e as duas deixaram de coincidir
+    quando B4 passou a emitir evento NAO cognitivo.
+
+    Terceiro texto da mesma familia neste incremento, depois do de `braco.py` e
+    do da curva. O criterio agora esta em `ciclo.ultimo_run_do_agente`, um
+    lugar so, e diz o que faz: filtra pelo DONO do run.
     """
     conn = _conn(request)
-    # O ultimo run DO AGENTE, e nao o ultimo run com evento.
-    #
-    # Ate o incremento 12 os dois eram a mesma coisa: so o cerebro emitia
-    # `agent_event`. B4 tambem emite - evento nao cognitivo, provedor nulo -,
-    # e no primeiro B4 rodado em producao esta rota passou a mostrar o run 52,
-    # do controle, com o pre-registro dele e a atribuicao dele.
-    #
-    # O `braco.AGENT_ID = "b4-0001"` foi escrito COM UM COMENTARIO dizendo que
-    # impedia exatamente isso. Nao impedia: o filtro daqui era sobre
-    # `agent_event`, e nao sobre o dono do run. Comentario afirmando protecao
-    # que nao existe e o padrao que este projeto ja registrou treze vezes, e
-    # esta foi escrita por mim no mesmo incremento.
-    #
-    # O filtro e POSITIVO - `= AGENT_ID_PADRAO` - e nao a exclusao de B4: um
-    # terceiro braco que emita evento nao voltaria a aparecer aqui por
-    # esquecimento.
-    linha = conn.execute(
-        "SELECT MAX(e.run_id) AS run_id FROM agent_event e"
-        " JOIN run r ON r.id = e.run_id"
-        " WHERE r.agent_id = ?",
-        (livro.AGENT_ID_PADRAO,),
-    ).fetchone()
-    run_id = linha["run_id"] if linha else None
+    run_id = cerebro_ciclo.ultimo_run_do_agente(conn)
     if run_id is None:
         return {"run_id": None, "caminho": [], "propostas": [], "gasto": None}
 

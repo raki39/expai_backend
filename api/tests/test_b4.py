@@ -29,6 +29,37 @@ from tests.test_maos_rapidas import criar_dataset, precos_passeio
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 
+TRIPLAS = ('"""', "'''", 'r"""', "r'''", 'f"""', "f'''")
+
+
+def sql_sem_prosa(arquivo: pathlib.Path) -> str:
+    """O codigo sem comentarios e sem DOCSTRINGS, com o SQL intacto.
+
+    Nao e o `codigo_sem_prosa` do incremento 11: aquele remove todo literal de
+    texto, e o SQL deste projeto **vive** em literal. Removendo-os, a guarda
+    ficaria cega justamente para o que ela procura.
+
+    O que se isola aqui e a consulta, e nao a explicacao dela. A primeira
+    versao desta guarda acusou o comentario de `b4/braco.py`, que cita a
+    consulta exatamente para contar como o defeito nasceu - e uma guarda que
+    proibe a explicacao de por que algo e proibido empurra para apagar a
+    explicacao, que e a pior correcao possivel.
+
+    Docstring e reconhecida pelas aspas triplas: o SQL do projeto e escrito em
+    literais de uma linha, concatenados.
+    """
+    import tokenize
+
+    pedacos: list[str] = []
+    with arquivo.open("rb") as f:
+        for tok in tokenize.tokenize(f.readline):
+            if tok.type == tokenize.COMMENT:
+                continue
+            if tok.type == tokenize.STRING and tok.string.startswith(TRIPLAS):
+                continue
+            pedacos.append(tok.string)
+    return " ".join(pedacos)
+
 
 @pytest.fixture
 def cenario_sem_baseline(conn: sqlite3.Connection):
@@ -919,22 +950,25 @@ def test_a_rota_do_agente_filtra_por_dono_do_run_e_nao_exclui_b4(
     Excluir `b4-0001` resolveria hoje e falharia calado no dia em que outro
     dono de run emitisse evento - que e como este defeito nasceu.
     """
-    fonte = (APP / "api" / "rotas" / "agente.py").read_text(encoding="utf-8")
-    assert "AGENT_ID_PADRAO" in fonte
-
-    # A asercao e sobre o SQL, e nao sobre o arquivo: o comentario ACIMA da
-    # consulta cita `b4-0001` para contar como o defeito apareceu, e proibir a
-    # string no arquivo inteiro empurraria para apagar a explicacao - o mesmo
-    # engano que a guarda de separacao do incremento 11 cometeu com as
-    # docstrings.
-    sql = fonte[fonte.index("SELECT MAX(e.run_id)"):]
-    sql = sql[: sql.index(".fetchone()")]
+    sql = sql_sem_prosa(APP / "cerebro" / "ciclo.py")
+    assert "AGENT_ID_PADRAO" in sql
     assert "r.agent_id = ?" in sql
+
     for negacao in ("agent_id <>", "agent_id !=", "agent_id NOT"):
         assert negacao not in sql, (
             f"o filtro exclui por nome ({negacao}); ele tem de INCLUIR o dono"
             " esperado, senao um braco novo volta a aparecer por esquecimento"
         )
+
+    # E nenhum CODIGO nomeia quem excluir - a prova de que o filtro e
+    # positivo. Os comentarios podem citar `b4-0001` a vontade: eles contam
+    # como o defeito nasceu, e proibi-los empurraria para apagar a explicacao.
+    for arquivo in sorted(APP.rglob("*.py")):
+        codigo = sql_sem_prosa(arquivo)
+        if "b4-0001" in codigo:
+            assert arquivo.name == "braco.py", (
+                f"{arquivo.name} nomeia em codigo o braco a excluir"
+            )
 
 
 def test_o_painel_acusa_quando_o_b1_casado_nao_casa(
@@ -969,3 +1003,44 @@ def test_o_painel_acusa_quando_o_b1_casado_nao_casa(
     assert confere["casa"] is True
     assert confere["operacoes_alvo"] == corpo["idas_e_voltas"]
     assert "D19" in confere["por_que_importa"]
+
+
+def test_ninguem_mais_escolhe_o_run_do_agente_por_conta_propria(
+) -> None:
+    """A consulta existia DUAS vezes, e eu consertei uma e nao procurei a outra.
+
+    `SELECT MAX(run_id) FROM agent_event` descrevia o agente enquanto so o
+    cerebro emitia evento. Com B4 emitindo evento nao cognitivo, ela passou a
+    alcancar o controle - e estava em `/api/agente` e em
+    `/api/baselines/curva`, as duas sob comentario afirmando o contrario.
+
+    Consertar a primeira sem varrer a forma fez a segunda aparecer na tela
+    seguinte, com o patrimonio do B4 rotulado como "agente" e um excesso de
+    +US$ 7,01 ao lado de -US$ 137,26 na tabela.
+
+    Esta guarda impede a terceira: quem precisa do run do agente chama
+    `ciclo.ultimo_run_do_agente`.
+    """
+    import re
+
+    padrao = re.compile(r"MAX\s*\(\s*(?:e\.)?run_id\s*\)\s*.*?FROM\s+agent_event",
+                        re.IGNORECASE | re.DOTALL)
+    culpados = []
+    for arquivo in sorted(APP.rglob("*.py")):
+        if arquivo.name == "ciclo.py":
+            continue  # e onde a definicao mora
+        # Sobre o SQL, e nao sobre o arquivo: o comentario de `braco.py` cita
+        # a consulta para contar como o defeito nasceu, e a primeira versao
+        # desta guarda o acusou por isso.
+        if padrao.search(sql_sem_prosa(arquivo)):
+            culpados.append(str(arquivo.relative_to(APP)))
+    assert not culpados, (
+        "estes arquivos escolhem o run do agente por conta propria:"
+        f" {culpados}. Use `ciclo.ultimo_run_do_agente` - o criterio mudou uma"
+        " vez e vai mudar de novo"
+    )
+
+    # E a guarda nao pode ser vazia: a definicao existe onde deve.
+    from app.cerebro import ciclo
+
+    assert callable(ciclo.ultimo_run_do_agente)
