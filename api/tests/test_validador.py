@@ -54,9 +54,18 @@ def run(conn: sqlite3.Connection, cenario, settings):  # noqa: F811
 def run_testavel(conn: sqlite3.Connection, settings):  # noqa: F811
     """Um ciclo cuja hipótese CABE no horizonte, e portanto é avaliada.
 
-    8.000 barras e Sharpe declarado no teto (5,00) pedem 5.611 barras de
-    amostra - cabe. É o único jeito de exercitar o caminho de promoção com
-    dados sintéticos: a conta de poder não abre exceção para teste.
+    A conta, e ela é apertada de propósito porque não há como afrouxá-la:
+
+    | | |
+    |---|---|
+    | Sharpe 5,00 (teto do schema) exige | 5.611 barras de amostra |
+    | in-sample é 30% do dataset (D27) | 20.000 × 0,3 = 6.000 |
+
+    Com 8.000 barras - o que esta fixture usava antes do incremento 9 - o
+    in-sample tinha 2.400 e **nada era testável**. O número subiu porque a
+    separação passou a valer: a amostra da hipótese é a janela onde ela roda,
+    não o dataset inteiro. É a mesma aritmética que faz o Sharpe mínimo
+    testável em produção ser 2,58 (ADR 0020).
     """
     import json as _json
 
@@ -64,7 +73,7 @@ def run_testavel(conn: sqlite3.Connection, settings):  # noqa: F811
     from tests.test_cerebro import PRE_REGISTRO_OK
     from tests.test_maos_rapidas import criar_dataset, precos_passeio
 
-    dataset_id = criar_dataset(conn, precos_passeio(8_000))
+    dataset_id = criar_dataset(conn, precos_passeio(20_000))
     proposta = _json.dumps(
         {
             "familia": "cruzamento_medias",

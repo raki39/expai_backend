@@ -247,6 +247,50 @@ def analisar(barras: Sequence[Barra], intervalo: int) -> RelatorioIntegridade:
     )
 
 
+def garantir_separacao(conn, dataset_id: int) -> None:
+    """Cria a divisao por finalidade e as janelas, se ainda nao existirem.
+
+    **Idempotente, e chamada nos DOIS caminhos de saida de `ingerir`** - o de
+    ingestao nova e o de dataset que ja existia.
+
+    A primeira versao chamava so no caminho novo, e isso produziria um defeito
+    que nenhum teste pegaria: o dataset de PRODUCAO foi ingerido no incremento
+    1, muito antes da migracao 10. Ele nunca passaria por aqui, `esta_dividido`
+    devolveria False, o loader cairia no fallback, e os quatro conjuntos da
+    secao 8.5.1 existiriam no schema **sem separar nada**. Reingerir tampouco
+    resolveria: o caminho `ja_existia` retornava antes.
+    """
+    from . import janelas as janelas_mod
+    from . import split as split_mod
+
+    # A divisao e derivada da RESERVA, que foi carvada na ingestao (D11) e
+    # nunca e recalculada. Por isso criar a divisao depois nao e "escolher a
+    # fronteira tendo visto os dados": a fronteira que importa - a do holdout -
+    # ja estava escolhida, e `split.criar` recusa a divisao se as fatias nao
+    # terminarem exatamente nela.
+    split_mod.criar(conn, dataset_id)
+
+    # As janelas de walk-forward sao preocupacao SEPARADA da divisao.
+    #
+    # A divisao e sobre PERMISSAO: quem pode ler o que. As janelas sao sobre
+    # como testar fora da amostra, e exigem espaco para purga mais embargo
+    # (401 barras com o catalogo atual). Um dataset curto tem os quatro
+    # conjuntos e nao tem janela valida - e as duas coisas sao verdade ao
+    # mesmo tempo.
+    #
+    # A ausencia fica VISIVEL, e nao engolida: `janelas.ler` devolve lista
+    # vazia e `conferir_sem_vazamento` devolve `conferido: None` com o motivo.
+    # Quem precisar de walk-forward encontra a ausencia; quem so precisa da
+    # separacao de acesso nao e bloqueado por ela.
+    try:
+        janelas_mod.gerar(conn, dataset_id)
+    except janelas_mod.JanelasImpossiveis as erro:
+        log.warning(
+            "dataset.sem_janelas_de_walk_forward",
+            extra={"dataset_id": dataset_id, "motivo": str(erro)},
+        )
+
+
 def ingerir(
     conn: sqlite3.Connection,
     config: ExperimentConfig,
@@ -351,6 +395,9 @@ def ingerir(
             "dataset.reingestao_identica",
             extra={"dataset_id": existente["id"], "sha256": sha},
         )
+        # Tambem aqui: um dataset ingerido antes da migracao 10 nao tem
+        # divisao, e este e o unico caminho pelo qual ele passa de novo.
+        garantir_separacao(conn, int(existente["id"]))
         return ResultadoIngestao(
             dataset_id=int(existente["id"]),
             ja_existia=True,
@@ -419,19 +466,7 @@ def ingerir(
         log.exception("dataset.ingestao_falhou")
         raise
 
-    # A divisao por finalidade (D27, secao 8.5.1) e criada AQUI, na ingestao,
-    # e nunca depois.
-    #
-    # Depois significaria escolher a fronteira ja tendo visto os dados, e um
-    # holdout escolhido assim nao e holdout - e uma amostra com nome bonito. O
-    # holdout nem chega a ser escolhido: ele e a reserva da D11, carvada nesta
-    # mesma funcao desde o incremento 1, e `split.criar` recusa a divisao se
-    # as fatias nao terminarem exatamente na fronteira dela.
-    from . import janelas as janelas_mod
-    from . import split as split_mod
-
-    split_mod.criar(conn, dataset_id)
-    janelas_mod.gerar(conn, dataset_id)
+    garantir_separacao(conn, dataset_id)
 
     log.info(
         "dataset.ingerido",

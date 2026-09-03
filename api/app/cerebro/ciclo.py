@@ -24,6 +24,7 @@ from typing import Any
 
 from .. import creditos as creditos_mod
 from ..config.schema import ExperimentConfig
+from ..dataset import loader
 from ..ledger import livro
 from ..maos_rapidas import baselines, executor
 from ..regra import registro as registro_de_regra
@@ -35,6 +36,15 @@ from ..validador import promocao as validador_promocao
 from . import avaliacao, grafo, propostas
 
 log = logging.getLogger(__name__)
+
+
+class SeparacaoAusente(Exception):
+    """O dataset nao foi dividido por finalidade (secao 8.5.1).
+
+    Excecao propria, e nao `ValueError`: quem chama precisa poder distinguir
+    "falta preparar o dataset" de "a janela esta vazia". A primeira tem
+    conserto de um comando; a segunda e defeito.
+    """
 
 
 def _retornos_bps(barras: list) -> list[int]:
@@ -144,6 +154,27 @@ def rodar(
     deve dar **zero**. E numero, nao prosa - se algum dia voltar a ser maior
     que zero, alguem juntou os conjuntos de novo e o campo acusa.
     """
+    # O ciclo da 0B RECUSA rodar sobre dataset nao dividido.
+    #
+    # O fallback de `loader.carregar` existe para que os runs da 0A continuem
+    # reproduziveis (R12) - e so para isso. Deixar o CICLO cair nele produziria
+    # um run que parece 0B e e 0A: cerebro e maos rapidas na mesma janela,
+    # `sobreposicao_amostral` de volta aos 100%, e os quatro conjuntos da
+    # secao 8.5.1 existindo no schema sem separar nada.
+    #
+    # Era exatamente o que aconteceria em producao: o dataset de la foi
+    # ingerido no incremento 1, antes da migracao 10. Recusar alto e a unica
+    # resposta honesta - um resultado 0B sem separacao seria pior que nenhum,
+    # porque ninguem saberia que ele nao vale.
+    if not loader.esta_dividido(conn, dataset_id):
+        raise SeparacaoAusente(
+            f"o dataset {dataset_id} nao tem a divisao por finalidade da"
+            " secao 8.5.1. Rodar assim produziria um resultado que parece 0B"
+            " e e 0A - cerebro e maos rapidas na mesma janela. Crie a divisao"
+            " com `dataset.ingest.garantir_separacao` (ou POST"
+            " /api/dataset/separacao) antes de rodar o ciclo"
+        )
+
     barras_de_observacao = executor.carregar_janela(
         conn, dataset_id, finalidade="exploracao"
     )
@@ -151,13 +182,15 @@ def rodar(
         conn, dataset_id, finalidade=executor.FINALIDADE_DE_EXECUCAO
     )
     if not barras:
-        raise ValueError("janela vazia: nao ha o que observar nem executar")
+        raise ValueError(
+            "conjunto in_sample vazio: nao ha o que executar"
+        )
     if not barras_de_observacao:
-        # Dataset anterior a divisao (incremento 9). O fallback do loader ja
-        # devolveu a janela inteira em `barras`; observar a mesma coisa e o
-        # comportamento da 0A, e e o unico honesto quando nao ha conjunto de
-        # exploracao para observar.
-        barras_de_observacao = barras
+        raise ValueError(
+            "conjunto de exploracao vazio: o cerebro nao tem o que observar."
+            " Com a divisao presente isto e defeito da divisao, nao caso"
+            " normal"
+        )
 
     run_id, _ = livro.abrir_run(
         conn,

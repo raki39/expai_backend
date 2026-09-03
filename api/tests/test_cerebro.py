@@ -179,8 +179,13 @@ def test_o_prompt_recebe_resumo_e_nao_o_log_bruto(
     _rodar_ciclo(conn, cenario, settings, adaptador)
 
     dataset_id, cfg = cenario
-    barras = executor.carregar_janela(conn, dataset_id)
-    assert len(barras) > 1_000  # ha log bruto de sobra para vazar
+    # A janela que o CEREBRO observa e `exploracao` (D27), nao a de execucao.
+    # O teste precisa varrer as barras que ele de fato viu: procurar timestamp
+    # de in_sample no prompt nao provaria nada, porque o cerebro nunca os teve.
+    barras = executor.carregar_janela(
+        conn, dataset_id, finalidade="exploracao"
+    )
+    assert len(barras) > 400  # ha log bruto de sobra para vazar
 
     for pedido in adaptador.pedidos:
         texto = pedido.sistema + "".join(t for _, t in pedido.mensagens)
@@ -1041,12 +1046,26 @@ def test_a_procedencia_da_regra_vem_do_experimento_e_nao_do_modelo(
 def test_a_sobreposicao_amostral_e_calculada_e_nao_afirmada(
     conn: sqlite3.Connection, cenario, settings
 ) -> None:
-    """Na 0A o cerebro observa a mesma janela que executa: 100% em amostra."""
+    """O numero mudou de 100% para ZERO sem a funcao ser tocada.
+
+    Na 0A este teste exigia `em_amostra is True` e `sobreposicao_bps ==
+    10_000`, porque a D22 fazia o cerebro observar a mesma janela que executa
+    - nao havia separacao, e declarar a sobreposicao era a unica alternativa
+    honesta a fingir que ela nao existia.
+
+    Com os quatro conjuntos da D27, o cerebro observa `exploracao` e as maos
+    executam `in_sample`. A sobreposicao caiu a zero, e **`sobreposicao_amostral`
+    nao foi alterada** - ela sempre calculou do que ficou gravado.
+
+    E o retorno concreto de a D22 ter sido escrita como NUMERO CALCULADO em vez
+    de frase de prosa. Uma frase dizendo "o resultado e em amostra" teria
+    sobrevivido intacta a este incremento, descrevendo um desenho extinto.
+    """
     resultado = _rodar_ciclo(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
-    assert resultado.sobreposicao["em_amostra"] is True
-    assert resultado.sobreposicao["sobreposicao_bps"] == 10_000
+    assert resultado.sobreposicao["em_amostra"] is False
+    assert resultado.sobreposicao["sobreposicao_bps"] == 0
 
 
 def test_condicoes_do_run_acompanham_o_resultado(
@@ -1312,7 +1331,9 @@ def test_a_rota_do_agente_mostra_o_caminho_percorrido(
     assert corpo["regra_ativa"]["expectation"]
     assert corpo["gasto"]["gasto_cents"] > 0
     assert corpo["arredondamento_do_custo_ok"] is True
-    assert corpo["sobreposicao_amostral"]["sobreposicao_bps"] == 10_000
+    # ZERO desde o incremento 9: o cerebro observa `exploracao` e as maos
+    # executam `in_sample` (D27). Era 10.000 na 0A, e o campo nao foi tocado.
+    assert corpo["sobreposicao_amostral"]["sobreposicao_bps"] == 0
 
 
 def test_nenhuma_rota_expoe_a_chave_do_provedor(client, conn, settings) -> None:

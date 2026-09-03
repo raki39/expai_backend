@@ -72,6 +72,7 @@ envelhecido, listando 6 rotas quando existiam 26.
 | POST | `/api/config/reancorar` | regrava a config sob o hash correto após deriva de schema |
 | GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
 | `/api/separacao` | GET | Os quatro conjuntos por finalidade, as janelas de walk-forward e o uso do holdout. Nao devolve barra nenhuma |
+| `/api/dataset/separacao` | POST | Cria a divisao por finalidade de um dataset ja ingerido; idempotente |
 | `/api/validador` | GET | Maquina de estados do conhecimento, contador de tentativas e as transicoes legais |
 | `/api/lote` | GET | Procedimento de lote (BH/BY) sobre a familia fechada, mais o DSR por hipotese |
 | `/api/creditos` | GET | Saldo de creditos por braco e os quatro numeros de calibracao da secao 8.6.1 |

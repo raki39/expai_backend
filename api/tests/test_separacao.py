@@ -638,3 +638,115 @@ def test_a_sobreposicao_amostral_caiu_a_zero_sem_a_conta_mudar(
     )
     assert s["em_amostra"] is False
     assert s["observado_ate_ms"] <= s["executado_de_ms"]
+
+
+# ===========================================================================
+# O DEFEITO QUE A PERGUNTA DO USUARIO REVELOU
+#
+# Nona ocorrencia do padrao, e minha. `split.criar` e `janelas.gerar` so eram
+# chamados no caminho de ingestao NOVA. O dataset de PRODUCAO foi ingerido no
+# incremento 1, muito antes da migracao 10 - ele nunca passaria por la.
+#
+# O efeito seria mudo: `esta_dividido` False, loader no fallback, cerebro e
+# maos rapidas de volta a mesma janela, `sobreposicao_amostral` de volta aos
+# 100%, e os quatro conjuntos da secao 8.5.1 existindo no schema SEM SEPARAR
+# NADA. E reingerir nao consertava: o caminho `ja_existia` retornava antes.
+#
+# Nenhum teste pegaria, porque todos ingerem do zero com as migracoes ja
+# aplicadas. Os tres abaixo existem para que isso deixe de ser verdade.
+# ===========================================================================
+
+
+def test_dataset_ingerido_antes_da_migracao_ganha_a_divisao(
+    conn: sqlite3.Connection, dois_meses  # noqa: F811
+) -> None:
+    """Simula o dataset de producao: existe, e nao tem divisao.
+
+    Apagar as linhas de `dataset_split` reproduz exatamente o estado de um
+    dataset ingerido antes do incremento 9 - e `garantir_separacao` tem de
+    devolve-lo ao estado correto.
+    """
+    from app.dataset.ingest import garantir_separacao
+
+    r = ingerir(conn, config_curta(), baixador=baixador_falso(dois_meses))
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute("DROP TRIGGER dataset_split_sem_delete")
+    conn.execute("DELETE FROM dataset_split WHERE dataset_id = ?", (r.dataset_id,))
+    conn.execute("PRAGMA writable_schema = OFF")
+    assert not loader.esta_dividido(conn, r.dataset_id)
+
+    garantir_separacao(conn, r.dataset_id)
+
+    assert loader.esta_dividido(conn, r.dataset_id)
+    conjuntos = split_mod.ler(conn, r.dataset_id)
+    assert [c.finalidade for c in conjuntos] == [
+        "exploracao", "in_sample", "walk_forward", "holdout"
+    ]
+    # E o holdout continua sendo a MESMA reserva: recriar a divisao nao move
+    # a fronteira selada.
+    assert conjuntos[-1].from_ms == r.reserved_from_ms
+
+
+def test_reingerir_um_dataset_existente_cria_a_divisao(
+    conn: sqlite3.Connection, dois_meses  # noqa: F811
+) -> None:
+    """O caminho `ja_existia` tambem garante a separacao.
+
+    Era o buraco: ele retornava antes de chegar na criacao, entao reingerir -
+    a coisa mais natural a fazer para consertar - nao consertava nada.
+    """
+    r = ingerir(conn, config_curta(), baixador=baixador_falso(dois_meses))
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute("DROP TRIGGER dataset_split_sem_delete")
+    conn.execute("DELETE FROM dataset_split WHERE dataset_id = ?", (r.dataset_id,))
+    conn.execute("PRAGMA writable_schema = OFF")
+
+    de_novo = ingerir(conn, config_curta(), baixador=baixador_falso(dois_meses))
+    assert de_novo.ja_existia is True
+    assert de_novo.dataset_id == r.dataset_id
+    assert loader.esta_dividido(conn, r.dataset_id), (
+        "reingerir precisa garantir a separacao: e o unico caminho pelo qual"
+        " um dataset ja existente passa de novo"
+    )
+
+
+def test_o_ciclo_da_0b_recusa_rodar_sem_separacao(
+    conn: sqlite3.Connection, settings  # noqa: F811
+) -> None:
+    """A metade que importa mais: recusar alto em vez de cair no fallback.
+
+    O fallback de `loader.carregar` existe para que os runs da 0A continuem
+    reproduziveis (R12), e so para isso. Deixar o CICLO cair nele produziria
+    um run que parece 0B e e 0A - e ninguem saberia que aquele resultado nao
+    vale.
+
+    Um resultado 0B sem separacao e pior que resultado nenhum.
+    """
+    from app.cerebro import ciclo
+    from app.config.schema import ExperimentConfig
+    from tests.test_cerebro import (
+        INTERPRETACAO_OK,
+        PROPOSTA_OK,
+        AdaptadorFalso,
+    )
+    from tests.test_maos_rapidas import criar_dataset, precos_passeio
+
+    # `dividir=False` reproduz o dataset legado.
+    dataset_id = criar_dataset(conn, precos_passeio(2_500), dividir=False)
+    assert not loader.esta_dividido(conn, dataset_id)
+
+    with pytest.raises(ciclo.SeparacaoAusente, match="parece 0B e e 0A"):
+        ciclo.rodar(
+            conn,
+            dataset_id=dataset_id,
+            config=ExperimentConfig(),
+            config_version_id=1,
+            settings=settings,
+            adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
+        )
+
+    # E nenhum run foi aberto: a recusa acontece ANTES de gravar qualquer
+    # coisa. Um run pela metade seria pior que a recusa.
+    assert (
+        int(conn.execute("SELECT COUNT(*) AS n FROM run").fetchone()["n"]) == 0
+    )

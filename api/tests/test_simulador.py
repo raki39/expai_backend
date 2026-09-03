@@ -46,6 +46,7 @@ def criar_dataset(
     *,
     fracao_reservada: float = 0.2,
     fidelity_level: int = 1,
+    dividir: bool = True,
 ) -> int:
     """Dataset sintetico gravado direto, sem passar pela ingestao.
 
@@ -91,6 +92,16 @@ def criar_dataset(
             for i, p in enumerate(precos)
         ],
     )
+    # A mesma separacao que a ingestao real cria (secao 8.5.1, incremento 9).
+    #
+    # Sem isto, todo dataset de teste nasceria SEM divisao, e o ciclo da 0B -
+    # que recusa rodar sem separacao - so seria exercitado no caminho da
+    # recusa. Um dataset de teste que difere do de producao numa propriedade
+    # que o codigo consulta e um teste que prova outra coisa.
+    if dividir:
+        from app.dataset.ingest import garantir_separacao
+
+        garantir_separacao(conn, dataset_id)
     return dataset_id
 
 

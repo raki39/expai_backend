@@ -390,6 +390,34 @@ def validador_hipotese(request: Request, hypothesis_id: int) -> dict[str, Any]:
     }
 
 
+@router.post("/dataset/separacao")
+def criar_separacao(request: Request) -> dict[str, Any]:
+    """Cria a divisao por finalidade de um dataset ja ingerido (secao 8.5.1).
+
+    Existe por um defeito real: o dataset de PRODUCAO foi ingerido no
+    incremento 1, antes de a divisao existir. Sem esta rota, o unico caminho
+    seria reingerir - e reingerir devolve `ja_existia` sem tocar em nada.
+
+    Idempotente. Nao move a fronteira do holdout: ela e a reserva carvada na
+    ingestao (D11), e `split.criar` recusa a divisao se as fatias nao
+    terminarem exatamente nela.
+    """
+    conn = _conn(request)
+    meta = dataset_loader.dataset_vigente(conn)
+    if meta is None:
+        raise HTTPException(status_code=409, detail="nao ha dataset ingerido")
+
+    ja_estava = dataset_loader.esta_dividido(conn, meta.id)
+    dataset_ingest.garantir_separacao(conn, meta.id)
+    conn.commit()
+    return {
+        "dataset_id": meta.id,
+        "ja_estava_dividido": ja_estava,
+        "conjuntos": dataset_split.resumo(conn, meta.id),
+        "janelas": dataset_janelas.conferir_sem_vazamento(conn, meta.id),
+    }
+
+
 @router.get("/separacao")
 def separacao_de_dados(request: Request) -> dict[str, Any]:
     """Os quatro conjuntos, as janelas de walk-forward e o uso do holdout.
