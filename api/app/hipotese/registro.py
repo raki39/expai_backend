@@ -27,8 +27,21 @@ log = logging.getLogger(__name__)
 # especialidade (secao 8.6): sem o campo, migrar para mais de um agente
 # exigiria reprocessar todo o registro.
 #
-# Inerte, como `profile_id` (regra 18): nenhum ramo de decisao le este valor.
+# Inerte para a DECISAO, como `profile_id` (regra 18): nenhum ramo de decisao
+# le este valor. Mas ele **nao** e inerte para a contabilidade da fase - e por
+# ele que `tentativas_por_especialidade` separa os bracos, e §8.6 exige que o
+# orcamento seja da especialidade.
 AGENTE_ORIGEM = "transacao@0b"
+
+#: O braco de controle da secao 14.3. Origem propria, e nao um sinalizador
+#: dentro do do agente: a comparacao da fase e "por credito gasto" entre os
+#: dois bracos, e ela precisa que o contador os separe sozinho.
+#:
+#: Entra no `content_hash`, entao a MESMA regra proposta pelos dois bracos
+#: conta como duas hipoteses, e nao como reteste. E o que se quer: sao duas
+#: tentativas independentes na mesma familia (§9.2), e tratar uma como
+#: repeticao da outra subestimaria a multiplicidade.
+AGENTE_ORIGEM_B4 = "b4@0b"
 
 
 def _agora() -> str:
@@ -50,6 +63,7 @@ def registrar(
     horizonte_barras: int,
     rule_id: int | None = None,
     supersedes: int | None = None,
+    agente_origem: str = AGENTE_ORIGEM,
 ) -> tuple[int, bool]:
     """Grava a hipotese. Devolve `(id, testavel)`.
 
@@ -83,7 +97,7 @@ def registrar(
         testavel = 0
         motivo = str(erro)
 
-    conteudo = hash_do_conteudo(bruto, condicoes_validade, AGENTE_ORIGEM)
+    conteudo = hash_do_conteudo(bruto, condicoes_validade, agente_origem)
 
     cur = conn.execute(
         "INSERT INTO hypothesis ("
@@ -98,7 +112,7 @@ def registrar(
             run_id,
             agent_event_id,
             bruto.enunciado.strip(),
-            AGENTE_ORIGEM,
+            agente_origem,
             _agora(),
             bruto.metrica_primaria,
             bruto.efeito_minimo,

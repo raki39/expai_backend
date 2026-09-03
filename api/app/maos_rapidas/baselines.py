@@ -41,6 +41,7 @@ from typing import Sequence
 from ..config.schema import ExperimentConfig
 from ..dataset.loader import BarraCarregada
 from ..regra import registro
+from ..regra.schema import condicoes_da_config
 from ..regra.schema import (
     CondicoesValidade,
     CruzamentoMedias,
@@ -86,12 +87,8 @@ def derivar_semente(base: int, indice: int) -> int:
 
 
 def condicoes(config: ExperimentConfig) -> CondicoesValidade:
-    return CondicoesValidade(
-        venue=config.market_venue,
-        symbol=config.market_symbol,
-        timeframe=config.timeframe,
-        fidelity_level=config.fidelity_level,
-    )
+    """Delega. O corpo era uma segunda copia de `condicoes_da_config`."""
+    return condicoes_da_config(config)
 
 
 # ---------------------------------------------------------------------------

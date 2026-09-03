@@ -58,6 +58,11 @@ log = logging.getLogger(__name__)
 
 # O braço experimental do agente. O B4 usa 'b4', e entra no incremento 12 -
 # §14.3 exige "mesmo orçamento de créditos de teste" para os dois.
+#: Mantido para os testes e para o painel que ja o importavam. **Nao e mais
+#: usado para cobrar**: o braco vem de `creditos.braco_da_hipotese`, lido da
+#: `agente_origem` da hipotese. Este valor fixo aqui cobrava do agente
+#: qualquer teste, inclusive os do controle - defeito invisivel enquanto havia
+#: um braco so.
 BRACO_DO_AGENTE = "agente"
 
 
@@ -419,7 +424,11 @@ def _avaliar(
 
     creditos = creditos_mod.cobrar(
         conn,
-        braco=BRACO_DO_AGENTE,
+        # DERIVADO da hipotese, e nao fixo: uma hipotese de B4 paga do
+        # orcamento de B4. Sem isto, os 60 creditos "identicos nos dois"
+        # da D30 seriam um bolso so, e a comparacao por credito de
+        # §14.3 nao teria denominador por braco.
+        braco=creditos_mod.braco_da_hipotese(conn, hypothesis_id),
         config_version_id=_config_version(conn, run_id),
         hypothesis_id=hypothesis_id,
         tipo=tipo,

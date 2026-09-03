@@ -61,3 +61,16 @@ class PedidoProva(BaseModel):
     """
 
     semente: int | None = None
+
+
+class PedidoB4(BaseModel):
+    """O braco de controle. Sem teto de gasto porque nao ha gasto.
+
+    `semente` opcional pelo mesmo motivo de `PedidoComparacao`: ela e entrada
+    do run e nao campo do `config_hash`, entao trocar de semente reexecuta
+    legitimamente sob a mesma config - e e o que torna a reprodutibilidade da
+    busca enunciavel (R12: mesma semente, mesmo conjunto de hipoteses).
+    """
+
+    author: str = Field(min_length=1, max_length=120)
+    semente: int | None = None

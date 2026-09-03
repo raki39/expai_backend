@@ -43,6 +43,36 @@ class CondicoesValidade(BaseModel):
     fidelity_level: int = Field(ge=1)
 
 
+def condicoes_da_config(config) -> CondicoesValidade:
+    """As condicoes de validade da config vigente. **Uma definicao.**
+
+    Havia duas, identicas linha por linha: `baselines.condicoes` e
+    `contrato.condicoes_da_config`. Nenhuma consequencia hoje - as duas
+    devolvem o mesmo objeto -, e o problema e o de sempre: um campo novo em
+    `CondicoesValidade` que entre numa e nao na outra faria a MESMA regra
+    carregar escopos diferentes conforme o caminho que a criou.
+
+    E este e o campo cuja unica funcao e declarar sob que condicoes um
+    resultado vale. O CLAUDE.md ja registra ele mentindo uma vez, quando a
+    D20 mudou o modelo de execucao e o texto nao acompanhou. Duas
+    construcoes livres para divergir sao a mesma armadilha, um nivel acima.
+
+    Fica aqui, ao lado do modelo, e nao num dos tres modulos que a usam:
+    `cerebro`, `maos_rapidas` e `b4` nao se importam entre si por desenho, e
+    a funcao nao pode morar em nenhum deles sem furar essa fronteira.
+
+    Tipo do parametro deixado solto de proposito - anotar `ExperimentConfig`
+    aqui faria `app/regra` importar `app/config`, e o schema da regra nao
+    depende do schema do experimento.
+    """
+    return CondicoesValidade(
+        venue=config.market_venue,
+        symbol=config.market_symbol,
+        timeframe=config.timeframe,
+        fidelity_level=config.fidelity_level,
+    )
+
+
 # ---------------------------------------------------------------------------
 # As tres familias do catalogo. Faixas validadas: parametro fora de faixa nao
 # e "regra ruim", e regra invalida - e nunca chega a ser executada.

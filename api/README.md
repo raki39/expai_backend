@@ -124,6 +124,8 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 |---|---|---|
 | GET | `/api/agente` | caminho percorrido, propostas, gasto |
 | POST | `/api/agente` | **roda o ciclo com LLM — gasta dinheiro de verdade** |
+| GET | `/api/b4` | o braço de controle não cognitivo (§14.3) sob a config vigente |
+| POST | `/api/b4` | **roda as 16 hipóteses de B4 — não gasta dinheiro, só CPU** |
 
 ### validador — independente do agente (§8.1)
 

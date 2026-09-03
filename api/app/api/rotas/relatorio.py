@@ -35,6 +35,7 @@ from ..comum import _conn
 # as funcoes que ja servem cada tela. Se recalculasse, o export poderia
 # discordar do painel, e a divergencia so apareceria em quem exportou.
 from .agente import agente_estado
+from .b4 import b4_estado
 from .baselines import comparacao_atual, curva
 from .config import config_atual, config_historico
 from .dataset import dataset_atual, separacao_de_dados
@@ -103,6 +104,10 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         ("comparacao", "/api/baselines", lambda: comparacao_atual(request)),
         ("curva", "/api/baselines/curva", lambda: curva(request)),
         ("agente", "/api/agente", lambda: agente_estado(request)),
+        # O braco de controle. Entra no pacote pelo mesmo motivo do agente: a
+        # comparacao entre os dois e o produto da fase, e um export com um
+        # braco so responderia metade da pergunta.
+        ("b4", "/api/b4", lambda: b4_estado(request)),
         # As quatro partes da 0B. Faltavam: este export foi escrito no
         # incremento 7 com uma tupla literal, e parou de descrever o sistema
         # no instante em que a 0B acrescentou rota - em silencio, que e o

@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config.schema import ExperimentConfig
 from ..hipotese.schema import SCHEMA_PRE_REGISTRO, PreRegistroBruto
+from ..regra.schema import condicoes_da_config as _condicoes_da_config
 from ..regra.schema import (
     BandaDesvio,
     BreakoutCanal,
@@ -253,13 +254,14 @@ SCHEMA_PROPOSTA: dict = {
 
 
 def condicoes_da_config(config: ExperimentConfig) -> CondicoesValidade:
-    """Procedencia da regra: vem do experimento, nunca do modelo."""
-    return CondicoesValidade(
-        venue=config.market_venue,
-        symbol=config.market_symbol,
-        timeframe=config.timeframe,
-        fidelity_level=config.fidelity_level,
-    )
+    """Procedencia da regra: vem do experimento, nunca do modelo.
+
+    Reexportado de `app/regra/schema`, onde a definicao mora. O nome fica aqui
+    porque o grafo e os testes o importam deste modulo desde o incremento 5, e
+    trocar cinco lugares para dizer a mesma coisa seria churn - o que mudou e
+    que agora ha uma implementacao, e nao duas.
+    """
+    return _condicoes_da_config(config)
 
 
 def montar_regra(bruta: PropostaBruta, config: ExperimentConfig) -> Regra:

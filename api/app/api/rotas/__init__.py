@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends
 from ...security import exigir_token_de_servico
 from . import (
     agente,
+    b4,
     baselines,
     config,
     dataset,
@@ -32,8 +33,12 @@ from . import (
 
 # A ORDEM aqui e a ordem das secoes no Swagger, e ela conta a historia do
 # experimento: substrato -> config -> dados -> dinheiro -> execucao ->
-# controle -> agente -> validacao -> relatorio. Diagnostico por ultimo, porque
-# nao faz parte dela.
+# controle -> agente -> controle nao cognitivo -> validacao -> relatorio.
+# Diagnostico por ultimo, porque nao faz parte dela.
+#
+# `b4` fica DEPOIS de `agente` de proposito: ele e o grupo de controle do
+# agente, e a ordem da tela e a ordem em que as coisas fazem sentido de ler,
+# nao a alfabetica.
 MODULOS = (
     substrato,
     config,
@@ -42,6 +47,7 @@ MODULOS = (
     simulador,
     baselines,
     agente,
+    b4,
     validador,
     relatorio,
     diagnostico,

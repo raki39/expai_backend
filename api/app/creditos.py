@@ -61,6 +61,50 @@ log = logging.getLogger(__name__)
 
 BRACOS = ("agente", "b4")
 
+#: De qual BRACO uma hipotese e, a partir da `agente_origem` dela.
+#:
+#: As chaves sao `hipotese.registro.AGENTE_ORIGEM` e `AGENTE_ORIGEM_B4`,
+#: escritas aqui como literais para nao importar `app/hipotese` neste modulo -
+#: e ha teste comparando as duas listas, porque duas copias de um mapa fechado
+#: divergem.
+ORIGEM_PARA_BRACO: dict[str, str] = {
+    "transacao@0b": "agente",
+    "b4@0b": "b4",
+}
+
+
+def braco_da_hipotese(conn: sqlite3.Connection, hypothesis_id: int) -> str:
+    """O braco que paga por testar esta hipotese. **Lido do banco.**
+
+    Existe porque `promocao._avaliar` cobrava `braco="agente"` FIXO, para
+    qualquer hipotese. Enquanto houve um braco so, o defeito era invisivel;
+    com B4, testar uma hipotese do controle drenaria o orcamento do agente -
+    e §14.3 exige "mesmo orcamento de creditos de teste" nos dois, o que so
+    significa algo se os dois forem contados separado.
+
+    Derivado da linha da hipotese, e nunca parametro do chamador: um `braco`
+    passado de fora poderia cobrar do bolso errado, que e a mesma porta lateral
+    que o incremento 10 fechou na maquina de estados ao exigir que a transicao
+    parta do estado LIDO DO BANCO, e nao do que o chamador declara.
+    """
+    linha = conn.execute(
+        "SELECT agente_origem FROM hypothesis WHERE id = ?", (hypothesis_id,)
+    ).fetchone()
+    if linha is None:
+        raise ValueError(f"hipotese {hypothesis_id} nao existe")
+    origem = linha["agente_origem"]
+    braco = ORIGEM_PARA_BRACO.get(origem)
+    if braco is None:
+        # Nao cai no braco do agente por padrao. Uma origem nova sem braco
+        # atribuido cobraria de alguem, e cobrar do bolso errado em silencio e
+        # pior que recusar - o orcamento e o denominador da comparacao da fase.
+        raise ValueError(
+            f"origem {origem!r} nao tem braco de creditos atribuido; a"
+            " comparacao de §14.3 e por credito gasto POR BRACO, e um"
+            " lancamento no braco errado a corrompe"
+        )
+    return braco
+
 # Tabela da §8.6.1. Os mesmos números vivem num CASE do gatilho
 # `credito_usa_o_peso_do_documento`: duas cópias, e é deliberado - se
 # divergirem, a inserção é recusada e o defeito aparece na primeira cobrança,
