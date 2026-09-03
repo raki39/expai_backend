@@ -170,11 +170,34 @@ def digest_do_run(conn: sqlite3.Connection, run_id: int) -> str:
     return h.hexdigest()
 
 
+# O conjunto sobre o qual as maos rapidas EXECUTAM (D27, secao 8.5.1):
+# "In-sample | Agente e simulador | desenvolver e ajustar estrategias".
+#
+# Um nome so, num lugar so. Espalhar a string por cinco chamadas faria a
+# fronteira depender de ninguem digitar errado - e uma finalidade errada nao
+# levanta erro, devolve outro conjunto.
+FINALIDADE_DE_EXECUCAO = "in_sample"
+
+
 def carregar_janela(
-    conn: sqlite3.Connection, dataset_id: int
+    conn: sqlite3.Connection,
+    dataset_id: int,
+    *,
+    finalidade: str = FINALIDADE_DE_EXECUCAO,
 ) -> list[BarraCarregada]:
-    """Toda a janela disponivel - o periodo reservado segue fora, pela view."""
-    return loader.carregar(conn, dataset_id, decision_ts_ms=TUDO_DISPONIVEL)
+    """A janela de uma FINALIDADE (R26). O selado segue fora, pela view.
+
+    O padrao e `in_sample` porque e onde o simulador opera. Nao e "toda a
+    janela disponivel" como na 0A: com os quatro conjuntos da D27, "tudo" nao
+    e mais uma finalidade - e tratar como se fosse significaria executar sobre
+    walk-forward, que e do validador.
+    """
+    return loader.carregar(
+        conn,
+        dataset_id,
+        decision_ts_ms=TUDO_DISPONIVEL,
+        finalidade=finalidade,
+    )
 
 
 def rodar(

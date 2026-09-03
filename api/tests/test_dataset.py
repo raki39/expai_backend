@@ -406,7 +406,8 @@ def test_nenhuma_chamada_do_loader_devolve_barra_reservada(
 
     for ultimas in (None, 1, 10, 10**9):
         barras = loader.carregar(
-            conn, r.dataset_id, decision_ts_ms=10**15, ultimas=ultimas
+            conn, r.dataset_id, decision_ts_ms=10**15, ultimas=ultimas,
+            finalidade="in_sample",
         )
         assert barras, "deveria devolver alguma coisa"
         assert max(b.open_time_ms for b in barras) < reserved
@@ -422,7 +423,9 @@ def test_loader_nao_devolve_barra_posterior_a_decisao(
 ) -> None:
     r = ingerir(conn, config_curta(), baixador=baixador_falso(dois_meses))
     corte = ms("2024-09-15T12:00:00")
-    barras = loader.carregar(conn, r.dataset_id, decision_ts_ms=corte)
+    barras = loader.carregar(
+        conn, r.dataset_id, decision_ts_ms=corte, finalidade="in_sample"
+    )
 
     assert barras
     assert max(b.open_time_ms for b in barras) < corte
@@ -442,11 +445,17 @@ def test_loader_exclui_a_barra_ainda_em_formacao(
     abertura = ms("2024-09-15T12:00:00")
 
     # Um milissegundo antes do fechamento: a barra ainda esta se formando.
-    quase = loader.carregar(conn, r.dataset_id, decision_ts_ms=abertura + INTERVALO - 1)
+    quase = loader.carregar(
+        conn, r.dataset_id, decision_ts_ms=abertura + INTERVALO - 1,
+        finalidade="in_sample",
+    )
     assert abertura not in {b.open_time_ms for b in quase}
 
     # No instante exato do fechamento, ela ja e conhecida.
-    fechada = loader.carregar(conn, r.dataset_id, decision_ts_ms=abertura + INTERVALO)
+    fechada = loader.carregar(
+        conn, r.dataset_id, decision_ts_ms=abertura + INTERVALO,
+        finalidade="in_sample",
+    )
     assert abertura in {b.open_time_ms for b in fechada}
 
 
@@ -462,8 +471,13 @@ def test_ultimas_devolve_o_fim_da_serie_visivel(
 ) -> None:
     r = ingerir(conn, config_curta(), baixador=baixador_falso(dois_meses))
     corte = ms("2024-09-15T12:00:00")
-    todas = loader.carregar(conn, r.dataset_id, decision_ts_ms=corte)
-    ultimas = loader.carregar(conn, r.dataset_id, decision_ts_ms=corte, ultimas=5)
+    todas = loader.carregar(
+        conn, r.dataset_id, decision_ts_ms=corte, finalidade="in_sample"
+    )
+    ultimas = loader.carregar(
+        conn, r.dataset_id, decision_ts_ms=corte, ultimas=5,
+        finalidade="in_sample",
+    )
     assert ultimas == todas[-5:]
 
 

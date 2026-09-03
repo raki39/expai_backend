@@ -141,10 +141,20 @@ def sobreposicao_amostral(conn: sqlite3.Connection, run_id: int) -> dict:
 
     E declarado como NUMERO, calculado do que ficou gravado, e nao como frase
     num texto de condicoes de validade. A frase envelhece quando o desenho
-    muda; a conta nao. Na Fase 0A a resposta esperada e 100%: o cerebro
-    observa a mesma janela em que a regra sera executada, o que torna o
-    resultado do agente uma medida EM AMOSTRA - suficiente para responder "o
-    ciclo fecha?", e insuficiente para qualquer afirmacao de desempenho.
+    muda; a conta nao.
+
+    **E o desenho mudou, e a conta acompanhou sozinha.** Na 0A a resposta era
+    100%: nao havia separacao, o cerebro observava a mesma janela em que a
+    regra seria executada (D22), e o resultado do agente era uma medida em
+    amostra - suficiente para "o ciclo fecha?", insuficiente para qualquer
+    afirmacao de desempenho.
+
+    Na 0B o cerebro observa `exploracao` e as maos executam `in_sample`
+    (D27, secao 8.5.1), e a resposta esperada e **zero**. Nenhuma linha desta
+    funcao mudou para isso acontecer - e essa e a diferenca entre um numero
+    calculado e uma frase. Se algum dia voltar a ser maior que zero, alguem
+    juntou os conjuntos de novo, e o campo acusa sem que ninguem precise
+    lembrar de conferir.
     """
     proposta = conn.execute(
         "SELECT observed_from_ms, observed_to_ms FROM rule_proposal"

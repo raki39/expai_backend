@@ -419,6 +419,20 @@ def ingerir(
         log.exception("dataset.ingestao_falhou")
         raise
 
+    # A divisao por finalidade (D27, secao 8.5.1) e criada AQUI, na ingestao,
+    # e nunca depois.
+    #
+    # Depois significaria escolher a fronteira ja tendo visto os dados, e um
+    # holdout escolhido assim nao e holdout - e uma amostra com nome bonito. O
+    # holdout nem chega a ser escolhido: ele e a reserva da D11, carvada nesta
+    # mesma funcao desde o incremento 1, e `split.criar` recusa a divisao se
+    # as fatias nao terminarem exatamente na fronteira dela.
+    from . import janelas as janelas_mod
+    from . import split as split_mod
+
+    split_mod.criar(conn, dataset_id)
+    janelas_mod.gerar(conn, dataset_id)
+
     log.info(
         "dataset.ingerido",
         extra={

@@ -63,7 +63,14 @@ class Estado(TypedDict, total=False):
     """Efemero. Vive o tempo de uma execucao do grafo e morre com ela."""
 
     run_id: int
+    # As barras que o cerebro OBSERVA. Com a divisao da D27 elas sao as de
+    # `exploracao`, e nao as mesmas em que as maos rapidas executam.
     barras: list[BarraCarregada]
+    # Quantas barras a EXECUCAO tera. E este o horizonte da conta de poder
+    # (secao 8.3): a amostra da hipotese vem de onde ela e executada, nao de
+    # onde ela foi pensada. Sem separar os dois, dividir os conjuntos faria a
+    # triagem de testabilidade passar a medir a janela errada em silencio.
+    horizonte_execucao: int
     resumo: contexto.ResumoDePeriodo
     interpretacao: Interpretacao
     proposta_bruta: PropostaBruta
@@ -272,7 +279,7 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
                     prompts.mensagem_propor(
                         resumo,
                         estado["interpretacao"],
-                        horizonte_barras=len(estado["barras"]),
+                        horizonte_barras=estado["horizonte_execucao"],
                         # O modelo precisa saber o piso ANTES de escolher o
                         # Sharpe. Sem isto ele declara um numero plausivel, a
                         # hipotese nasce nao testavel, e ele so descobre
@@ -282,7 +289,9 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
                             duracao_barra_ms=_duracao_da_barra(
                                 estado, dep.config
                             ),
-                            horizonte_barras=max(1, len(estado["barras"])),
+                            horizonte_barras=max(
+                                1, estado["horizonte_execucao"]
+                            ),
                         ),
                     ),
                 ),
@@ -370,7 +379,7 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
                 mode="json"
             ),
             duracao_barra_ms=_duracao_da_barra(estado, dep.config),
-            horizonte_barras=len(estado["barras"]),
+            horizonte_barras=estado["horizonte_execucao"],
             rule_id=rule_id,
         )
     except Exception as erro:  # noqa: BLE001
@@ -390,7 +399,7 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
                 "sharpe_declarado_milesimos": (
                     bruta.pre_registro.sharpe_esperado_milesimos
                 ),
-                "horizonte_barras": len(estado["barras"]),
+                "horizonte_barras": estado["horizonte_execucao"],
             },
         )
 
@@ -451,12 +460,29 @@ def construir(dep: Dependencias):
 
 
 def rodar(
-    dep: Dependencias, *, run_id: int, barras: list[BarraCarregada]
+    dep: Dependencias,
+    *,
+    run_id: int,
+    barras: list[BarraCarregada],
+    horizonte_execucao: int | None = None,
 ) -> Estado:
-    """Executa o grafo inteiro e devolve o estado final (que morre depois)."""
+    """Executa o grafo inteiro e devolve o estado final (que morre depois).
+
+    `horizonte_execucao` e quantas barras a execucao tera. Quando omitido,
+    supoe-se que observacao e execucao sao a mesma janela - o caso da 0A e o
+    de um dataset ainda nao dividido.
+    """
     compilado = construir(dep)
     return compilado.invoke(
-        {"run_id": run_id, "barras": barras, "eventos": []}
+        {
+            "run_id": run_id,
+            "barras": barras,
+            "horizonte_execucao": (
+                horizonte_execucao if horizonte_execucao is not None
+                else len(barras)
+            ),
+            "eventos": [],
+        }
     )
 
 

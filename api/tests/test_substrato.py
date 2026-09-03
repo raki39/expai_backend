@@ -94,7 +94,10 @@ def test_health_reporta_substrato(client: TestClient) -> None:
     assert corpo["config_version"] == 1
     assert corpo["volume_gravavel"] is True
     assert corpo["run_ativo"] is None
-    assert corpo["fase"] == "0A"
+    # A fase corrente, e nao uma constante que sobreviveu a virada. Este
+    # assert existe para o campo nao poder mudar sem alguem decidir: ele
+    # acompanha um aviso sobre o que pode ser afirmado.
+    assert corpo["fase"] == "0B"
 
 
 # -------------------------------------- criterio 12: segredo nao vaza

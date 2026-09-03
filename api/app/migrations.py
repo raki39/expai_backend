@@ -1137,6 +1137,204 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        10,
+        "incremento 9: quatro conjuntos por finalidade e o holdout selado",
+        """
+        -- ==================================================================
+        -- SEPARACAO DE DADOS POR FINALIDADE (secao 8.5.1).
+        --
+        -- A 0A tinha dois conjuntos: o que o experimento le (`bar_experimento`)
+        -- e a reserva, carvada na ingestao (D11). A secao 8.5.1 pede QUATRO:
+        --
+        --   Exploracao     | Agente               | conhecer o mercado
+        --   In-sample      | Agente e simulador   | desenvolver e ajustar
+        --   Walk-forward   | SO o Validador       | decisoes sequenciais
+        --   Holdout selado | SO o Validador       | teste final, uso unico
+        --
+        -- A reserva da D11 NAO passa a ser o holdout: ela SEMPRE foi, e agora
+        -- ganha o nome e a permissao. O corte e o mesmo `reserved_from_ms`,
+        -- intocado desde a ingestao - e um teste prova que o intervalo e
+        -- identico ao carvado la.
+        --
+        -- "A separacao e garantida pela ESTRUTURA DE DADOS e pelas permissoes
+        -- da ferramenta, nao pela disciplina do agente (...) Um holdout que
+        -- depende de boa vontade ja foi consumido." - secao 8.5.1
+        -- ==================================================================
+        CREATE TABLE dataset_split (
+            dataset_id INTEGER NOT NULL REFERENCES dataset(id),
+
+            finalidade TEXT NOT NULL
+                CHECK (finalidade IN (
+                    'exploracao', 'in_sample', 'walk_forward', 'holdout'
+                )),
+
+            -- Semiaberto [from, to): o fim de um conjunto e o inicio do
+            -- seguinte, sem barra em dois lugares nem barra em nenhum.
+            from_ms         INTEGER NOT NULL,
+            to_ms_exclusive INTEGER NOT NULL,
+            bars            INTEGER NOT NULL CHECK (bars >= 0),
+
+            -- Quem pode ler. Nao e documentacao: `carregar` recusa finalidade
+            -- cujo acesso nao inclui quem pede, e o holdout tem caminho
+            -- proprio.
+            acesso TEXT NOT NULL
+                CHECK (acesso IN ('agente', 'validador')),
+
+            PRIMARY KEY (dataset_id, finalidade),
+            CHECK (from_ms < to_ms_exclusive)
+        );
+
+        CREATE INDEX idx_split_dataset ON dataset_split(dataset_id);
+
+        CREATE TRIGGER dataset_split_sem_update
+        BEFORE UPDATE ON dataset_split
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a divisao por finalidade e fixada na ingestao: mover a fronteira depois e contaminar o conjunto do outro lado');
+        END;
+
+        CREATE TRIGGER dataset_split_sem_delete
+        BEFORE DELETE ON dataset_split
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset_split e apenas por acrescimo');
+        END;
+
+        -- O holdout nao pode ser lido pelo agente, e a marcacao vive no dado.
+        CREATE TRIGGER holdout_e_do_validador
+        BEFORE INSERT ON dataset_split
+        WHEN NEW.finalidade IN ('holdout', 'walk_forward')
+             AND NEW.acesso <> 'validador'
+        BEGIN
+            SELECT RAISE(ABORT,
+                'walk-forward e holdout sao do validador (secao 8.5.1); marca-los como do agente seria entregar a separacao a disciplina');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- A VIEW por finalidade.
+        --
+        -- Le de `bar`, e nao de `bar_experimento`: aquela ja corta a reserva,
+        -- e o holdout E a reserva. Ler dali tornaria o holdout inalcancavel
+        -- ate para o validador, e a separacao viraria ausencia.
+        --
+        -- Toda leitura por esta view CARREGA a finalidade na linha. Nao ha
+        -- como ler uma barra daqui sem saber de que conjunto ela veio.
+        -- ------------------------------------------------------------------
+        CREATE VIEW bar_por_finalidade AS
+        SELECT
+            b.dataset_id,
+            s.finalidade,
+            s.acesso,
+            b.open_time_ms,
+            b.open,
+            b.high,
+            b.low,
+            b.close,
+            b.volume,
+            b.quote_volume,
+            b.trades,
+            b.open_time_ms + d.interval_ms AS close_time_ms
+        FROM bar b
+        JOIN dataset d       ON d.id = b.dataset_id
+        JOIN dataset_split s ON s.dataset_id = b.dataset_id
+                            AND b.open_time_ms >= s.from_ms
+                            AND b.open_time_ms <  s.to_ms_exclusive;
+
+        -- ==================================================================
+        -- USO UNICO DO HOLDOUT (R28, secoes 8.4 e 8.5.1).
+        --
+        -- "Out-of-sample: reservado, usado uma unica vez por hipotese."
+        --
+        -- `UNIQUE (hypothesis_id)` e a regra inteira. Nao ha contador em
+        -- Python, nao ha flag que alguem esqueca de conferir: a SEGUNDA
+        -- leitura nao entra na tabela, e sem linha na tabela nao ha leitura.
+        --
+        -- Append-only como o resto: apagar o registro de um uso e a forma
+        -- exata de reusar o dado mais escasso do sistema sem que nada acuse.
+        -- ==================================================================
+        CREATE TABLE holdout_access (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id INTEGER NOT NULL UNIQUE REFERENCES hypothesis(id),
+            dataset_id    INTEGER NOT NULL REFERENCES dataset(id),
+            requested_at  TEXT    NOT NULL,
+
+            -- Quem pediu, e por que. A secao 8.5.1 exige que o acesso declare
+            -- finalidade e custo; o custo em creditos e cobrado no incremento
+            -- 11, e o campo ja existe para nao precisar de retrofit.
+            solicitante   TEXT    NOT NULL CHECK (solicitante = 'validador'),
+            finalidade    TEXT    NOT NULL CHECK (length(finalidade) > 0),
+            creditos      INTEGER NOT NULL CHECK (creditos >= 0),
+
+            barras_lidas  INTEGER NOT NULL CHECK (barras_lidas >= 0)
+        );
+
+        CREATE TRIGGER holdout_access_sem_update
+        BEFORE UPDATE ON holdout_access
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o registro de uso do holdout e imutavel: e ele que prova que o periodo selado foi consumido uma vez so');
+        END;
+
+        CREATE TRIGGER holdout_access_sem_delete
+        BEFORE DELETE ON holdout_access
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar o uso do holdout e reusar o dado mais escasso do sistema sem que nada acuse');
+        END;
+
+        -- ==================================================================
+        -- JANELAS DE WALK-FORWARD (R30, secoes 8.4 e 8.5.1).
+        --
+        -- Geradas, gravadas e reproduziveis. Purga e embargo sao gravados em
+        -- CADA janela e nao lidos de uma constante: se o catalogo ganhar uma
+        -- familia de lookback maior, a purga muda, e uma janela antiga tem de
+        -- continuar dizendo sob que purga ELA foi construida.
+        -- ==================================================================
+        CREATE TABLE walk_forward_window (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            dataset_id INTEGER NOT NULL REFERENCES dataset(id),
+            ordem      INTEGER NOT NULL CHECK (ordem >= 1),
+
+            treino_de_ms    INTEGER NOT NULL,
+            treino_ate_ms   INTEGER NOT NULL,
+            teste_de_ms     INTEGER NOT NULL,
+            teste_ate_ms    INTEGER NOT NULL,
+
+            purga_barras   INTEGER NOT NULL CHECK (purga_barras >= 0),
+            embargo_barras INTEGER NOT NULL CHECK (embargo_barras >= 0),
+
+            -- De onde a purga saiu. Sem isto, "purga 400" nao diz se veio do
+            -- catalogo ou de alguem digitando - e o numero para de descrever
+            -- no dia em que o catalogo mudar.
+            purga_origem TEXT NOT NULL CHECK (length(purga_origem) > 0),
+
+            created_at TEXT NOT NULL,
+
+            UNIQUE (dataset_id, ordem),
+
+            -- Treino termina ANTES do teste comecar, sempre. O intervalo
+            -- entre os dois e a purga mais o embargo.
+            CHECK (treino_de_ms  < treino_ate_ms),
+            CHECK (teste_de_ms   < teste_ate_ms),
+            CHECK (treino_ate_ms <= teste_de_ms)
+        );
+
+        CREATE INDEX idx_wf_dataset ON walk_forward_window(dataset_id, ordem);
+
+        CREATE TRIGGER walk_forward_window_sem_update
+        BEFORE UPDATE ON walk_forward_window
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela de walk-forward e imutavel: mover a fronteira depois de ver o resultado e o vazamento que ela existe para impedir');
+        END;
+
+        CREATE TRIGGER walk_forward_window_sem_delete
+        BEFORE DELETE ON walk_forward_window
+        BEGIN
+            SELECT RAISE(ABORT, 'walk_forward_window e apenas por acrescimo');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

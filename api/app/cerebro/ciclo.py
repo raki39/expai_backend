@@ -118,10 +118,37 @@ def rodar(
     settings: Settings,
     adaptador: Any | None = None,
 ) -> ResultadoDoCiclo:
-    """Abre um run proprio, roda o ciclo inteiro e o encerra."""
-    barras = executor.carregar_janela(conn, dataset_id)
+    """Abre um run proprio, roda o ciclo inteiro e o encerra.
+
+    **Duas janelas, e nao uma** (D27, secao 8.5.1). O cerebro observa
+    `exploracao` - "conhecer o mercado e formular hipoteses" - e as maos
+    rapidas executam sobre `in_sample` - "desenvolver e ajustar estrategias".
+
+    Isso REVISA a D22, que dizia "o cerebro observa a mesma janela que
+    executa". Aquela decisao foi tomada na 0A porque nao havia separacao: a
+    unica alternativa honesta era declarar a sobreposicao em vez de fingir que
+    ela nao existia. Com os quatro conjuntos, a separacao existe, e manter a
+    sobreposicao seria escolher o resultado em amostra tendo a alternativa na
+    mao.
+
+    `sobreposicao_amostral` continua sendo calculada e gravada, e agora ela
+    deve dar **zero**. E numero, nao prosa - se algum dia voltar a ser maior
+    que zero, alguem juntou os conjuntos de novo e o campo acusa.
+    """
+    barras_de_observacao = executor.carregar_janela(
+        conn, dataset_id, finalidade="exploracao"
+    )
+    barras = executor.carregar_janela(
+        conn, dataset_id, finalidade=executor.FINALIDADE_DE_EXECUCAO
+    )
     if not barras:
         raise ValueError("janela vazia: nao ha o que observar nem executar")
+    if not barras_de_observacao:
+        # Dataset anterior a divisao (incremento 9). O fallback do loader ja
+        # devolveu a janela inteira em `barras`; observar a mesma coisa e o
+        # comportamento da 0A, e e o unico honesto quando nao ha conjunto de
+        # exploracao para observar.
+        barras_de_observacao = barras
 
     run_id, _ = livro.abrir_run(
         conn,
@@ -132,7 +159,14 @@ def rodar(
     dep = grafo.Dependencias(
         conn=conn, config=config, settings=settings, adaptador=adaptador
     )
-    estado = grafo.rodar(dep, run_id=run_id, barras=barras)
+    estado = grafo.rodar(
+        dep,
+        run_id=run_id,
+        barras=barras_de_observacao,
+        # O horizonte da conta de poder e o da EXECUCAO, e nao o da
+        # observacao: a amostra da hipotese vem de onde ela roda.
+        horizonte_execucao=len(barras),
+    )
 
     ativa = propostas.regra_ativa(conn, run_id)
     if ativa is not None:

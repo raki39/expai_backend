@@ -35,7 +35,10 @@ from ..config.service import (
     TetoExcedido,
 )
 from ..dataset import ingest as dataset_ingest
+from ..dataset import janelas as dataset_janelas
 from ..dataset import loader as dataset_loader
+from ..dataset import selado as dataset_selado
+from ..dataset import split as dataset_split
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..ledger import livro
@@ -110,10 +113,15 @@ def health(request: Request) -> dict[str, Any]:
             "anthropic": bool(settings.anthropic_api_key.get_secret_value()),
             "openai": bool(settings.openai_api_key.get_secret_value()),
         },
-        "fase": "0A",
+        # A fase vem daqui e de nenhum outro lugar. Ficou em "0A" por um
+        # commit depois de a 0B abrir, que e a nona vez que um valor deste
+        # projeto para de descrever o que diz - e este seria dos piores, porque
+        # o aviso que o acompanha e sobre o que pode ser afirmado.
+        "fase": "0B",
         "aviso": (
-            "Fase 0A. Nenhuma conclusao estatistica. Nenhum conhecimento "
-            "promovido."
+            "Fase 0B. O Portao A e o produto da fase; conclusao estatistica "
+            "so pelo validador independente, e 'inconclusivo' nunca vira "
+            "'sucesso'. Nenhuma aprovacao autoriza capital real."
         ),
     }
 
@@ -287,6 +295,40 @@ def dataset_atual(request: Request) -> dict[str, Any]:
     if meta is None:
         return {"existe": False, "aviso": "dataset ainda nao ingerido"}
     return {"existe": True, **dataset_loader.resumo(_conn(request), meta.id)}
+
+
+@router.get("/separacao")
+def separacao_de_dados(request: Request) -> dict[str, Any]:
+    """Os quatro conjuntos, as janelas de walk-forward e o uso do holdout.
+
+    Existe para que a divisao seja OLHAVEL. Uma `dataset_split` que ninguem
+    consulta seria uma tabela declarada e nunca lida - o padrao que este
+    projeto ja registrou oito vezes, e que aqui esconderia justamente a
+    barreira que a fase inteira depende de ter.
+
+    **Nao devolve barra nenhuma**, de nenhum conjunto: so onde cada um comeca,
+    quantas barras tem e quem pode le-lo. Mostrar uma barra do holdout aqui
+    seria vaza-lo pela porta da frente.
+    """
+    conn = _conn(request)
+    meta = dataset_loader.dataset_vigente(conn)
+    if meta is None:
+        return {"existe": False, "aviso": "dataset ainda nao ingerido"}
+    return {
+        "existe": True,
+        **dataset_split.resumo(conn, meta.id),
+        "janelas_walk_forward": [
+            j.como_dict() for j in dataset_janelas.ler(conn, meta.id)
+        ],
+        "sem_vazamento": dataset_janelas.conferir_sem_vazamento(conn, meta.id),
+        "holdout": {
+            "usos": dataset_selado.usos_do_holdout(conn, meta.id),
+            "regra": (
+                "uso unico por hipotese, imposto por UNIQUE no banco"
+                " (R28, secao 8.4)"
+            ),
+        },
+    }
 
 
 @router.post("/dataset/ingest", status_code=status.HTTP_201_CREATED)

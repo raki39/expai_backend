@@ -12,9 +12,13 @@ esquecer (criterios 4 e 5 do incremento 1, secao 8.4.1.2):
    clausula WHERE. Nao ha valor padrao, porque padrao e a forma mais comum de
    esquecer.
 
-Nao existe funcao neste modulo que leia o periodo reservado. Avaliar contra
-holdout e Fase 0B (secao 8.5.1); construir o acesso agora seria deixar pronta
-a tentacao de olhar.
+3. **Toda leitura declara FINALIDADE** (R26, incremento 9). `acesso =
+   'agente'` entra como LITERAL na consulta, nunca como parametro: nao existe
+   argumento capaz de fazer este modulo devolver walk-forward ou holdout.
+
+Nao existe funcao neste modulo que leia o periodo selado. Walk-forward e
+holdout tem caminho proprio em `selado.py`, com uso unico por hipotese imposto
+por `UNIQUE` no banco (secao 8.5.1, R28).
 """
 
 from __future__ import annotations
@@ -82,9 +86,29 @@ def dataset_vigente(conn: sqlite3.Connection) -> MetadadosDataset | None:
     return metadados(conn, int(linha["id"]))
 
 
-# A consulta e uma constante de modulo de proposito: fica evidente em revisao
-# que a leitura vem de `bar_experimento` e nunca de `bar`.
-_SQL = """
+# As consultas sao constantes de modulo de proposito: fica evidente em revisao
+# de onde a leitura vem.
+#
+# `acesso = 'agente'` e LITERAL, nunca parametro. Nao existe argumento capaz
+# de fazer esta consulta devolver walk-forward ou holdout - pelo mesmo motivo
+# que nao existe argumento capaz de fazer `bar_experimento` devolver a
+# reserva. E a fronteira morando na estrutura, como a secao 8.5.1 exige.
+_SQL_AGENTE = """
+SELECT open_time_ms, close_time_ms, open, high, low, close,
+       volume, quote_volume, trades
+FROM bar_por_finalidade
+WHERE dataset_id = :dataset_id
+  AND acesso = 'agente'
+  AND finalidade = :finalidade
+  AND close_time_ms <= :decision_ts_ms
+ORDER BY open_time_ms
+"""
+
+# Compatibilidade com dataset ainda nao dividido. A divisao e criada na
+# ingestao a partir do incremento 9; datasets ingeridos antes dele nao tem
+# `dataset_split`, e recusar a leitura deles quebraria a reproducao de todo
+# run da 0A - que precisa continuar reproduzivel exatamente como foi (R12).
+_SQL_SEM_DIVISAO = """
 SELECT open_time_ms, close_time_ms, open, high, low, close,
        volume, quote_volume, trades
 FROM bar_experimento
@@ -94,14 +118,31 @@ ORDER BY open_time_ms
 """
 
 
+def esta_dividido(conn: sqlite3.Connection, dataset_id: int) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM dataset_split WHERE dataset_id = ? LIMIT 1",
+            (dataset_id,),
+        ).fetchone()
+    )
+
+
 def carregar(
     conn: sqlite3.Connection,
     dataset_id: int,
     *,
     decision_ts_ms: int,
+    finalidade: str,
     ultimas: int | None = None,
 ) -> list[BarraCarregada]:
     """Barras visiveis para uma decisao tomada em `decision_ts_ms`.
+
+    `finalidade` e OBRIGATORIA (R26): toda leitura declara de que conjunto
+    esta lendo. Nao ha valor padrao, pelo mesmo motivo que `decision_ts_ms`
+    nao tem - padrao e a forma mais comum de esquecer.
+
+    Este caminho e o do AGENTE, e so alcanca `exploracao` e `in_sample`.
+    Walk-forward e holdout tem caminho proprio, em `selado.py`.
 
     Por que o corte e `close_time_ms <= decision_ts_ms`, e nao
     `open_time_ms <= decision_ts_ms`:
@@ -110,16 +151,28 @@ def carregar(
     minima e fechamento desconhecidos naquele instante. Devolve-la seria
     entregar justamente o dado futuro que o criterio 5 existe para impedir -
     e do jeito mais dificil de perceber, porque a barra parece legitima.
-
-    O criterio literal pede "nao retornar barra com timestamp maior que o
-    decision_ts". Esta versao e mais restritiva e o satisfaz.
     """
     if ultimas is not None and ultimas <= 0:
         raise ValueError("`ultimas` precisa ser positivo quando informado")
 
-    linhas = conn.execute(
-        _SQL, {"dataset_id": dataset_id, "decision_ts_ms": decision_ts_ms}
-    ).fetchall()
+    from .split import exigir_do_agente
+
+    exigir_do_agente(finalidade)
+
+    if esta_dividido(conn, dataset_id):
+        linhas = conn.execute(
+            _SQL_AGENTE,
+            {
+                "dataset_id": dataset_id,
+                "finalidade": finalidade,
+                "decision_ts_ms": decision_ts_ms,
+            },
+        ).fetchall()
+    else:
+        linhas = conn.execute(
+            _SQL_SEM_DIVISAO,
+            {"dataset_id": dataset_id, "decision_ts_ms": decision_ts_ms},
+        ).fetchall()
 
     barras = [BarraCarregada(*tuple(linha)) for linha in linhas]
     # O recorte e feito DEPOIS da ordenacao, no fim da serie: "as N ultimas
@@ -132,6 +185,7 @@ def carregar(
         "dataset.carregado",
         extra={
             "dataset_id": dataset_id,
+            "finalidade": finalidade,
             "decision_ts_ms": decision_ts_ms,
             "barras": len(barras),
         },
