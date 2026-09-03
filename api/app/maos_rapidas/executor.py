@@ -93,6 +93,48 @@ def idas_e_voltas(conn: sqlite3.Connection, run_id: int) -> int:
     )
 
 
+def barras_expostas(
+    conn: sqlite3.Connection, run_id: int, duracao_barra_ms: int
+) -> int:
+    """Em quantas barras o run esteve com posicao aberta.
+
+    E o `n_bruto` da conta de poder (secao 8.3), e nao o total de barras da
+    janela. Uma estrategia que fica fora do mercado 95% do tempo nao produziu
+    observacoes sobre a propria vantagem nessas barras: ela produziu zeros.
+    Contar a janela inteira afirmaria vinte vezes mais amostra do que existe,
+    exatamente na direcao de aprovar.
+
+    Long/flat (D1): ha no maximo uma posicao aberta, entao basta parear cada
+    compra com a venda seguinte. Um run que termina COMPRADO tem a ultima
+    exposicao contada ate a ultima execucao registrada - nao ate o fim da
+    janela, porque depois dela nao ha preco observado neste run.
+    """
+    if duracao_barra_ms <= 0:
+        raise ValueError("duracao de barra precisa ser positiva")
+    linhas = [
+        (int(l["execution_bar_ms"]), l["side"])
+        for l in conn.execute(
+            "SELECT execution_bar_ms, side FROM execution"
+            " WHERE run_id = ? ORDER BY execution_bar_ms, id",
+            (run_id,),
+        )
+    ]
+    if not linhas:
+        return 0
+    ultima_ms = linhas[-1][0]
+    total_ms = 0
+    aberta_em: int | None = None
+    for quando, lado in linhas:
+        if lado == "compra" and aberta_em is None:
+            aberta_em = quando
+        elif lado == "venda" and aberta_em is not None:
+            total_ms += quando - aberta_em
+            aberta_em = None
+    if aberta_em is not None:
+        total_ms += ultima_ms - aberta_em
+    return total_ms // duracao_barra_ms
+
+
 def digest_do_run(conn: sqlite3.Connection, run_id: int) -> str:
     """Hash da sequencia ordenada de lancamentos do run (criterio 2).
 

@@ -23,15 +23,22 @@ afirmacao, e este projeto ja registrou cinco vezes o que acontece quando um
 valor para de descrever o que dizia. O leitor chega ao declarado seguindo a
 aresta - que e justamente o vinculo que a R25.3 exige que exista.
 
-Nao emite veredito sobre a expectativa. `expectativa` e texto livre em
-linguagem natural ("espero entre 3 e 8 operacoes"); julgar se ela se cumpriu
-exigiria uma nova inferencia, e a 0A nao promove conhecimento (regra 12). O
-campo `veredito_da_expectativa` existe e vale `None`, com o motivo escrito ao
-lado - um `False` ali seria afirmacao que ninguem calculou.
+Nao copia o pre-registro. Vale o mesmo motivo: ele vive na hipotese, que e
+imutavel, e o leitor chega la pela aresta.
 
-O que **e** comparado deterministicamente e o que a 0A usa como regua: onde o
-resultado caiu em relacao ao acaso com o mesmo giro e o mesmo dimensionamento
-(regra 14 - desempenho sempre como excesso sobre baseline).
+## O veredito, que na 0A nao existia
+
+A 0A fechou com `veredito_da_expectativa = None` e o motivo por extenso: a
+expectativa era texto livre ("espero entre 3 e 8 operacoes"), julgar se ela se
+cumpriu exigiria nova inferencia, e a 0A nao promovia conhecimento. Aquele
+`None` era a resposta certa para o campo que existia.
+
+Na 0B o campo e outro. O pre-registro da secao 8.2 traz `efeito_minimo` e
+`condicoes_falseamento` **estruturados e declarados antes da execucao**, e o
+veredito passa a ser uma comparacao - `hipotese.veredito.emitir`, derivada,
+com os tres valores da secao 14.4 mais o `None` de quando nao se sabe.
+
+O que continua verdade: nada aqui e escrito a mao, e `None` nao e `False`.
 """
 
 from __future__ import annotations
@@ -41,7 +48,12 @@ import logging
 import sqlite3
 
 from ..config.schema import ExperimentConfig
+from ..hipotese import poder
+from ..hipotese import registro as hipotese_registro
+from ..hipotese import veredito as veredito_mod
+from ..hipotese.schema import PreRegistroBruto
 from ..ledger.livro import fx_micro, registrar_custo_reflexao
+from ..maos_rapidas import executor
 from ..simulador import execucao as simulador
 
 log = logging.getLogger(__name__)
@@ -50,9 +62,13 @@ log = logging.getLogger(__name__)
 # for renomeado, e aqui que a busca falha - e nao silenciosamente na aresta.
 NO_DA_DECISAO = "registrar_intencao"
 
-MOTIVO_SEM_VEREDITO = (
-    "a expectativa e texto livre; julgar se ela se cumpriu exigiria nova"
-    " inferencia, e a 0A nao promove conhecimento (regra 12)"
+# Continua existindo, e continua sendo a resposta certa QUANDO E O CASO: um
+# run sem pre-registro (o da regra padrao da D23, por exemplo) nao tem o que
+# julgar. O que mudou e que ele deixou de ser a unica resposta possivel.
+MOTIVO_SEM_PRE_REGISTRO = (
+    "este run nao tem pre-registro: a regra veio do padrao (D23) e nenhuma"
+    " hipotese foi declarada, entao nao ha efeito minimo nem condicao de"
+    " falseamento contra o que julgar"
 )
 
 
@@ -91,6 +107,69 @@ def faixa_contra_o_acaso(patrimonio_cents: int, b1: dict | None) -> str:
     return "acima_p95"
 
 
+def _veredito_do_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    patrimonio_cents: int,
+    idas_e_voltas: int,
+    b1_casado: dict | None,
+    retornos_bps: list[int],
+    duracao_barra_ms: int,
+) -> dict:
+    """Monta o bloco de veredito. Derivado, ponta a ponta.
+
+    Sem pre-registro nao ha veredito, e o motivo fica escrito - continua
+    valendo o desenho da 0A: `None` com a razao ao lado, nunca um `False` que
+    ninguem calculou.
+    """
+    hip = hipotese_registro.do_run(conn, run_id)
+    if hip is None:
+        return {
+            "veredito": None,
+            "motivo": MOTIVO_SEM_PRE_REGISTRO,
+            "hypothesis_id": None,
+        }
+
+    bruto = PreRegistroBruto.model_validate(
+        {
+            "enunciado": hip["enunciado"],
+            "metrica_primaria": hip["metrica_primaria"],
+            "efeito_minimo": hip["efeito_minimo"],
+            "sharpe_esperado_milesimos": hip["sharpe_esperado_milesimos"],
+            "criterio_parada": hip["criterio_parada"],
+            "condicoes_falseamento": hip["condicoes_falseamento"],
+        }
+    )
+
+    # `n_bruto` sao as barras em que houve POSICAO, nao as da janela: barra
+    # fora do mercado nao observa nada sobre a vantagem da regra.
+    bruto_n = executor.barras_expostas(conn, run_id, duracao_barra_ms)
+    efetivo = poder.efetivo_de_bruto(retornos_bps, bruto_n)
+
+    realizado = veredito_mod.observar(
+        conn,
+        run_id=run_id,
+        patrimonio_cents=patrimonio_cents,
+        idas_e_voltas=idas_e_voltas,
+        b1_casado=b1_casado,
+    )
+    v = veredito_mod.emitir(
+        bruto,
+        realizado,
+        n_efetivo=efetivo.efetivo,
+        n_minimo=hip["n_minimo"],
+    )
+    saida = v.como_dict()
+    saida["hypothesis_id"] = hip["id"]
+    saida["testavel"] = hip["testavel"]
+    saida["amostra"]["n_bruto"] = efetivo.bruto
+    saida["amostra"]["autocorrelacao_ppm"] = efetivo.autocorrelacao_ppm
+    saida["amostra"]["fator_ppm"] = efetivo.fator_ppm
+    saida["metricas_indisponiveis"] = realizado.indisponiveis
+    return saida
+
+
 def registrar(
     conn: sqlite3.Connection,
     *,
@@ -99,6 +178,8 @@ def registrar(
     b1_casado: dict | None,
     operacoes: int,
     reflexoes: int,
+    retornos_bps: list[int] | None = None,
+    duracao_barra_ms: int = 900_000,
 ) -> int | None:
     """Emite o evento de avaliacao. Devolve o id, ou `None` se nao ha o que avaliar.
 
@@ -112,12 +193,23 @@ def registrar(
 
     patrimonio = simulador.caixa_cents(conn, run_id)
     faixa = faixa_contra_o_acaso(patrimonio, b1_casado)
+    idas = executor.idas_e_voltas(conn, run_id)
+    julgamento = _veredito_do_run(
+        conn,
+        run_id=run_id,
+        patrimonio_cents=patrimonio,
+        idas_e_voltas=idas,
+        b1_casado=b1_casado,
+        retornos_bps=retornos_bps or [],
+        duracao_barra_ms=duracao_barra_ms,
+    )
 
     payload = {
         "declarado_no_evento": pai,
         "realizado": {
             "patrimonio_final_cents": patrimonio,
             "operacoes": operacoes,
+            "idas_e_voltas": idas,
             "reflexoes": reflexoes,
         },
         "contra_o_acaso": (
@@ -133,8 +225,10 @@ def registrar(
             else None
         ),
         "faixa": faixa,
-        "veredito_da_expectativa": None,
-        "por_que_sem_veredito": MOTIVO_SEM_VEREDITO,
+        # O julgamento do pre-registro (secao 8.2), derivado. Substitui o
+        # `veredito_da_expectativa: None` da 0A, que existia porque a
+        # expectativa era prosa.
+        "pre_registro": julgamento,
         "em_amostra": True,
     }
 
@@ -152,7 +246,13 @@ def registrar(
     )
     log.info(
         "avaliacao.registrada",
-        extra={"run_id": run_id, "event_id": event_id, "pai": pai, "faixa": faixa},
+        extra={
+            "run_id": run_id,
+            "event_id": event_id,
+            "pai": pai,
+            "faixa": faixa,
+            "veredito": julgamento.get("veredito"),
+        },
     )
     return event_id
 

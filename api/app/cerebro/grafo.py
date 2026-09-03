@@ -28,6 +28,8 @@ from pydantic import ValidationError
 
 from ..config.schema import ExperimentConfig
 from ..dataset.loader import BarraCarregada
+from ..hipotese import poder
+from ..hipotese import registro as hipotese_registro
 from ..ledger.livro import fx_micro, registrar_custo_reflexao
 from ..regra import registro as registro_de_regra
 from ..regra.schema import CruzamentoMedias, Regra
@@ -68,6 +70,7 @@ class Estado(TypedDict, total=False):
     regra: Regra
     rule_id: int
     proposal_id: int
+    hypothesis_id: int
     eventos: list[int]
     parou_em: str | None
     motivo: str | None
@@ -87,6 +90,26 @@ class Dependencias:
     config: ExperimentConfig
     settings: Settings
     adaptador: Any | None = None
+
+
+def _duracao_da_barra(estado: Estado, config: ExperimentConfig) -> int:
+    """Quanto dura uma barra, em ms, lido das BARRAS e nao do rotulo.
+
+    A ingestao ja exige que barras consecutivas difiram de exatamente um
+    intervalo - e a armadilha de unidade de timestamp registrada em
+    `.aprendizado/binance-dados-notas.md` mostra que contagem de linha nao
+    detecta o erro, mas espacamento detecta. Ler daqui e ler da mesma fonte
+    que a conta de poder vai usar.
+
+    Cai para o rotulo do timeframe so quando ha menos de duas barras, caso em
+    que nao existe espacamento a medir.
+    """
+    barras = estado.get("barras") or []
+    if len(barras) >= 2:
+        return int(barras[1].open_time_ms - barras[0].open_time_ms)
+    from ..dataset.binance import intervalo_ms
+
+    return intervalo_ms(config.timeframe)
 
 
 def regra_padrao(config: ExperimentConfig) -> Regra:
@@ -244,7 +267,25 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
             tier=TIER,
             sistema=prompts.SISTEMA,
             mensagens=(
-                ("user", prompts.mensagem_propor(resumo, estado["interpretacao"])),
+                (
+                    "user",
+                    prompts.mensagem_propor(
+                        resumo,
+                        estado["interpretacao"],
+                        horizonte_barras=len(estado["barras"]),
+                        # O modelo precisa saber o piso ANTES de escolher o
+                        # Sharpe. Sem isto ele declara um numero plausivel, a
+                        # hipotese nasce nao testavel, e ele so descobre
+                        # depois de ja ter proposto - que e o oposto do que a
+                        # secao 8.3 pede ao mandar triar no pre-registro.
+                        sharpe_minimo_milesimos=poder.sharpe_minimo_testavel(
+                            duracao_barra_ms=_duracao_da_barra(
+                                estado, dep.config
+                            ),
+                            horizonte_barras=max(1, len(estado["barras"])),
+                        ),
+                    ),
+                ),
             ),
             schema=SCHEMA_PROPOSTA,
             schema_nome="proposta_de_regra",
@@ -317,9 +358,40 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
             observado_de_ms=resumo.de_ms,
             observado_ate_ms=resumo.ate_ms,
         )
+        # O pre-registro da secao 8.2, gravado ANTES da execucao e imutavel a
+        # partir daqui. Mesmo momento em que a intencao ja era declarada na
+        # 0A - o que mudou e que agora ela e computavel.
+        hypothesis_id, testavel = hipotese_registro.registrar(
+            dep.conn,
+            run_id=estado["run_id"],
+            agent_event_id=evento_da_proposta,
+            bruto=bruta.pre_registro,
+            condicoes_validade=condicoes_da_config(dep.config).model_dump(
+                mode="json"
+            ),
+            duracao_barra_ms=_duracao_da_barra(estado, dep.config),
+            horizonte_barras=len(estado["barras"]),
+            rule_id=rule_id,
+        )
     except Exception as erro:  # noqa: BLE001
         return _parar(
             estado, dep, "registrar_intencao", f"{type(erro).__name__}: {erro}"
+        )
+
+    if not testavel:
+        # Registrada, nao promovida, e o run continua (D33, ADR 0020). O
+        # veredito dela ja esta selado como `inconclusiva`: `n_efetivo` nunca
+        # alcanca um `n_minimo` maior que o horizonte inteiro.
+        log.warning(
+            "hipotese.nao_testavel",
+            extra={
+                "run_id": estado["run_id"],
+                "hypothesis_id": hypothesis_id,
+                "sharpe_declarado_milesimos": (
+                    bruta.pre_registro.sharpe_esperado_milesimos
+                ),
+                "horizonte_barras": len(estado["barras"]),
+            },
         )
 
     event_id = _evento(
@@ -340,6 +412,7 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
     return {
         "rule_id": rule_id,
         "proposal_id": proposal_id,
+        "hypothesis_id": hypothesis_id,
         "eventos": [*(estado.get("eventos") or []), event_id],
     }
 

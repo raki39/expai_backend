@@ -235,13 +235,116 @@ def test_a_avaliacao_nao_copia_a_expectativa_declarada(
     assert lido["decisao"]["confianca_ppm"] is not None
 
 
-def test_a_avaliacao_nao_inventa_veredito_sobre_texto_livre(
+def test_a_avaliacao_emite_veredito_sobre_o_pre_registro(
     conn: sqlite3.Connection, run_do_agente
 ) -> None:
-    """`None` com motivo escrito, e nao `False` que ninguem calculou."""
+    """O que a 0A nao conseguia fazer, e por que agora consegue.
+
+    Este teste substitui o `test_a_avaliacao_nao_inventa_veredito_sobre_texto_livre`
+    da 0A, que exigia `veredito_da_expectativa is None`. Aquela exigencia
+    estava certa enquanto a expectativa era prosa: julga-la pediria nova
+    inferencia. Com o pre-registro da secao 8.2 o veredito e uma comparacao
+    entre numeros declarados antes da execucao, e emiti-lo deixou de ser
+    invencao - passou a ser conta.
+
+    O que **nao** mudou e que `None` continua sendo um valor possivel e
+    continua vindo com motivo escrito. Ver os dois testes seguintes.
+    """
     lido = avaliacao.do_run(conn, run_do_agente.run_id)
-    assert lido["comparacao"]["veredito_da_expectativa"] is None
-    assert "regra 12" in lido["comparacao"]["por_que_sem_veredito"]
+    pr = lido["comparacao"]["pre_registro"]
+
+    assert pr["hypothesis_id"] is not None, "o run declarou um pre-registro"
+    assert pr["veredito"] in ("sustentada", "refutada", "inconclusiva")
+    assert pr["motivo"], "veredito sem motivo e afirmacao sem procedencia"
+
+    # Derivado, nao escrito: as tres partes que o produziram estao visiveis.
+    assert pr["efeito"]["minimo_declarado"] is not None
+    assert pr["amostra"]["n_minimo"] > 0
+    assert pr["condicoes_falseamento"], "secao 8.2: falseamento e obrigatorio"
+
+
+def test_veredito_e_none_quando_uma_condicao_nao_pode_ser_conferida(
+    conn: sqlite3.Connection,
+) -> None:
+    """Nao conferir uma condicao de refutacao impede QUALQUER veredito.
+
+    Inclusive o negativo: dizer "refutada por outra clausula" tambem
+    afirmaria ter conferido o conjunto. O caminho em que isso apareceria em
+    producao e mudo - o veredito sairia e a clausula ficaria por conferir.
+    """
+    from app.hipotese import veredito as v
+    from app.hipotese.schema import PreRegistroBruto
+
+    pre = PreRegistroBruto.model_validate(
+        {
+            "enunciado": "supera o buy and hold",
+            "metrica_primaria": "excesso_sobre_b2_cents",
+            "efeito_minimo": 100,
+            "sharpe_esperado_milesimos": 2_000,
+            "criterio_parada": "fim_da_janela",
+            "condicoes_falseamento": [
+                {
+                    "metrica": "excesso_sobre_b2_cents",
+                    "comparador": "menor_que",
+                    "valor": 100,
+                }
+            ],
+        }
+    )
+    realizado = v.Realizado(
+        valores={"patrimonio_final_cents": 100_000},
+        indisponiveis={"excesso_sobre_b2_cents": "B2 nao foi executado"},
+    )
+    resultado = v.emitir(pre, realizado, n_efetivo=10_000, n_minimo=100)
+
+    assert resultado.veredito is None, "None nao e False"
+    assert "nao pode conferir" in resultado.motivo
+    assert "B2 nao foi executado" in resultado.motivo
+
+
+def test_falta_de_amostra_e_inconclusiva_e_nunca_refutada(
+    conn: sqlite3.Connection,
+) -> None:
+    """Secao 14.4: tratar os dois como a mesma coisa e descartar por impaciencia.
+
+    O efeito ficou abaixo do minimo, mas nenhuma condicao de falseamento
+    disparou e a amostra nao chegou. Chamar isso de refutacao seria o erro
+    simetrico ao de promover ruido.
+    """
+    from app.hipotese import veredito as v
+    from app.hipotese.schema import PreRegistroBruto
+
+    pre = PreRegistroBruto.model_validate(
+        {
+            "enunciado": "bate a mediana do acaso",
+            "metrica_primaria": "excesso_sobre_b1_p50_cents",
+            "efeito_minimo": 5_000,
+            "sharpe_esperado_milesimos": 2_000,
+            "criterio_parada": "fim_da_janela",
+            "condicoes_falseamento": [
+                {
+                    "metrica": "excesso_sobre_b1_p50_cents",
+                    "comparador": "menor_que",
+                    "valor": 5_000,
+                }
+            ],
+        }
+    )
+    # Efeito abaixo do minimo declarado, e portanto a clausula obrigatoria
+    # sobre a metrica primaria DISPAROU. Ela e estatistica, entao a amostra
+    # decide se ha o que afirmar a partir dela.
+    realizado = v.Realizado(valores={"excesso_sobre_b1_p50_cents": 10})
+
+    curta = v.emitir(pre, realizado, n_efetivo=10, n_minimo=1_000)
+    assert curta.veredito == "inconclusiva"
+    assert "nao pode ser citada como evidencia de sucesso" in curta.motivo
+
+    # A MESMA observacao, com amostra suficiente, vira refutacao. O que mudou
+    # nao foi o numero: foi haver base para afirmar a partir dele.
+    longa = v.emitir(pre, realizado, n_efetivo=2_000, n_minimo=1_000)
+    assert longa.veredito == "refutada"
+    assert "amostra suficiente" in longa.motivo
+    assert "excesso_sobre_b1_p50_cents < 5000" in longa.motivo
 
 
 def test_sem_expectativa_declarada_nao_ha_avaliacao(

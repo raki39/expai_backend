@@ -124,7 +124,7 @@ grandes pode valer mais que uma regra que acerta a direcao com frequencia.
 
 Estas sao as tres unicas familias que existem. Nao ha uma quarta, nao ha
 combinacao entre elas, nao ha indicador novo, nao ha condicao adicional. Se
-nenhuma servir, escolha a menos ruim e diga isso na expectativa - propor algo
+nenhuma servir, escolha a menos ruim e diga isso no enunciado - propor algo
 fora do catalogo faz a proposta inteira ser rejeitada e nada ser executado.
 
 {_catalogo()}
@@ -158,29 +158,70 @@ parametro que a familia escolhida nao usa precisa vir NULO - mandar um
 parametro de outra familia junto faz a proposta ser rejeitada, porque
 significa que a familia nao foi de fato escolhida.
 
-A expectativa e declarada ANTES de qualquer execucao e nunca sera editada
-depois. Ela e o registro do que voce esperava, e sera comparada com o que
-aconteceu como um evento novo, ao lado dela. Escreva o que voce realmente
-espera, com o numero do resumo que sustenta essa expectativa - inclusive se o
-que voce espera for um resultado ruim.
-
 A confianca e em partes por milhao: 500000 significa 50%. Ela nao e um enfeite
 e nao ha premio por ser alta. Confianca alta numa regra que perde e o pior
 resultado possivel para este experimento; confianca baixa declarada
 honestamente e informacao util.
 
-## O que faz uma expectativa util
+## O pre-registro: o que voce declara antes de ver qualquer resultado
 
-Uma expectativa util e **falsificavel**: alguem que veja o resultado depois
-tem de conseguir dizer se ela se cumpriu ou nao, sem interpretar. Ela deve
-dizer, em uma ou duas frases, mais ou menos quantas operacoes voce espera que
-a regra faca no periodo, e como voce espera que ela se saia perto da mediana
-das entradas ao acaso com esse mesmo numero de operacoes.
+Junto da regra voce declara um **pre-registro**. Ele e gravado ANTES da
+execucao e **nunca pode ser editado** - nem por voce, nem por ninguem. Isso
+existe por um motivo unico: impedir que a regua seja ajustada depois de o
+resultado aparecer. Um veredito sera calculado contra o que voce escrever
+aqui, automaticamente, sem interpretacao humana.
 
-"Espera-se bom desempenho" nao e expectativa, e torcida. "Cerca de 300
+Os campos:
+
+- **`enunciado`** - a afirmacao falsificavel, em uma ou duas frases: o que
+  esta regra deve produzir e por que, citando o numero do resumo que sustenta
+  a afirmacao. Escreva o que voce realmente espera, inclusive se for um
+  resultado ruim.
+- **`metrica_primaria`** - UMA metrica, e uma so. E por ela que a hipotese
+  sera julgada; as outras nao contam.
+- **`efeito_minimo`** - o piso abaixo do qual o resultado, ainda que positivo,
+  nao teria valido o custo. **Nao e o resultado esperado**, e o menor
+  resultado que ainda importaria.
+- **`sharpe_esperado_milesimos`** - leia a proxima secao antes de escolher.
+- **`criterio_parada`** - quando o teste desta hipotese termina.
+- **`condicoes_falseamento`** - o que precisaria ser OBSERVADO para considerar
+  a hipotese falsa. Ao menos uma condicao, e ao menos uma delas incidindo
+  sobre a metrica primaria, com comparador `menor_que` e valor maior ou igual
+  ao efeito minimo. **Uma hipotese que nada observavel refutaria nao entra.**
+
+"Espera-se bom desempenho" nao e enunciado, e torcida. "Cerca de 300
 operacoes, e provavelmente abaixo da mediana do acaso, porque a amplitude
-tipica da barra nao cobre o custo de giro" e uma expectativa - e uma que pode
-estar certa e ser util mesmo prevendo um resultado ruim.
+tipica da barra nao cobre o custo de giro" e um enunciado - e um que pode
+estar certo e ser util mesmo prevendo um resultado ruim.
+
+## O Sharpe declarado decide se a hipotese e testavel
+
+De `sharpe_esperado_milesimos` sai a amostra minima necessaria, pela relacao
+`t ~= Sharpe_anualizado x raiz(anos de observacao)`. Para `t > 2`:
+
+| Sharpe declarado | Observacao necessaria |
+|---|---|
+| 0,5 | ~16 anos |
+| 1,0 | ~4 anos |
+| 2,0 | ~1 ano |
+| 3,0 | ~5 meses |
+
+Duas consequencias, e as duas sao suas:
+
+**Declarar Sharpe alto pede menos amostra e torna a hipotese mais facil de
+testar - e mais facil de refutar.** Nao ha vantagem em inflar: um Sharpe que
+o resultado nao sustenta produz refutacao, nao aprovacao.
+
+**Declarar Sharpe baixo demais para a janela disponivel torna a hipotese NAO
+TESTAVEL.** Ela e registrada e executada assim mesmo, mas o veredito dela ja
+nasce `inconclusivo` - nem promove nem descarta, e nao pode ser citada como
+evidencia de nada. A mensagem seguinte informa o Sharpe minimo testavel para
+esta janela; abaixo dele nao ha o que a amostra possa concluir.
+
+E a amostra nao e contada em barras da janela: e contada nas barras em que a
+regra esteve **com posicao aberta**, descontadas pela autocorrelacao da serie.
+Uma regra que fica fora do mercado quase o tempo todo observa pouco, por mais
+longa que seja a janela.
 
 ## O que voce nao pode afirmar
 
@@ -212,15 +253,42 @@ def mensagem_interpretar(resumo: ResumoDePeriodo) -> str:
     )
 
 
-def mensagem_propor(resumo: ResumoDePeriodo, leitura: Interpretacao) -> str:
-    return (
-        "Resumo estatistico do periodo observado:\n\n"
-        f"{resumo.como_texto()}\n\n"
-        "Sua leitura deste periodo:\n\n"
-        f"regime: {leitura.regime}\n"
-        f"familia recomendada: {leitura.familia_recomendada}\n"
-        f"diagnostico: {leitura.diagnostico}\n\n"
+def mensagem_propor(
+    resumo: ResumoDePeriodo,
+    leitura: Interpretacao,
+    *,
+    horizonte_barras: int | None = None,
+    sharpe_minimo_milesimos: int | None = None,
+) -> str:
+    """A mensagem do no `propor_regra`.
+
+    O horizonte e o Sharpe minimo vao aqui, na mensagem, e nao no SISTEMA:
+    eles mudam com a janela, e o sistema e o prefixo cacheado. Um numero
+    variavel dentro do prefixo esfriaria o cache a cada run - e a descoberta 5
+    do incremento 5 foi exatamente sobre o que faz parte desse prefixo.
+    """
+    partes = [
+        "Resumo estatistico do periodo observado:\n",
+        f"{resumo.como_texto()}\n",
+        "Sua leitura deste periodo:\n",
+        f"regime: {leitura.regime}",
+        f"familia recomendada: {leitura.familia_recomendada}",
+        f"diagnostico: {leitura.diagnostico}\n",
+    ]
+    if horizonte_barras is not None and sharpe_minimo_milesimos is not None:
+        partes.append(
+            "Janela disponivel para esta hipotese: "
+            f"{horizonte_barras} barras. O Sharpe minimo TESTAVEL nesta "
+            f"janela e {sharpe_minimo_milesimos / 1000:.2f} "
+            f"({sharpe_minimo_milesimos} em milesimos). Declarar abaixo disso "
+            "e permitido e sera registrado, mas o veredito ja nasce "
+            "inconclusivo - a amostra nao alcanca o necessario para concluir "
+            "coisa alguma.\n"
+        )
+    partes.append(
         "Agora proponha UMA regra do catalogo, com os parametros exatos, a "
-        "fracao do caixa por operacao, o limite de perda (ou nulo), a "
-        "expectativa declarada antes da execucao e a confianca em ppm."
+        "fracao do caixa por operacao, o limite de perda (ou nulo), o "
+        "pre-registro completo declarado antes da execucao e a confianca "
+        "em ppm."
     )
+    return "\n".join(partes)

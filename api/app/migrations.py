@@ -959,6 +959,184 @@ MIGRACOES: list[tuple[int, str, str]] = [
         CREATE INDEX idx_event_kind ON agent_event(kind);
         """,
     ),
+    (
+        9,
+        "incremento 8: pre-registro imutavel de hipotese (secao 8.2)",
+        """
+        -- ==================================================================
+        -- PRE-REGISTRO DE HIPOTESE - os dez campos da secao 8.2.
+        --
+        -- Na 0A a intencao do agente era `expectation`: uma frase em
+        -- linguagem natural, do tipo "espero entre 3 e 8 operacoes e
+        -- desempenho abaixo do buy-and-hold". Aquilo bastava para a pergunta
+        -- da 0A, e nao basta para a da 0B. R51 exige separar REJEITADO de
+        -- INCONCLUSIVO, e R33 exige condicoes de falseamento declaradas -
+        -- nenhum dos dois e computavel sobre prosa.
+        --
+        -- Esta tabela e o que substitui aquela frase. Ela nao a apaga:
+        -- `rule_proposal.expectation` continua existindo e continua sendo
+        -- gravado, porque os runs da 0A foram feitos sob ele e precisam
+        -- continuar legiveis exatamente como foram.
+        --
+        -- "O pre-registro e imutavel. Isso elimina a possibilidade de o
+        -- agente ajustar a metrica depois de ver o resultado." - secao 8.2.
+        -- Imutavel aqui quer dizer imposto por GATILHO, como o ledger: se
+        -- dependesse da disciplina do modulo Python, um defeito ali
+        -- mascararia a ausencia da regra aqui.
+        -- ==================================================================
+        CREATE TABLE hypothesis (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id         INTEGER NOT NULL REFERENCES run(id),
+
+            -- O evento cognitivo que a propos. Mesmo vinculo de ida e volta
+            -- que `rule_proposal` ja tem: da hipotese se chega ao custo da
+            -- decisao que a produziu, e do custo a hipotese.
+            agent_event_id INTEGER NOT NULL REFERENCES agent_event(id),
+
+            -- ---------------------------------------------- secao 8.2, 1-4
+            -- `id` e a chave acima. `timestamp_registro` e imutavel por
+            -- consequencia: a tabela inteira recusa UPDATE.
+            enunciado          TEXT NOT NULL CHECK (length(enunciado) > 0),
+            agente_origem      TEXT NOT NULL CHECK (length(agente_origem) > 0),
+            timestamp_registro TEXT NOT NULL,
+
+            -- ------------------------------------------------ secao 8.2, 5
+            -- "Uma UNICA metrica, definida antes do teste." Enum fechado de
+            -- proposito: metrica livre por hipotese tornaria a familia
+            -- estatistica incoerente, porque BY ordena p-valores que
+            -- precisam medir a mesma coisa.
+            metrica_primaria TEXT NOT NULL
+                CHECK (metrica_primaria IN (
+                    'patrimonio_final_cents',
+                    'excesso_sobre_b1_p50_cents',
+                    'excesso_sobre_b2_cents',
+                    'excesso_sobre_b3_cents',
+                    'idas_e_voltas'
+                )),
+
+            -- ------------------------------------------------ secao 8.2, 6
+            -- Tamanho de efeito minimo que importa ECONOMICAMENTE, na
+            -- unidade da metrica primaria. Inteiro, como todo o resto
+            -- (regra 5): a metrica acaba multiplicando dinheiro.
+            efeito_minimo INTEGER NOT NULL,
+
+            -- ------------------------------------------------ secao 8.2, 7
+            -- CALCULADO por poder estatistico, nunca escolhido (R34), a
+            -- partir do Sharpe declarado. Em observacoes EFETIVAS, nao
+            -- brutas - secao 8.3: "mil candles autocorrelacionados nao
+            -- equivalem a mil observacoes independentes".
+            n_minimo INTEGER NOT NULL CHECK (n_minimo > 0),
+            sharpe_esperado_milesimos INTEGER NOT NULL
+                CHECK (sharpe_esperado_milesimos > 0),
+
+            -- ------------------------------------------------ secao 8.2, 8
+            criterio_parada TEXT NOT NULL
+                CHECK (criterio_parada IN (
+                    'fim_da_janela',
+                    'n_minimo_alcancado',
+                    'falseamento_observado'
+                )),
+
+            -- ------------------------------------------------ secao 8.2, 9
+            -- Mercado, ativo, timeframe, regime, liquidez, horario, nivel de
+            -- fidelidade. Vem da CONFIG, nunca do modelo - deixa-lo declarar
+            -- sob que condicoes a propria hipotese vale seria deixa-lo
+            -- carimbar a propria procedencia. Mesmo motivo pelo qual
+            -- `condicoes_validade` ficou fora do contrato de saida na 0A.
+            condicoes_validade_json TEXT NOT NULL
+                CHECK (json_valid(condicoes_validade_json)),
+
+            -- ----------------------------------------------- secao 8.2, 10
+            -- "O campo de falseamento e OBRIGATORIO. Uma hipotese que nao
+            -- pode ser refutada nao entra no sistema."
+            --
+            -- NOT NULL sozinho nao cumpre isso: '' e '[]' passam por NOT
+            -- NULL e nao refutam nada. A exigencia real e "existe ao menos
+            -- uma clausula", e e o banco que a impoe.
+            condicoes_falseamento_json TEXT NOT NULL
+                CHECK (json_valid(condicoes_falseamento_json)
+                       AND json_type(condicoes_falseamento_json) = 'array'
+                       AND json_array_length(condicoes_falseamento_json) >= 1),
+
+            -- ------------------------------------------------------ estado
+            -- Secao 8.3: "Uma hipotese cujo `n_minimo` nao e alcancavel no
+            -- horizonte disponivel e marcada como NAO TESTAVEL e arquivada,
+            -- em vez de ser testada mal."
+            --
+            -- O que "arquivada" GATEIA esta em D33 (ADR 0020), e nao e
+            -- obvio: ela nao impede a execucao retrospectiva, impede a
+            -- PROMOCAO. O motivo da secao 8.3 e capacidade de observacao no
+            -- forward, e o forward e 0C. Recusar a execucao aqui faria
+            -- "arquivada" e "refutada" terem o mesmo efeito pratico, que e a
+            -- confusao que a secao 14.4 nomeia.
+            --
+            -- O motivo e obrigatorio quando ela nasce nao testavel, e
+            -- PROIBIDO quando nao. Um motivo sobrando descreveria uma
+            -- condicao que nao existe - e um faltando deixaria "nao sei" e
+            -- "nao" com a mesma aparencia.
+            testavel            INTEGER NOT NULL CHECK (testavel IN (0, 1)),
+            motivo_nao_testavel TEXT,
+            horizonte_barras    INTEGER NOT NULL CHECK (horizonte_barras >= 0),
+
+            -- A regra que esta hipotese propoe executar, quando ha uma.
+            rule_id INTEGER REFERENCES rule(id),
+
+            -- Correcao e registro NOVO que substitui o anterior, nunca
+            -- edicao - o mesmo desenho do estorno no ledger. Uma hipotese
+            -- nao substitui a si mesma.
+            supersedes INTEGER REFERENCES hypothesis(id)
+                       CHECK (supersedes IS NULL OR supersedes <> id),
+
+            -- Do CONTEUDO: duas hipoteses identicas escritas em ordem
+            -- diferente tem o mesmo hash. E o que permite reconhecer o
+            -- reteste da MESMA hipotese (3 creditos, secao 8.6.1) em vez de
+            -- confia-lo a boa memoria de alguem.
+            content_hash TEXT NOT NULL,
+
+            -- Restricoes de tabela ficam no fim porque o SQLite nao aceita
+            -- coluna depois delas.
+            --
+            -- O motivo e obrigatorio quando a hipotese nasce nao testavel, e
+            -- PROIBIDO quando nao. Um motivo sobrando descreveria condicao
+            -- que nao existe; um faltando deixaria "nao sei" e "nao" com a
+            -- mesma aparencia.
+            CHECK ((testavel = 1 AND motivo_nao_testavel IS NULL)
+                OR (testavel = 0 AND motivo_nao_testavel IS NOT NULL
+                                 AND length(motivo_nao_testavel) > 0))
+        );
+
+        CREATE INDEX idx_hypothesis_run ON hypothesis(run_id);
+        CREATE INDEX idx_hypothesis_event ON hypothesis(agent_event_id);
+        CREATE INDEX idx_hypothesis_hash ON hypothesis(content_hash);
+
+        -- As duas metades da imutabilidade da secao 8.2, no banco.
+        CREATE TRIGGER hypothesis_sem_update
+        BEFORE UPDATE ON hypothesis
+        BEGIN
+            SELECT RAISE(ABORT,
+                'pre-registro e imutavel: correcao e hipotese nova com supersedes');
+        END;
+
+        CREATE TRIGGER hypothesis_sem_delete
+        BEFORE DELETE ON hypothesis
+        BEGIN
+            SELECT RAISE(ABORT,
+                'hypothesis e apenas por acrescimo: tentativa descartada e a origem exata das falsas descobertas (secao 8.6)');
+        END;
+
+        -- `n_minimo` nao pode nascer maior que o horizonte SEM que a hipotese
+        -- esteja marcada nao testavel. E a metade da triagem da secao 8.3 que
+        -- o banco consegue impor: se o calculo de poder for contornado algum
+        -- dia, a linha nao entra.
+        CREATE TRIGGER hypothesis_triagem_coerente
+        BEFORE INSERT ON hypothesis
+        WHEN NEW.n_minimo > NEW.horizonte_barras AND NEW.testavel = 1
+        BEGIN
+            SELECT RAISE(ABORT,
+                'n_minimo excede o horizonte: a hipotese e NAO TESTAVEL (secao 8.3) e precisa nascer marcada como tal');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

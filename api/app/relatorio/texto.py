@@ -322,18 +322,44 @@ def markdown(r: dict) -> str:
             add(
                 f"- excesso sobre o p50: {_usd(ca['excesso_sobre_p50_cents'])}"
             )
-        veredito = comp["veredito_da_expectativa"]
+        pr = comp.get("pre_registro") or {}
+        veredito = pr.get("veredito")
         add(
-            "- veredito sobre a expectativa: "
+            "- veredito sobre o pre-registro: "
             f"**{veredito if veredito is not None else 'nao emitido'}**"
         )
-        add(f"  - {comp['por_que_sem_veredito']}")
+        add(f"  - {pr.get('motivo', 'sem motivo registrado')}")
+        if pr.get("hypothesis_id") is not None:
+            efeito = pr.get("efeito") or {}
+            amostra = pr.get("amostra") or {}
+            add(f"  - hipotese {pr['hypothesis_id']}")
+            add(
+                "  - efeito observado"
+                f" {efeito.get('observado')} contra minimo declarado"
+                f" {efeito.get('minimo_declarado')}"
+            )
+            add(
+                "  - amostra: n_efetivo"
+                f" {amostra.get('n_efetivo')} de n_minimo"
+                f" {amostra.get('n_minimo')}"
+                f" (bruto {amostra.get('n_bruto')})"
+            )
+            for c in pr.get("condicoes_falseamento") or []:
+                estado = (
+                    "DISPAROU"
+                    if c.get("disparou")
+                    else ("nao conferida" if c.get("disparou") is None else "nao")
+                )
+                add(
+                    f"  - falseamento `{c['condicao']}`:"
+                    f" observado {c.get('observado')} — {estado}"
+                )
         add("")
         add(
             "A decisao original permanece **byte a byte inalterada** (R25.3):"
             " `agent_event` recusa `UPDATE` por gatilho, entao editar o passado"
-            " nao e uma opcao disponivel. A avaliacao nao copia a expectativa —"
-            " ela vive na decisao, que e o pai deste evento."
+            " nao e uma opcao disponivel. A avaliacao nao copia o pre-registro —"
+            " ele vive na hipotese, e a decisao e o pai deste evento."
         )
     add("")
 

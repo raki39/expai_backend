@@ -69,6 +69,34 @@ INTERPRETACAO_OK = json.dumps(
     }
 )
 
+# O pre-registro da secao 8.2, que na 0B acompanha toda proposta valida.
+#
+# Sharpe 2,0 e uma declaracao HONESTA e, nesta fixture, NAO TESTAVEL: 2.500
+# barras de 15 minutos sao ~26 dias, e o Sharpe minimo testavel ai e 7,49 -
+# acima do teto de 5,00 que o schema aceita. Nenhuma hipotese e testavel numa
+# janela de 26 dias, e isso e a secao 8.3 funcionando, nao defeito da fixture.
+# Os testes que precisam do caminho TESTAVEL montam a sua propria janela.
+PRE_REGISTRO_OK = {
+    "enunciado": "cerca de 300 operacoes, provavelmente abaixo da mediana",
+    "metrica_primaria": "excesso_sobre_b1_p50_cents",
+    "efeito_minimo": 0,
+    "sharpe_esperado_milesimos": 2_000,
+    "criterio_parada": "fim_da_janela",
+    "condicoes_falseamento": [
+        {
+            "metrica": "excesso_sobre_b1_p50_cents",
+            "comparador": "menor_que",
+            "valor": 0,
+        }
+    ],
+}
+
+# O mesmo bloco em JSON cru, para as respostas invalidas montadas a mao: o que
+# se testa la e o parametro da REGRA, entao o pre-registro precisa estar
+# valido para nao mascarar o motivo da recusa.
+PRE_JSON = json.dumps(PRE_REGISTRO_OK)
+
+
 PROPOSTA_OK = json.dumps(
     {
         "familia": "cruzamento_medias",
@@ -78,7 +106,7 @@ PROPOSTA_OK = json.dumps(
         "desvios_milesimos": None,
         "position_fraction_bps": 10_000,
         "stop_loss_bps": None,
-        "expectativa": "cerca de 300 operacoes, provavelmente abaixo da mediana",
+        "pre_registro": PRE_REGISTRO_OK,
         "confianca_ppm": 300_000,
     }
 )
@@ -433,22 +461,22 @@ def test_o_payload_bruto_do_provedor_e_preservado(
         ('{"familia": "media_movel_exponencial", "rapida": 5, "lenta": 20,'
          ' "periodo": null, "desvios_milesimos": null,'
          ' "position_fraction_bps": 10000, "stop_loss_bps": null,'
-         ' "expectativa": "x", "confianca_ppm": 1}',
+         ' "pre_registro": ' + PRE_JSON + ', "confianca_ppm": 1}',
          "familia fora do catalogo fechado"),
         ('{"familia": "cruzamento_medias", "rapida": 50, "lenta": 20,'
          ' "periodo": null, "desvios_milesimos": null,'
          ' "position_fraction_bps": 10000, "stop_loss_bps": null,'
-         ' "expectativa": "x", "confianca_ppm": 1}',
+         ' "pre_registro": ' + PRE_JSON + ', "confianca_ppm": 1}',
          "rapida maior que a lenta"),
         ('{"familia": "cruzamento_medias", "rapida": 20, "lenta": 5000,'
          ' "periodo": null, "desvios_milesimos": null,'
          ' "position_fraction_bps": 10000, "stop_loss_bps": null,'
-         ' "expectativa": "x", "confianca_ppm": 1}',
+         ' "pre_registro": ' + PRE_JSON + ', "confianca_ppm": 1}',
          "parametro fora da faixa do catalogo"),
         ('{"familia": "cruzamento_medias", "rapida": 20, "lenta": 50,'
          ' "periodo": 14, "desvios_milesimos": null,'
          ' "position_fraction_bps": 10000, "stop_loss_bps": null,'
-         ' "expectativa": "x", "confianca_ppm": 1}',
+         ' "pre_registro": ' + PRE_JSON + ', "confianca_ppm": 1}',
          "parametro de outra familia junto"),
         ("isto nao e json", "nem json e"),
     ],
@@ -1362,7 +1390,7 @@ def test_o_b1_casado_usa_o_mesmo_tamanho_de_posicao_da_regra(
             "familia": "banda_desvio", "rapida": None, "lenta": None,
             "periodo": 50, "desvios_milesimos": 2500,
             "position_fraction_bps": 3000, "stop_loss_bps": 800,
-            "expectativa": "poucas operacoes, fracao pequena",
+            "pre_registro": PRE_REGISTRO_OK,
             "confianca_ppm": 300_000,
         }
     )

@@ -33,6 +33,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config.schema import ExperimentConfig
+from ..hipotese.schema import SCHEMA_PRE_REGISTRO, PreRegistroBruto
 from ..regra.schema import (
     BandaDesvio,
     BreakoutCanal,
@@ -139,8 +140,31 @@ class PropostaBruta(BaseModel):
     position_fraction_bps: int
     stop_loss_bps: int | None = None
 
-    expectativa: str = Field(min_length=1, max_length=MAX_CHARS_EXPECTATIVA)
+    # O pre-registro da secao 8.2, que na 0B substitui a frase de expectativa.
+    #
+    # Na 0A este campo era `expectativa: str` - texto livre. Ele cumpria a
+    # regra 17 e nada mais: julgar se a expectativa se realizou exigia leitura
+    # humana, e foi por isso que a avaliacao posterior fechou a 0A com
+    # `veredito_da_expectativa = None`. R33 e R51 tornaram isso insuficiente.
+    #
+    # A frase nao sumiu: virou `pre_registro.enunciado`, que continua sendo o
+    # que vai para `rule_proposal.expectation` e para o evento da decisao. O
+    # que mudou e que agora ela vem acompanhada do que torna o veredito uma
+    # conta - `efeito_minimo` e `condicoes_falseamento`.
+    pre_registro: PreRegistroBruto
     confianca_ppm: int
+
+    @property
+    def expectativa(self) -> str:
+        """A metade em texto do pre-registro.
+
+        Existe como propriedade, e nao como campo, porque tudo que ja lia
+        `bruta.expectativa` na 0A continua lendo a mesma coisa: a afirmacao
+        que o agente declarou antes de executar. Trocar o nome em cinco
+        lugares para dizer o mesmo seria churn; o que mudou de verdade e o que
+        ACOMPANHA a frase, nao a frase.
+        """
+        return self.pre_registro.enunciado
 
     @model_validator(mode="after")
     def _coerencia(self) -> "PropostaBruta":
@@ -182,7 +206,7 @@ SCHEMA_PROPOSTA: dict = {
         "desvios_milesimos",
         "position_fraction_bps",
         "stop_loss_bps",
-        "expectativa",
+        "pre_registro",
         "confianca_ppm",
     ],
     "properties": {
@@ -218,18 +242,11 @@ SCHEMA_PROPOSTA: dict = {
             " Em fidelidade 1 funciona como SINAL DE SAIDA na barra seguinte,"
             " nao como preenchimento no preco do limite.",
         },
-        "expectativa": {
-            "type": "string",
-            "maxLength": MAX_CHARS_EXPECTATIVA,
-            "description": "o que se espera desta regra, declarado ANTES de"
-            " qualquer execucao, e por que. No maximo"
-            f" {MAX_CHARS_EXPECTATIVA} caracteres - passar disso faz a"
-            " proposta inteira ser rejeitada.",
-        },
+        "pre_registro": SCHEMA_PRE_REGISTRO,
         "confianca_ppm": {
             "type": "integer",
-            "description": "confianca na expectativa, em partes por milhao."
-            " 500000 = 50%.",
+            "description": "confianca no enunciado do pre-registro, em partes"
+            " por milhao. 500000 = 50%.",
         },
     },
 }
