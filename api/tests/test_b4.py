@@ -517,31 +517,58 @@ def test_b4_recusa_sem_separacao_por_finalidade(
 # ===========================================================================
 
 
-def test_o_validador_ainda_nao_alcanca_o_b1_casado(
+def test_o_validador_alcanca_o_b1_casado_pela_ligacao(
+    conn: sqlite3.Connection, cenario_b4, settings  # noqa: F811
+) -> None:
+    """A asercao CONTRARIA do teste que fixava a limitacao ate o incremento 12.
+
+    Era `test_o_validador_ainda_nao_alcanca_o_b1_casado`, e ele dizia: o
+    validador procura `baseline_result` no run da hipotese e acha vazio
+    sempre, porque o B1 casado roda no proprio run desde o incremento 3 e nada
+    liga os dois. `excesso_sobre_b1_p50_cents` - a unica metrica que isola
+    escolha de momento, e o criterio 3 do Portao B - era inavaliavel.
+
+    A migracao 14 ligou (`run.casa_run_id`), e o teste virou o oposto do que
+    era, como a instrucao dele mandava: trocar pela asercao contraria, nao
+    apagar.
+    """
+    from app.cerebro import ciclo
+    from app.validador import promocao
+    from tests.test_cerebro import (
+        INTERPRETACAO_OK,
+        PROPOSTA_OK,
+        AdaptadorFalso,
+    )
+
+    dataset_id, cfg = cenario_b4
+    r = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings,
+        adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
+    )
+    visto = promocao._b1_do_run(conn, r.run_id)
+    assert visto is not None, "o validador voltou a nao enxergar o controle"
+    assert visto["p5"] <= visto["p50"] <= visto["p95"]
+    # O MESMO controle que o ciclo produziu, e nao outro qualquer.
+    assert visto["run_id"] == r.b1_casado["run_id"]
+    assert visto["operacoes_alvo"] == r.execucao["idas_e_voltas"]
+
+
+def test_o_run_de_b4_nao_tem_controle_ligado_e_isso_e_resposta(
     conn: sqlite3.Connection, resultado
 ) -> None:
-    """`excesso_sobre_b1_p50_cents` NAO e avaliavel pelo validador hoje.
+    """`None` continua sendo a resposta certa para um run de B4.
 
-    E a metrica que §14.4 gateia - "acima do p95 de B1" -, e por isso este
-    teste existe: ele fixa a limitacao em vez de deixa-la ser redescoberta no
-    incremento 13, quando o criterio virar portao.
-
-    A causa: `promocao._b1_do_run` procura `baseline_result` no run da
-    hipotese, e o B1 casado roda no **proprio run** desde o incremento 3 -
-    historias economicas independentes. Nao existe ligacao entre os dois runs.
-
-    Consertar exige ligar o run do B1 ao run que ele casa, e isso e trabalho do
-    13, onde cada braco precisa do seu proprio B1 casado. Se este teste
-    comecar a falhar, e porque alguem consertou - e ai ele deve ser trocado
-    pela asercao contraria, nao apagado.
+    A ligacao existe desde a migracao 14, e B4 nao produz B1 casado: a metrica
+    primaria dele e `excesso_sobre_b3_cents`, fixada pela D36, e nenhuma
+    clausula de B4 fala do acaso. Devolver um controle aqui - qualquer um -
+    seria emprestar o de outro experimento, que e o defeito que a ligacao
+    acabou de fechar.
     """
     from app.validador import promocao
 
     run_id = resultado.hipoteses[0].run_id
-    assert promocao._b1_do_run(conn, run_id) is None, (
-        "o validador passou a ver o B1 casado: troque este teste pela asercao"
-        " contraria e reveja `busca.METRICA`"
-    )
+    assert promocao._b1_do_run(conn, run_id) is None
 
 
 # ===========================================================================
@@ -976,13 +1003,16 @@ def test_o_painel_acusa_quando_o_b1_casado_nao_casa(
 ) -> None:
     """A tela mostrou 37 idas e voltas ao lado de um controle de 70.
 
-    `b1_do_agente` devolve o ultimo B1 casado gravado, globalmente: nao ha
-    ligacao entre o run do B1 e o run que ele casa. A D19 existe exatamente
-    para impedir comparar giros diferentes, e o defeito aparecia como uma
-    tabela plausivel.
+    `b1_do_agente` devolvia o ultimo B1 casado gravado **globalmente**, e nao
+    havia ligacao entre o run do B1 e o run que ele casa. A D19 existe
+    exatamente para impedir comparar giros diferentes, e o defeito aparecia
+    como uma tabela plausivel.
 
-    Enquanto a ligacao nao existir (incremento 13), o campo DIZ quando nao
-    casa - em vez de a tabela mentir.
+    A migracao 14 ligou, e este campo mudou de pergunta junto: era "sera que o
+    controle e deste run?" e passou a ser "o controle ligado casa o giro?".
+    O `ligado` diz qual das duas esta sendo respondida - sem ele, um run
+    anterior a migracao (que nao tem controle) ficaria indistinguivel de um
+    run cujo controle nao casa, que e defeito.
     """
     from app.cerebro import ciclo
     from tests.test_cerebro import (
@@ -999,10 +1029,12 @@ def test_o_painel_acusa_quando_o_b1_casado_nao_casa(
     corpo = client.get("/api/agente").json()
     confere = corpo["b1_casado_confere"]
     assert confere is not None
-    # No caminho normal ele CASA - o ciclo produz o B1 junto.
+    # No caminho normal ele CASA - o ciclo produz o B1 junto e o liga.
+    assert confere["ligado"] is True
     assert confere["casa"] is True
     assert confere["operacoes_alvo"] == corpo["idas_e_voltas"]
     assert "D19" in confere["por_que_importa"]
+    assert corpo["b1_casado"]["casa_run_id"] == corpo["run_id"]
 
 
 def test_ninguem_mais_escolhe_o_run_do_agente_por_conta_propria(

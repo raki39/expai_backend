@@ -221,7 +221,10 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
 
     # ------------------------------------------------------------- comparado
     comparado = baselines.resumo_comparacao(conn)
-    b1_do_agente = baselines.b1_do_agente(conn)
+    # O controle LIGADO a este run (migracao 14). Era o ultimo B1 casado
+    # gravado globalmente, e o relatorio de um run antigo tomava emprestado o
+    # controle de um run novo sem nada dizer.
+    b1_do_agente = baselines.b1_do_run(conn, run_id)
     patrimonio = custos["patrimonio_final_cents"]
 
     if b1_do_agente:

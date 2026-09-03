@@ -209,6 +209,7 @@ def abrir_run(
     config_version_id: int,
     seed_capital_usd_cents: int,
     agent_id: str = AGENT_ID_PADRAO,
+    casa_run_id: int | None = None,
 ) -> tuple[int, int]:
     """Cria o run e credita o capital semente COMO LANCAMENTO.
 
@@ -216,6 +217,12 @@ def abrir_run(
     pela mesma porta que todo o resto do dinheiro, com contrapartida em
     patrimonio - e por isso aparece no historico e fecha as partidas dobradas
     como qualquer outro evento.
+
+    `casa_run_id` marca este run como o CONTROLE casado de outro (migracao
+    14). Ele nasce com o run e nao pode mudar depois - um controle que
+    trocasse de alvo depois de medido seria a regua trocada depois do
+    resultado. O default `None` e o caso normal: quase todo run nao controla
+    ninguem.
     """
     if seed_capital_usd_cents <= 0:
         raise TransacaoInvalida("capital semente precisa ser positivo")
@@ -223,8 +230,8 @@ def abrir_run(
     with bloco_atomico(conn, "abrir_run"):
         cur = conn.execute(
             "INSERT INTO run (agent_id, state, config_version_id, created_at,"
-            " updated_at) VALUES (?, 'executando', ?, ?, ?)",
-            (agent_id, config_version_id, agora(), agora()),
+            " updated_at, casa_run_id) VALUES (?, 'executando', ?, ?, ?, ?)",
+            (agent_id, config_version_id, agora(), agora(), casa_run_id),
         )
         run_id = int(cur.lastrowid)
         tx_id = registrar(

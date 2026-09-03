@@ -155,7 +155,11 @@ def curva(request: Request, pontos: int = curva_de_patrimonio.PONTOS_PADRAO) -> 
                 )
         # Contra o B1 CASADO com o giro do agente, e nao contra o da
         # comparacao, que e casado com o B3 (D19).
-        casado = baselines.b1_do_agente(conn)
+        #
+        # Pela LIGACAO deste run (migracao 14), e nao pelo ultimo B1 gravado:
+        # runs anteriores a ela vem `None`, e a tela diz isso em vez de
+        # emprestar o controle de outro experimento.
+        casado = baselines.b1_do_run(conn, runs["agente"])
         if casado:
             excessos["agente_sobre_B1_casado_p50"] = (
                 curva_de_patrimonio.excesso_sobre_baseline_cents(
@@ -170,7 +174,10 @@ def curva(request: Request, pontos: int = curva_de_patrimonio.PONTOS_PADRAO) -> 
         "excesso_cents": excessos,
         # A faixa de B1 e do RESULTADO FINAL, e nao um caminho. A do agente
         # e a casada com o giro dele; a da comparacao e casada com o B3.
-        "b1_faixa_final": baselines.b1_do_agente(conn) or comparacao.get("B1"),
+        "b1_faixa_final": (
+            (baselines.b1_do_run(conn, runs["agente"]) if "agente" in runs else None)
+            or comparacao.get("B1")
+        ),
         "b1_faixa_da_comparacao": comparacao.get("B1"),
         "runs": runs,
         "config_version_vigente": comparacao.get("config_version_vigente"),

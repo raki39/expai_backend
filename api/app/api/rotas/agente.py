@@ -76,7 +76,7 @@ def agente_estado(request: Request) -> dict[str, Any]:
         executou=ordens > 0,
     )
     do_agente = bool(atribuicao["atribuivel_ao_agente"])
-    b1 = baselines.b1_do_agente(conn)
+    b1 = baselines.b1_do_run(conn, int(run_id))
     hypothesis_id = conn.execute(
         "SELECT MAX(id) AS id FROM hypothesis WHERE run_id = ?", (int(run_id),)
     ).fetchone()["id"]
@@ -114,19 +114,33 @@ def agente_estado(request: Request) -> dict[str, Any]:
         "b1_casado": b1,
         # A D19 CONFERIDA, e nao suposta.
         #
-        # `b1_do_agente` devolve o ultimo B1 casado gravado, globalmente - nao
-        # ha ligacao entre o run do B1 e o run que ele casa. Enquanto so o
-        # agente produzia B1 casado, o ultimo era sempre o do ultimo run dele.
+        # Ate o incremento 12 este campo avisava que o controle podia ser de
+        # OUTRO run: `b1_do_agente` devolvia o ultimo B1 casado gravado
+        # globalmente, e em producao a tela mostrou 37 idas e voltas ao lado
+        # de um controle de 70.
         #
-        # Em producao a tela mostrou 37 idas e voltas do run ao lado de um
-        # controle de 70, porque o run exibido era outro. A D19 existe
-        # exatamente para impedir comparar giros diferentes, e o defeito
-        # aparecia como uma tabela plausivel.
+        # Com a ligacao da migracao 14 o controle vem do proprio run, e o
+        # campo mudou de pergunta: nao e mais "sera que e este?", e sim "o
+        # controle ligado casa o giro?". Um `casa: false` agora e defeito, e
+        # nao ambiguidade - por isso ele diz `defeito`, e nao `aviso`.
         #
-        # Enquanto a ligacao nao existe (incremento 13), o campo DIZ quando
-        # nao casa, em vez de deixar a tabela mentir.
+        # O campo NAO some quando nao ha controle: `ligado: false` e a
+        # resposta de todo run anterior a migracao, e ela precisa ser dita.
         "b1_casado_confere": (
-            None if not b1 else {
+            {
+                "ligado": False,
+                "casa": None,
+                "operacoes_alvo": None,
+                "idas_e_voltas_do_run": idas_e_voltas,
+                "por_que_importa": (
+                    "sem controle ligado a este run nao ha com que comparar o"
+                    " giro; runs anteriores a migracao 14 nao tem ligacao, e"
+                    " emprestar o controle de outro run mediria giro em vez de"
+                    " escolha de momento (D19, secao 14.3)"
+                ),
+            }
+            if not b1 else {
+                "ligado": True,
                 "casa": int(b1.get("operacoes_alvo") or -1) == idas_e_voltas,
                 "operacoes_alvo": b1.get("operacoes_alvo"),
                 "idas_e_voltas_do_run": idas_e_voltas,

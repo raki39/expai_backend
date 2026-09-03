@@ -1490,9 +1490,12 @@ def test_o_b1_do_agente_nao_contamina_o_b1_da_comparacao(
     resumo = baselines.resumo_comparacao(conn)
     assert resumo["B1"]["operacoes_alvo"] == giro_do_b3
 
-    do_agente = baselines.b1_do_agente(conn)
+    do_agente = baselines.b1_do_run(conn, resultado.run_id)
     assert do_agente["operacoes_alvo"] == resultado.execucao["idas_e_voltas"]
     assert do_agente["run_id"] != resumo["B1"].get("run_id", -1)
+    # A ligacao, e nao a ordem de insercao: o controle aponta para o run que
+    # ele casa (migracao 14).
+    assert do_agente["casa_run_id"] == resultado.run_id
 
 
 def test_sem_operacao_nao_ha_b1_para_casar(
@@ -1549,7 +1552,7 @@ def test_o_b1_casado_usa_o_mesmo_tamanho_de_posicao_da_regra(
 
     from app.maos_rapidas import baselines
 
-    assert baselines.b1_do_agente(conn)["fracao_bps"] == 3000
+    assert baselines.b1_do_run(conn, resultado.run_id)["fracao_bps"] == 3000
 
 
 def test_fracao_menor_faz_o_acaso_perder_menos(conn: sqlite3.Connection, cenario) -> None:
@@ -1559,16 +1562,28 @@ def test_fracao_menor_faz_o_acaso_perder_menos(conn: sqlite3.Connection, cenario
     Se as duas distribuicoes fossem parecidas, casar o tamanho seria
     preciosismo. Elas nao sao.
     """
+    from app.ledger import livro
     from app.maos_rapidas import baselines
 
     dataset_id, cfg = cenario
     barras = executor.carregar_janela(conn, dataset_id)
+    # Dois alvos, porque um controle controla ALGUMA coisa: `casa_run_id` e
+    # unico, e dois controles nao podem reivindicar o mesmo run.
+    alvos = [
+        livro.abrir_run(
+            conn, config_version_id=1,
+            seed_capital_usd_cents=cfg.seed_capital_usd_cents,
+        )[0]
+        for _ in range(2)
+    ]
     cheio = baselines.b1_casado_com(
         conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
         operacoes_alvo=60, fracao_bps=10_000, semente=42, barras=barras,
+        casa_run_id=alvos[0],
     )
     parcial = baselines.b1_casado_com(
         conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
         operacoes_alvo=60, fracao_bps=3_000, semente=42, barras=barras,
+        casa_run_id=alvos[1],
     )
     assert parcial["p50"] > cheio["p50"]

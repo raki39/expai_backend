@@ -56,10 +56,21 @@ log = logging.getLogger(__name__)
 #: proposito: um controle com mais tentativas nao e controle.
 BRACO = "b4"
 
-#: O `agent_id` do run. Distinto dos baselines e do agente para que
-#: `/api/agente` (que le `MAX(run_id) FROM agent_event`) nao passe a mostrar um
-#: run de B4 como se fosse o do agente - o que seria a atribuicao errada que a
-#: D35 acabou de consertar, por outra porta.
+#: O `agent_id` do run de B4. Distinto dos baselines e do agente porque cada
+#: dono de run precisa ser identificavel no ledger.
+#:
+#: **Este comentario ja afirmou uma protecao que nao existia.** Ele dizia que
+#: o valor distinto impedia `/api/agente` de mostrar um run de B4 como se
+#: fosse o do agente. Nao impedia: aquela rota filtrava por `MAX(run_id) FROM
+#: agent_event`, que e sobre quem emitiu EVENTO, e B4 emite evento nao
+#: cognitivo - entao o run 52, de B4, apareceu na tela do agente com o
+#: pre-registro dele e o caminho dele.
+#:
+#: Quem impede hoje e `ciclo.ultimo_run_do_agente`, que filtra pelo dono do
+#: RUN (`r.agent_id = AGENT_ID_PADRAO`) - e o filtro e positivo, e nao a
+#: exclusao de `b4-0001`: excluir por nome resolveria hoje e falharia calado
+#: no dia em que um terceiro dono de run emitisse evento, que e exatamente
+#: como este defeito nasceu.
 AGENT_ID = "b4-0001"
 
 

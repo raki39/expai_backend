@@ -530,6 +530,7 @@ def b1_casado_com(
     operacoes_alvo: int,
     fracao_bps: int,
     semente: int,
+    casa_run_id: int,
     repeticoes: int | None = None,
     barras: Sequence[BarraCarregada] | None = None,
 ) -> dict:
@@ -546,6 +547,12 @@ def b1_casado_com(
     em vez de ao B3.
 
     Roda no seu proprio run: sao historias economicas independentes.
+
+    E APONTA para o run que casa (`casa_run_id`, migracao 14). O parametro e
+    obrigatorio de proposito: enquanto ele nao existia, a unica forma de achar
+    o controle era "o ultimo B1 casado gravado", e essa consulta ja mostrou em
+    producao 37 idas e voltas de um run ao lado de um controle de 70. Um
+    default aqui reabriria exatamente esse caminho.
     """
     from ..ledger.livro import abrir_run, encerrar_run
 
@@ -556,6 +563,7 @@ def b1_casado_com(
         conn, config_version_id=config_version_id,
         seed_capital_usd_cents=config.seed_capital_usd_cents,
         agent_id="baseline-B1-agente",
+        casa_run_id=casa_run_id,
     )
     distribuicao = rodar_b1(
         conn, run_id=run_id, dataset_id=dataset_id, config=config,
@@ -565,26 +573,43 @@ def b1_casado_com(
     encerrar_run(conn, run_id, "concluido")
     log.info(
         "baselines.b1_casado_com_o_agente",
-        extra={"run_id": run_id, "operacoes_alvo": operacoes_alvo,
+        extra={"run_id": run_id, "casa_run_id": casa_run_id,
+               "operacoes_alvo": operacoes_alvo,
                "fracao_bps": fracao_bps, "p50": distribuicao["p50"]},
     )
-    return {**distribuicao, "run_id": run_id, "fracao_bps": fracao_bps}
+    return {
+        **distribuicao,
+        "run_id": run_id,
+        "casa_run_id": casa_run_id,
+        "fracao_bps": fracao_bps,
+    }
 
 
-def b1_do_agente(conn: sqlite3.Connection) -> dict | None:
-    """A ultima distribuicao de B1 casada com o giro do agente.
+def b1_do_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    """A distribuicao do acaso casada com ESTE run, achada pela ligacao.
 
-    Derivada do run marcado, e nao guardada num campo: filtrar pelo ULTIMO
-    run e o que impede que duas comparacoes distintas sejam agregadas num p50
-    que nao corresponde a experimento nenhum - o mesmo defeito que o
-    incremento 4 ja corrigiu uma vez.
+    Substitui `b1_do_agente`, que devolvia o ultimo B1 casado gravado
+    **globalmente**. Enquanto so o agente produzia B1 casado, "o ultimo" era
+    sempre o do ultimo run dele e a resposta ficava certa por coincidencia;
+    com B4 abrindo run, a coincidencia acabou e a tela comparou giros
+    diferentes.
+
+    `None` quando o run nao tem controle ligado - o que inclui todo run
+    anterior a migracao 14. E resposta, e nao falha: quem pergunta precisa
+    saber que a ligacao nao existe, em vez de receber o controle de outro
+    experimento com a mesma cara.
     """
     linha = conn.execute(
-        "SELECT MAX(id) AS id FROM run WHERE agent_id = 'baseline-B1-agente'"
+        "SELECT id FROM run WHERE casa_run_id = ?", (int(run_id),)
     ).fetchone()
-    if not linha or not linha["id"]:
+    if not linha:
         return None
-    run_id = int(linha["id"])
+    return _distribuicao_b1_do_run(conn, int(linha["id"]), casa_run_id=int(run_id))
+
+
+def _distribuicao_b1_do_run(
+    conn: sqlite3.Connection, run_id: int, *, casa_run_id: int | None
+) -> dict | None:
     equities = [
         int(l["equity_final_cents"])
         for l in conn.execute(
@@ -615,6 +640,7 @@ def b1_do_agente(conn: sqlite3.Connection) -> dict | None:
 
     return {
         "run_id": run_id,
+        "casa_run_id": casa_run_id,
         "repeticoes": len(equities),
         "operacoes_alvo": int(alvo or 0),
         "fracao_bps": fracao,

@@ -108,42 +108,38 @@ def _pre_registro(hip: dict) -> PreRegistroBruto:
 
 
 def _b1_do_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
-    """A distribuição do acaso casada com este run, lida do banco.
+    """A distribuição do acaso casada com este run, achada pela LIGAÇÃO.
 
-    Do `baseline_result`, e não do objeto que o ciclo devolveu: o validador
-    recalcula do que ficou gravado. Se o ciclo tivesse errado ao montar o
-    resumo, ler daquele objeto herdaria o erro.
+    Do banco, e não do objeto que o ciclo devolveu: o validador recalcula do
+    que ficou gravado. Se o ciclo tivesse errado ao montar o resumo, ler
+    daquele objeto herdaria o erro.
+
+    **Esta função procurava `baseline_result` no run da hipótese, e achava
+    vazio sempre.** O B1 casado roda no próprio run desde o incremento 3 — são
+    histórias econômicas independentes — e não havia ligação entre os dois.
+    A consequência era que `excesso_sobre_b1_p50_cents`, a única métrica que
+    isola escolha de momento, era inavaliável pelo validador: qualquer
+    hipótese que a declarasse sairia inconclusiva por "não há contra o que
+    medir", e não por falta de amostra. O critério 3 do Portão B (§14.4) é
+    literalmente "acima do p95 de B1".
+
+    A ligação é `run.casa_run_id` (migração 14). `None` aqui continua sendo
+    resposta legítima: um run de B4 não produz controle casado — a métrica
+    dele é `excesso_sobre_b3_cents`, fixada pela D36 —, e todo run anterior à
+    migração também não tem ligação.
     """
-    linhas = [
-        int(l["equity_final_cents"])
-        for l in conn.execute(
-            "SELECT equity_final_cents FROM baseline_result"
-            " WHERE run_id = ? AND baseline = 'B1'"
-            " ORDER BY repeticao",
-            (run_id,),
-        )
-    ]
-    if not linhas:
+    from ..maos_rapidas import baselines as baselines_mod
+
+    b1 = baselines_mod.b1_do_run(conn, run_id)
+    if b1 is None:
         return None
-    ordenado = sorted(linhas)
-
-    def p(q: int) -> int:
-        if len(ordenado) == 1:
-            return ordenado[0]
-        pos = (len(ordenado) - 1) * q // 100
-        return ordenado[pos]
-
-    alvo = conn.execute(
-        "SELECT MAX(operacoes) AS n FROM baseline_result"
-        " WHERE run_id = ? AND baseline = 'B1'",
-        (run_id,),
-    ).fetchone()
     return {
-        "p5": p(5),
-        "p50": p(50),
-        "p95": p(95),
-        "repeticoes": len(ordenado),
-        "operacoes_alvo": int(alvo["n"] or 0),
+        "p5": b1["p5"],
+        "p50": b1["p50"],
+        "p95": b1["p95"],
+        "repeticoes": b1["repeticoes"],
+        "operacoes_alvo": b1["operacoes_alvo"],
+        "run_id": b1["run_id"],
     }
 
 

@@ -1844,6 +1844,89 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        14,
+        "incremento 13: o B1 casado aponta para o run que ele casa",
+        """
+        -- ==================================================================
+        -- O controle do acaso rodava no PROPRIO run desde o incremento 3 -
+        -- historias economicas independentes, o que esta certo - e nada
+        -- ligava esse run ao run que ele controla.
+        --
+        -- Consequencias medidas, as duas em producao:
+        --
+        --   1. `promocao._b1_do_run` procurava `baseline_result` no run da
+        --      hipotese e achava VAZIO, sempre. A metrica
+        --      `excesso_sobre_b1_p50_cents` era inavaliavel pelo validador -
+        --      e ela e a unica que isola escolha de momento, e o criterio 3
+        --      do Portao B (§14.4) e literalmente "acima do p95 de B1".
+        --
+        --   2. `b1_do_agente` devolvia o ULTIMO B1 casado gravado,
+        --      globalmente. A tela mostrou 37 idas e voltas de um run ao
+        --      lado de um controle de 70 - a D19 violada no display, com
+        --      aparencia de tabela plausivel.
+        --
+        -- A ligacao e ESTRUTURAL e nasce com o run, e nao derivada por
+        -- proximidade ("o B1 mais recente", "o proximo run criado"). Duas
+        -- comparacoes com o mesmo giro produziriam dois candidatos
+        -- indistinguiveis, e a escolha entre eles seria um palpite com cara
+        -- de consulta.
+        -- ==================================================================
+        ALTER TABLE run ADD COLUMN casa_run_id INTEGER REFERENCES run(id);
+
+        -- Um controle por run controlado. Sem isto, dois B1 poderiam
+        -- reivindicar o mesmo alvo e a leitura escolheria um por ordem de id
+        -- - que e exatamente o palpite que esta coluna existe para eliminar.
+        CREATE UNIQUE INDEX idx_run_casa_unico
+            ON run(casa_run_id) WHERE casa_run_id IS NOT NULL;
+
+        -- Sem cadeia: o controle de um controle nao e coisa nenhuma.
+        --
+        -- Auto-referencia NAO precisa de gatilho e por isso nao tem um: o id
+        -- e AUTOINCREMENT e ainda nao existe no BEFORE INSERT, entao um run
+        -- nao tem como apontar para si mesmo. Escrever a guarda mesmo assim
+        -- deixaria no schema uma clausula que nunca dispara, sob um nome
+        -- afirmando protecao - a forma exata do defeito que este projeto ja
+        -- registrou treze vezes.
+        --
+        -- Cadeia, ao contrario, E alcancavel: basta chamar o casamento
+        -- passando o run de um B1 como alvo. Ai o p50 do controle seria
+        -- comparado com o p50 de outro sorteio, e a leitura "o agente ficou
+        -- abaixo do acaso" descreveria dois acasos.
+        CREATE TRIGGER controle_nao_casa_outro_controle
+        BEFORE INSERT ON run
+        WHEN NEW.casa_run_id IS NOT NULL
+             AND (SELECT casa_run_id FROM run WHERE id = NEW.casa_run_id)
+                 IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o alvo ja e um controle: controle de controle nao mede nada');
+        END;
+
+        -- A ligacao e imutavel, como o vinculo do ledger. `encerrar_run` faz
+        -- UPDATE em `run`, entao a coluna esta exposta a um UPDATE que ja
+        -- existe e passa por aqui a cada run - e um controle que pudesse
+        -- mudar de alvo depois de medido seria a regua trocada depois do
+        -- resultado, que e a quinta pergunta do teste de escopo.
+        CREATE TRIGGER casa_run_id_e_imutavel
+        BEFORE UPDATE OF casa_run_id ON run
+        WHEN OLD.casa_run_id IS NOT NEW.casa_run_id
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a ligacao do controle com o run que ele casa e imutavel');
+        END;
+
+        -- NAO HA BACKFILL, e a ausencia e deliberada.
+        --
+        -- Os runs anteriores a esta migracao tem NULL. Preenche-los exigiria
+        -- parear por (config_version, giro, fracao, proximidade temporal), e
+        -- dois runs do agente com o mesmo giro produziriam um par errado sem
+        -- nada acusando. Um NULL diz "nao ha ligacao registrada"; um palpite
+        -- diria "este e o controle" com a mesma cara de um fato.
+        --
+        -- O painel e o validador reportam a ausencia com essa palavra.
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

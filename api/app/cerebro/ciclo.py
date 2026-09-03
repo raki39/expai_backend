@@ -286,6 +286,10 @@ def rodar(
                 dataset_id=dataset_id,
                 config=config,
                 config_version_id=config_version_id,
+                # A LIGACAO (migracao 14). Sem ela o controle era achado por
+                # "o ultimo B1 casado gravado", e a tela ja mostrou o controle
+                # de um run ao lado do giro de outro.
+                casa_run_id=run_id,
                 operacoes_alvo=operacoes,
                 # O MESMO tamanho de posicao da regra executada (secao 14.3).
                 # Casar o giro e nao casar o tamanho mede dimensionamento em
