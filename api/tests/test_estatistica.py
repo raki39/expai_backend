@@ -415,3 +415,44 @@ def test_o_lote_nao_consulta_saldo_para_decidir() -> None:
     assert "creditos" not in texto, (
         "o lote consulta crédito para decidir promoção"
     )
+
+
+def test_a_correcao_harmonica_cabe_no_campo_que_a_relata() -> None:
+    """`H(48) = 4,458797...` nao cabe em milesimos, e a tela mostrava 4,4580.
+
+    O quarto digito real e **8**, e `int(H * 1000) / 1000` formatado com quatro
+    casas produz um zero inventado. O CLAUDE.md documentava 4,4588 e a tela
+    dizia 4,4580: os dois nao podiam estar certos.
+
+    O LIMIAR nunca dependeu disso - ele sai da `Fraction` exata. O defeito era
+    de relato, e este e justamente o numero que alguem confere a mao contra o
+    artigo, entao relatar errado tira a unica coisa que o campo servia para
+    fazer.
+    """
+    from fractions import Fraction
+
+    from app.estatistica import fdr
+
+    exato = sum(Fraction(1, i) for i in range(1, 49))
+    r = fdr.aplicar({"a": 500_000}, procedimento="BY", alfa_bps=1_000, m=48)
+
+    # Em ppm o numero sobrevive aos quatro digitos publicados.
+    assert r.correcao_harmonica_ppm == int(exato * 1_000_000) == 4_458_797
+    assert f"{r.correcao_harmonica_ppm / 1_000_000:.4f}" == "4.4588"
+
+    # E em milesimos ele NAO sobrevive - o teste afirma a limitacao em vez de
+    # deixar alguem redescobrir formatando o campo errado.
+    assert f"{r.correcao_harmonica_milesimos / 1_000:.4f}" == "4.4580"
+
+    # O limiar continua o da fracao exata, e nao o do campo arredondado.
+    assert r.limiar_efetivo_ppm == 22_427
+    assert r.limiar_efetivo_ppm == int(Fraction(1, 10) / exato * 1_000_000)
+
+
+def test_bh_nao_tem_correcao_e_o_campo_diz_isso() -> None:
+    """Em BH a correcao e 1, e nao "ausente" - o limiar e alfa * i / m."""
+    from app.estatistica import fdr
+
+    r = fdr.aplicar({"a": 500_000}, procedimento="BH", alfa_bps=1_000, m=48)
+    assert r.correcao_harmonica_ppm == 1_000_000
+    assert r.correcao_harmonica_milesimos == 1_000

@@ -48,22 +48,6 @@ class SeparacaoAusente(Exception):
     """
 
 
-def _retornos_bps(barras: list) -> list[int]:
-    """Retorno de fechamento a fechamento, em bps inteiros.
-
-    So alimenta a estimativa de autocorrelacao da secao 8.3. Nao toca dinheiro
-    e nao entra em digest nenhum - por isso a divisao inteira aqui e barata, e
-    nao uma violacao da regra 5 por caminho indireto.
-    """
-    saida: list[int] = []
-    for anterior, atual in zip(barras, barras[1:]):
-        if anterior.close <= 0:
-            saida.append(0)
-            continue
-        saida.append((atual.close - anterior.close) * 10_000 // anterior.close)
-    return saida
-
-
 @dataclass(frozen=True)
 class ResultadoDoCiclo:
     run_id: int
@@ -337,9 +321,11 @@ def rodar(
         b1_casado=b1_casado,
         reflexoes=reflexoes,
         # A serie de onde sai a autocorrelacao que desconta `n_bruto`
-        # (secao 8.3). Vem das barras que este run de fato percorreu - nao de
-        # uma releitura do dataset, que poderia estar sob outra janela.
-        retornos_bps=_retornos_bps(barras),
+        # (secao 8.3). **Uma definicao so**, compartilhada com o validador:
+        # havia duas, e elas discordavam - 11.023 aqui contra 10.976 la, no
+        # mesmo run 30. A independencia de §8.1 e de JUIZO, e nao de
+        # aritmetica sobre um fato dos dados (regra 16).
+        retornos_bps=executor.retornos_do_run(conn, run_id),
         duracao_barra_ms=(
             int(barras[1].open_time_ms - barras[0].open_time_ms)
             if len(barras) >= 2

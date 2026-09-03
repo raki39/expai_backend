@@ -122,6 +122,46 @@ def ordens_executadas(conn: sqlite3.Connection, run_id: int) -> int:
     )
 
 
+def retornos_do_run(conn: sqlite3.Connection, run_id: int) -> list[int]:
+    """Retornos por barra da janela que este run EXECUTOU, em bps.
+
+    **Uma definicao, e ela precisou existir.** Havia duas, e elas produziam
+    numeros diferentes para a mesma grandeza:
+
+      o agente     `_retornos_bps(barras)` no ciclo - a janela inteira que ele
+                   recebeu, 21.024 barras
+      o validador  `_retornos_do_run` - de `MIN(execution_bar_ms)` a
+                   `MAX(execution_bar_ms)`, a janela que as ordens cobriram
+
+    Em producao isso apareceu como `n_efetivo` **11.023** na autoavaliacao do
+    agente e **10.976** no parecer do validador, para o mesmo run 30. E
+    `n_efetivo` e o que decide entre `refutada` e `inconclusiva` (§14.4) -
+    nao e campo de relatorio.
+
+    A independencia que §8.1 exige e de **juizo**, e nao de aritmetica: o
+    validador continua sem ler `agent_event` e continua recalculando o proprio
+    veredito. O que ele nao pode e discordar do agente sobre um FATO dos
+    dados. A regra 16 diz a mesma coisa sobre saldo: uma fonte.
+
+    A janela e a das EXECUCOES, e nao a recebida: a serie que a estrategia
+    enfrentou comeca na primeira ordem. Continua sendo aproximacao da serie de
+    exposicao - as barras com posicao fechada entram -, e digo que e: computar
+    so as expostas produziria uma serie descontinua, e escolher entre as duas e
+    questao de modelagem, nao de conserto de defeito.
+    """
+    janela = conn.execute(
+        "SELECT MIN(execution_bar_ms) AS de, MAX(execution_bar_ms) AS ate,"
+        "       MIN(dataset_id) AS ds"
+        "  FROM execution WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if janela is None or janela["de"] is None:
+        return []
+    return loader.retornos_bps_entre(
+        conn, int(janela["ds"]), int(janela["de"]), int(janela["ate"])
+    )
+
+
 def barras_expostas(
     conn: sqlite3.Connection, run_id: int, duracao_barra_ms: int
 ) -> int:

@@ -691,3 +691,59 @@ def test_inconclusiva_e_distinguivel_de_nunca_avaliada(
     # E uma hipotese INEXISTENTE nao produz parecer nenhum - senao o campo
     # diria algo sobre algo que nunca houve.
     assert promocao.parecer_derivado(conn, 99_999) is None
+
+
+def test_o_agente_e_o_validador_concordam_sobre_n_efetivo(
+    conn: sqlite3.Connection, run_testavel
+) -> None:
+    """Independencia e de JUIZO, nao de aritmetica sobre um fato dos dados.
+
+    §8.1 exige que a promocao venha do validador, e ha teste provando que
+    `promocao.py` nao le `agent_event` nem `evaluation_json`. Mas as duas
+    partes recalculavam a serie de retornos por caminhos diferentes:
+
+      o agente     a janela inteira que ele recebeu, 21.024 barras
+      o validador  de MIN a MAX de `execution_bar_ms`
+
+    Em producao isso deu `n_efetivo` **11.023** na autoavaliacao e **10.976**
+    no parecer, para o mesmo run 30. E `n_efetivo` decide entre `refutada` e
+    `inconclusiva` (§14.4) - discordar sobre ele nao e detalhe de relatorio.
+
+    A regra 16 diz o mesmo sobre saldo: uma fonte. Aqui a fonte e
+    `executor.retornos_do_run`, e este teste prova que os dois a usam.
+    """
+    import json as _json
+
+    from app.maos_rapidas import executor
+
+    run_id = run_testavel.run_id
+    hid = run_testavel.hypothesis_id
+    assert hid is not None
+
+    # O que o AGENTE gravou, no evento de avaliacao - congelado.
+    linha = conn.execute(
+        "SELECT evaluation_json FROM agent_event"
+        " WHERE run_id = ? AND kind = 'avaliacao' ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    assert linha is not None, "o run tem de ter avaliacao posterior (R25.3)"
+    do_agente = _json.loads(linha["evaluation_json"])["pre_registro"]["amostra"]
+
+    # O que o VALIDADOR recalcula agora.
+    do_validador = promocao.parecer_derivado(conn, hid)["detalhe"]["amostra"]
+
+    assert do_agente["n_bruto"] == do_validador["n_bruto"]
+    assert do_agente["n_efetivo"] == do_validador["n_efetivo"], (
+        "as duas partes discordam sobre a amostra efetiva, e e ela que separa"
+        " 'refutada' de 'inconclusiva'"
+    )
+    assert do_agente["autocorrelacao_ppm"] == do_validador["autocorrelacao_ppm"]
+
+    # E a serie de onde os dois saem tem uma definicao so, que nao passa por
+    # nenhum dos dois modulos.
+    assert executor.retornos_do_run(conn, run_id), "a serie nao pode vir vazia"
+
+    # A independencia de juizo continua imposta: o validador nao le o que o
+    # agente concluiu, so o mesmo fato dos dados.
+    fonte = (APP / "validador" / "promocao.py").read_text(encoding="utf-8")
+    assert "evaluation_json" not in fonte

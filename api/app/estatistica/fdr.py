@@ -72,6 +72,17 @@ class Resultado:
     m: int
     alfa_bps: int
     correcao_harmonica_milesimos: int
+    #: A MESMA correcao, em ppm. Existe porque milesimos nao cabem o numero:
+    #: H(48) = 4,458797..., e `int(H * 1000)` = 4458 perde o quarto digito.
+    #: A tela mostrava `4,4580` - inventando um zero onde o digito real e 8 -
+    #: enquanto o CLAUDE.md documentava `4,4588`. Os dois nao podiam estar
+    #: certos, e quem estava errado era a tela.
+    #:
+    #: O LIMIAR nunca dependeu disto: ele sai da `Fraction` exata, e por isso
+    #: `limiar_efetivo_ppm` = 22427 esta correto (0,10 / 4,458797). O defeito
+    #: era so de relato - o que nao o torna pequeno: este e o numero que
+    #: alguem confere a mao contra o artigo.
+    correcao_harmonica_ppm: int
     limiar_efetivo_ppm: int
     k: int
     decisoes: list[Decisao]
@@ -86,6 +97,7 @@ class Resultado:
             "m": self.m,
             "alfa_bps": self.alfa_bps,
             "correcao_harmonica_milesimos": self.correcao_harmonica_milesimos,
+            "correcao_harmonica_ppm": self.correcao_harmonica_ppm,
             "limiar_efetivo_ppm": self.limiar_efetivo_ppm,
             "k": self.k,
             "rejeitadas": self.rejeitadas,
@@ -187,6 +199,10 @@ def aplicar(
         alfa_bps=alfa_bps,
         correcao_harmonica_milesimos=(
             int(harmonico(total) * 1_000) if procedimento == "BY" else 1_000
+        ),
+        correcao_harmonica_ppm=(
+            int(harmonico(total) * 1_000_000) if procedimento == "BY"
+            else 1_000_000
         ),
         limiar_efetivo_ppm=base_ppm,
         k=k,

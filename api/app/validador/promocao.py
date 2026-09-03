@@ -156,29 +156,6 @@ def _duracao_barra_ms(conn: sqlite3.Connection, run_id: int) -> int:
     return int(linha["ms"])
 
 
-def _retornos_do_run(
-    conn: sqlite3.Connection, run_id: int
-) -> list[int]:
-    """Retornos por barra da janela executada, em bps, lidos do banco.
-
-    Alimenta só o desconto de autocorrelação de §8.3. Vem da janela que as
-    execuções de fato cobriram - `bar` pela fronteira do dataset seria ler
-    barra fora do módulo autorizado, e o validador não é exceção à regra que
-    ele próprio existe para impor.
-    """
-    janela = conn.execute(
-        "SELECT MIN(execution_bar_ms) AS de, MAX(execution_bar_ms) AS ate,"
-        "       MIN(dataset_id) AS ds"
-        " FROM execution WHERE run_id = ?",
-        (run_id,),
-    ).fetchone()
-    if janela is None or janela["de"] is None:
-        return []
-    return loader.retornos_bps_entre(
-        conn, int(janela["ds"]), int(janela["de"]), int(janela["ate"])
-    )
-
-
 def _julgar(
     conn: sqlite3.Connection, hypothesis_id: int, run_id: int
 ) -> tuple[veredito_mod.Veredito, dict]:
@@ -190,7 +167,13 @@ def _julgar(
     pre = _pre_registro(hip)
     duracao = _duracao_barra_ms(conn, run_id)
     bruto = executor.barras_expostas(conn, run_id, duracao)
-    efetivo = poder.efetivo_de_bruto(_retornos_do_run(conn, run_id), bruto)
+    efetivo = poder.efetivo_de_bruto(
+        # A MESMA serie que a autoavaliacao do agente le. As duas
+        # produziam numeros diferentes para `n_efetivo`, e e ele que
+        # decide entre `refutada` e `inconclusiva` (§14.4).
+        executor.retornos_do_run(conn, run_id),
+        bruto,
+    )
 
     realizado = veredito_mod.observar(
         conn,
@@ -234,7 +217,7 @@ def _estatistica_do_run(
     momento, e afirmar curtose 3 (normal) sobre ela seria inventar
     normalidade que ninguem mediu.
     """
-    retornos = _retornos_do_run(conn, run_id)
+    retornos = executor.retornos_do_run(conn, run_id)
     try:
         m = sharpe_mod.momentos(retornos)
     except sharpe_mod.AmostraCurta as erro:
