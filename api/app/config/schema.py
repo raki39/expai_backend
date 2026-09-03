@@ -188,6 +188,37 @@ class ExperimentConfig(BaseModel):
     b3_fast: int = Field(default=20, ge=1)
     b3_slow: int = Field(default=50, ge=2)
 
+    # ---------------------------- familia fechada e FDR (secao 8.6, 0B)
+    #
+    # Todos MATERIAIS, e nao por formalidade: o limiar efetivo decide o que
+    # e promovido, e o teto da familia decide quantas hipoteses cabem no
+    # lote. Trocar qualquer um deles muda o resultado do experimento.
+    #
+    # "Numero maximo de hipoteses: fixado antes de comecar, NAO AJUSTAVEL
+    # DURANTE" (secao 8.6). A trava vive no BANCO: um gatilho recusa a
+    # hipotese de numero 49 sob a config que abriu o run. Aqui esta o valor;
+    # a imposicao esta na migracao 12.
+    familia_max_hipoteses: int = Field(default=48, ge=1)      # D25
+
+    # "BH, ou BY se a estrutura de dependencia exigir; escolhido ANTES da
+    # primeira hipotese" (secao 8.6). D26 escolheu BY: as hipoteses do lote
+    # sao variacoes de parametro da mesma estrategia sobre a mesma serie, e
+    # o documento chama isso de "altamente dependentes".
+    fdr_procedimento: Literal["BH", "BY"] = "BY"             # D26
+
+    # Alvo de 10%, literal da secao 8.6. Em bps para nao haver ponto
+    # flutuante decidindo promocao.
+    fdr_alvo_bps: int = Field(default=1_000, ge=1, le=10_000)
+
+    # Limiar do Deflated Sharpe Ratio (secao 8.6, criterio B6 de 14.4).
+    # "O DSR e uma PROBABILIDADE, nao um score" - 0,95 em milesimos.
+    dsr_minimo_milesimos: int = Field(default=950, ge=1, le=1_000)
+
+    # -------------------------------- creditos de teste (secao 8.6.1, D30)
+    # Pesos 1/3/5/10 sao do documento e nao sao configuraveis: mexer neles
+    # seria reprecificar o que a secao 8.6.1 fixa. O orcamento e nosso.
+    creditos_por_braco: int = Field(default=60, ge=1)        # D30
+
     # ------------------------------------------------------ nao materiais
     default_seed: int = 42
     note: str = ""

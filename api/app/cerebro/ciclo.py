@@ -22,6 +22,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from .. import creditos as creditos_mod
 from ..config.schema import ExperimentConfig
 from ..ledger import livro
 from ..maos_rapidas import baselines, executor
@@ -162,6 +163,17 @@ def rodar(
         conn,
         config_version_id=config_version_id,
         seed_capital_usd_cents=config.seed_capital_usd_cents,
+    )
+
+    # O orcamento de creditos do braco, vindo da CONFIG versionada (D30) e
+    # nao de escolha do agente. Idempotente por (braco, config_version): o
+    # segundo run da mesma config nao ganha orcamento novo, e e o ponto -
+    # senao bastaria reabrir run para comprar tentativas.
+    creditos_mod.conceder(
+        conn,
+        braco="agente",
+        config_version_id=config_version_id,
+        creditos=config.creditos_por_braco,
     )
 
     dep = grafo.Dependencias(

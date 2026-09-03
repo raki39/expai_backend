@@ -179,6 +179,22 @@ def holdout(
     return barras
 
 
+def barras_do_holdout(conn: sqlite3.Connection, dataset_id: int) -> int:
+    """QUANTAS barras o periodo selado tem. Nao devolve nenhuma delas.
+
+    Mora aqui, e nao em quem pergunta, porque a guarda do incremento 9 e
+    sobre o modulo que conhece o selado - e ela nao distingue "ler o dado" de
+    "ler quanto dado existe", nem deveria: uma guarda que precisa julgar
+    intencao para de ser verificavel.
+
+    O validador precisou deste numero para o quarto item de R43 - "custo de
+    oportunidade do dado reservado consumido" - e a primeira versao escreveu
+    a consulta dentro de si. A guarda recusou, corretamente.
+    """
+    c = conjunto(conn, dataset_id, "holdout")
+    return c.bars if c else 0
+
+
 def ja_consumiu(conn: sqlite3.Connection, hypothesis_id: int) -> bool:
     return bool(
         conn.execute(

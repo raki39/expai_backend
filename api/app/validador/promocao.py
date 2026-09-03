@@ -39,9 +39,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 
+from .. import creditos as creditos_mod
 from ..dataset import loader, selado
+from ..estatistica import pvalor as pvalor_mod
+from ..estatistica import sharpe as sharpe_mod
 from ..hipotese import poder
 from ..hipotese import registro as hipotese_registro
 from ..hipotese import veredito as veredito_mod
@@ -52,10 +56,9 @@ from . import estados
 
 log = logging.getLogger(__name__)
 
-# Peso de "teste in-sample de hipótese pré-registrada" e de "teste
-# out-of-sample", §8.6.1. Registrados aqui e cobrados no incremento 11.
-CREDITOS_IN_SAMPLE = 1
-CREDITOS_OUT_OF_SAMPLE = 5
+# O braço experimental do agente. O B4 usa 'b4', e entra no incremento 12 -
+# §14.3 exige "mesmo orçamento de créditos de teste" para os dois.
+BRACO_DO_AGENTE = "agente"
 
 
 class NaoAvaliavel(Exception):
@@ -204,7 +207,54 @@ def _julgar(
     detalhe["amostra"]["autocorrelacao_ppm"] = efetivo.autocorrelacao_ppm
     detalhe["run_id"] = run_id
     detalhe["recalculado_pelo_validador"] = True
+
+    # O Sharpe REALIZADO e o p-valor. Nao existiam antes do incremento 11, e
+    # sem eles BH/BY nao tem o que ordenar nem o DSR o que deflacionar.
+    #
+    # Vem junto do veredito, e nao num passo a parte: um p-valor calculado
+    # depois, a partir de outra leitura da mesma serie, poderia divergir do
+    # que o veredito viu - e ai o lote seria ordenado por numeros que nao
+    # descrevem os julgamentos que ele contem.
+    detalhe["estatistica"] = _estatistica_do_run(
+        conn, run_id, duracao_barra_ms=duracao, n_efetivo=efetivo.efetivo
+    )
     return v, detalhe
+
+
+def _estatistica_do_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    duracao_barra_ms: int,
+    n_efetivo: int,
+) -> dict:
+    """Sharpe realizado, momentos e p-valor. `None` quando a serie e curta.
+
+    `None` com motivo, e nao zero: uma serie de tres barras nao tem quarto
+    momento, e afirmar curtose 3 (normal) sobre ela seria inventar
+    normalidade que ninguem mediu.
+    """
+    retornos = _retornos_do_run(conn, run_id)
+    try:
+        m = sharpe_mod.momentos(retornos)
+    except sharpe_mod.AmostraCurta as erro:
+        return {
+            "disponivel": False,
+            "por_que": str(erro),
+            "p_valor_ppm": None,
+        }
+    anualizado = m.sharpe_anualizado(duracao_barra_ms)
+    teste = pvalor_mod.de_sharpe(
+        sharpe_anualizado=anualizado,
+        n_efetivo=n_efetivo,
+        barras_por_ano_=poder.barras_por_ano(duracao_barra_ms),
+    )
+    return {
+        "disponivel": True,
+        "momentos": m.como_dict(duracao_barra_ms),
+        "teste": teste.como_dict(),
+        "p_valor_ppm": teste.p_valor_ppm,
+    }
 
 
 def avaliar_in_sample(
@@ -221,7 +271,6 @@ def avaliar_in_sample(
         etapa="in_sample",
         de_esperado=estados.ENTRADA,
         promove_para="candidata",
-        creditos=CREDITOS_IN_SAMPLE,
     )
 
 
@@ -253,8 +302,49 @@ def avaliar_out_of_sample(
         etapa="out_of_sample",
         de_esperado="candidata",
         promove_para=estados.QUARENTENA,
-        creditos=CREDITOS_OUT_OF_SAMPLE,
     )
+
+
+def _config_version(conn: sqlite3.Connection, run_id: int) -> int:
+    linha = conn.execute(
+        "SELECT config_version_id FROM run WHERE id = ?", (run_id,)
+    ).fetchone()
+    if linha is None:
+        raise NaoAvaliavel(f"run {run_id} não existe")
+    return int(linha["config_version_id"])
+
+
+def _familia_max(conn: sqlite3.Connection, run_id: int) -> int:
+    """O teto da família da config que abriu o run (§8.6, D25).
+
+    Da config do RUN, e não da vigente: a família é propriedade do lote, e
+    "não ajustável durante" (§8.6). Ler a vigente faria a multiplicidade
+    mudar no meio.
+    """
+    linha = conn.execute(
+        "SELECT COALESCE("
+        "  json_extract(cv.payload_json, '$.familia_max_hipoteses'), 48"
+        ") AS teto FROM config_version cv"
+        " WHERE cv.id = (SELECT config_version_id FROM run WHERE id = ?)",
+        (run_id,),
+    ).fetchone()
+    return int(linha["teto"]) if linha else 48
+
+
+def _barras_do_holdout(conn: sqlite3.Connection, run_id: int) -> int:
+    """Pergunta ao modulo dono do selado, e nao ao banco.
+
+    Escrever a consulta aqui foi recusado pela guarda do incremento 9 - com
+    razao: uma guarda que precisasse distinguir "ler o dado" de "ler quanto
+    dado existe" deixaria de ser verificavel.
+    """
+    linha = conn.execute(
+        "SELECT MIN(dataset_id) AS ds FROM execution WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if linha is None or linha["ds"] is None:
+        return 0
+    return selado.barras_do_holdout(conn, int(linha["ds"]))
 
 
 def _exigir_estado(
@@ -280,12 +370,39 @@ def _avaliar(
     etapa: str,
     de_esperado: str,
     promove_para: str,
-    creditos: int,
 ) -> Parecer:
     estado = _exigir_estado(conn, hypothesis_id, de_esperado, etapa=etapa)
 
+    # ---------------------------------------------------------- creditos
+    #
+    # COBRADO ANTES de julgar, e nao depois. Cobrar depois deixaria o teste
+    # rodar sem orcamento e so entao recusar - o gasto de CPU e a leitura do
+    # dado teriam acontecido, e a escassez da secao 8.6.1 seria decorativa.
+    #
+    # O tipo sai do CONTEUDO: hipotese cujo hash ja apareceu antes e reteste
+    # com parametro alterado, e custa 3 em vez de 1.
+    tipo = creditos_mod.tipo_do_teste(conn, hypothesis_id, etapa=etapa)
+    familia_max = _familia_max(conn, run_id)
+    inicio = time.perf_counter_ns()
+
     v, detalhe = _julgar(conn, hypothesis_id, run_id)
-    evidencia = {"etapa": etapa, "creditos": creditos, **detalhe}
+
+    creditos = creditos_mod.cobrar(
+        conn,
+        braco=BRACO_DO_AGENTE,
+        config_version_id=_config_version(conn, run_id),
+        hypothesis_id=hypothesis_id,
+        tipo=tipo,
+        # Quarto numero de R43: custo computacional REAL, medido. O relogio
+        # cobre exatamente o julgamento - nao a transicao nem o log.
+        cpu_micros=(time.perf_counter_ns() - inicio) // 1_000,
+        # Quinto: dado reservado consumido. So o out-of-sample toca o selado.
+        barras_reservadas=(
+            _barras_do_holdout(conn, run_id) if etapa == "out_of_sample" else 0
+        ),
+        familia_max=familia_max,
+    )
+    evidencia = {"etapa": etapa, "tipo_cobrado": tipo, "creditos": creditos, **detalhe}
 
     if v.veredito == "sustentada":
         estados.transitar(

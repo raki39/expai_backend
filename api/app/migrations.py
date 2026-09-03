@@ -1543,6 +1543,222 @@ MIGRACOES: list[tuple[int, str, str]] = [
         GROUP BY agente_origem;
         """,
     ),
+    (
+        12,
+        "incremento 11: familia fechada com teto, e creditos de teste",
+        """
+        -- ==================================================================
+        -- FAMILIA FECHADA, COM O TETO IMPOSTO PELO BANCO (R38, secao 8.6).
+        --
+        -- "Numero maximo de hipoteses: fixado antes de comecar, NAO
+        -- AJUSTAVEL DURANTE."
+        --
+        -- A hipotese de numero 49 e RECUSADA, nunca truncada em silencio.
+        -- Truncar seria pior que recusar: o lote continuaria parecendo
+        -- completo e a multiplicidade estaria subestimada, o que empurra o
+        -- limiar de BY na direcao de promover.
+        --
+        -- O teto vem da `config_version` sob a qual o RUN foi aberto, e nao
+        -- da vigente. Um lote e definido pela config que o abriu; ler a
+        -- vigente faria o teto mudar no meio do lote, que e exatamente o que
+        -- "nao ajustavel durante" proibe.
+        --
+        -- **A familia e por config_version, e o contador do DSR nao.** Trocar
+        -- de config abre familia nova - e a secao 10.2.3 ja diz que mudanca
+        -- material invalida toda comparacao que a atravesse, entao usar isso
+        -- para comprar tentativas custa a comparacao inteira. O contador
+        -- global de `tentativas_por_especialidade` continua somando TUDO, e e
+        -- ele que alimenta o DSR (secao 8.6): "o contador global e registro
+        -- historico (...) alimenta o calculo do DSR".
+        -- ==================================================================
+        CREATE TRIGGER familia_fechada_nao_estica
+        BEFORE INSERT ON hypothesis
+        WHEN (
+            SELECT COUNT(*)
+              FROM hypothesis h
+              JOIN run r ON r.id = h.run_id
+             WHERE r.config_version_id = (
+                 SELECT config_version_id FROM run WHERE id = NEW.run_id
+             )
+        ) >= (
+            SELECT COALESCE(
+                json_extract(cv.payload_json, '$.familia_max_hipoteses'), 48
+            )
+              FROM config_version cv
+             WHERE cv.id = (
+                 SELECT config_version_id FROM run WHERE id = NEW.run_id
+             )
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'familia fechada cheia: o teto da config que abriu este run ja foi alcancado, e a secao 8.6 diz que ele nao e ajustavel durante o experimento');
+        END;
+
+        -- ==================================================================
+        -- CREDITOS DE TESTE (R42, R43, secao 8.6.1).
+        --
+        -- "Tentativa estatistica e recurso escasso, consome creditos e sai do
+        -- orcamento do agente."
+        --
+        -- **NAO e o ledger.** A regra 7 fixa DOIS livros - real em BRL e
+        -- simulado em USD - e credito nao e nenhum dos dois: na Fase 0 os
+        -- pesos "sao pesos administrativos iniciais, nao custos economicos
+        -- demonstrados (...) servem apenas para criar escassez". Enfia-los
+        -- num terceiro livro tornaria "somar o ledger" uma operacao sem
+        -- significado.
+        --
+        -- O que se herda do ledger e a DISCIPLINA: apenas por acrescimo,
+        -- saldo derivado, nunca armazenado.
+        -- ==================================================================
+        CREATE TABLE test_credit_budget (
+            braco             TEXT    NOT NULL
+                                      CHECK (braco IN ('agente', 'b4')),
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+            creditos          INTEGER NOT NULL CHECK (creditos > 0),
+            created_at        TEXT    NOT NULL,
+
+            -- Por config_version, como a familia. E o mesmo raciocinio:
+            -- orcamento e propriedade do lote, nao do calendario.
+            PRIMARY KEY (braco, config_version_id)
+        );
+
+        CREATE TRIGGER test_credit_budget_sem_update
+        BEFORE UPDATE ON test_credit_budget
+        BEGIN
+            SELECT RAISE(ABORT,
+                'aumentar o orcamento no meio do lote e comprar tentativas depois de ver resultado');
+        END;
+
+        CREATE TRIGGER test_credit_budget_sem_delete
+        BEFORE DELETE ON test_credit_budget
+        BEGIN
+            SELECT RAISE(ABORT, 'test_credit_budget e apenas por acrescimo');
+        END;
+
+        CREATE TABLE test_credit_entry (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            braco             TEXT    NOT NULL
+                                      CHECK (braco IN ('agente', 'b4')),
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+            hypothesis_id     INTEGER NOT NULL REFERENCES hypothesis(id),
+
+            -- Os quatro tipos da tabela da secao 8.6.1, e so eles.
+            tipo TEXT NOT NULL
+                 CHECK (tipo IN ('in_sample', 'reteste_parametro',
+                                 'out_of_sample', 'quarentena')),
+
+            creditos    INTEGER NOT NULL CHECK (creditos > 0),
+            occurred_at TEXT    NOT NULL,
+
+            -- ------------------------------------------------- R43
+            -- "O que deve ser medido durante a fase, para calibra-los
+            -- depois" - secao 8.6.1. Os quatro numeros, gravados POR TESTE.
+            --
+            -- Medidos e nao estimados no fim: estimar depois exigiria supor
+            -- quantos testes de cada tipo houve e quanto cada um custou, e a
+            -- calibracao existe justamente porque ninguem sabe isso.
+            --
+            -- 1. consumo por tipo -> derivado de (tipo, creditos)
+            -- 2. impacto no orcamento estatistico da especialidade
+            impacto_fdr_bps   INTEGER NOT NULL CHECK (impacto_fdr_bps >= 0),
+            -- 3. custo computacional real
+            cpu_micros        INTEGER NOT NULL CHECK (cpu_micros >= 0),
+            -- 4. custo de oportunidade do dado reservado consumido
+            barras_reservadas INTEGER NOT NULL CHECK (barras_reservadas >= 0)
+
+            -- NAO existe coluna de saldo. Duas fontes de verdade sobre
+            -- quanto resta divergiriam, e ai nao havia como saber qual esta
+            -- certa (regra 16). O saldo sai da view abaixo.
+        );
+
+        CREATE INDEX idx_credit_braco
+            ON test_credit_entry(braco, config_version_id);
+        CREATE INDEX idx_credit_hyp ON test_credit_entry(hypothesis_id);
+
+        CREATE TRIGGER test_credit_entry_sem_update
+        BEFORE UPDATE ON test_credit_entry
+        BEGIN
+            SELECT RAISE(ABORT,
+                'consumo de credito e imutavel: e ele que prova quantas tentativas foram compradas');
+        END;
+
+        CREATE TRIGGER test_credit_entry_sem_delete
+        BEFORE DELETE ON test_credit_entry
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar consumo de credito e devolver tentativa ja gasta, que e a forma exata de burlar a escassez da secao 8.6.1');
+        END;
+
+        -- Os pesos sao do DOCUMENTO, e nao configuraveis. O gatilho torna
+        -- impossivel cobrar 1 por um out-of-sample - que consumiria dado
+        -- reservado ao preco de um teste in-sample.
+        CREATE TRIGGER credito_usa_o_peso_do_documento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NEW.creditos <> (
+            CASE NEW.tipo
+                WHEN 'in_sample'         THEN 1
+                WHEN 'reteste_parametro' THEN 3
+                WHEN 'out_of_sample'     THEN 5
+                WHEN 'quarentena'        THEN 10
+            END
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'peso errado: a secao 8.6.1 fixa 1 in-sample, 3 reteste com parametro, 5 out-of-sample, 10 quarentena');
+        END;
+
+        -- Sem orcamento nao ha teste. Precisa ser gatilho proprio: a
+        -- comparacao do gatilho seguinte daria NULL com orcamento ausente, e
+        -- NULL nao dispara WHEN - o teste passaria de graca.
+        CREATE TRIGGER credito_exige_orcamento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NOT EXISTS (
+            SELECT 1 FROM test_credit_budget
+             WHERE braco = NEW.braco
+               AND config_version_id = NEW.config_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'nao ha orcamento de creditos para este braco nesta config: testar sem orcamento e testar de graca');
+        END;
+
+        CREATE TRIGGER credito_nao_estoura_orcamento
+        BEFORE INSERT ON test_credit_entry
+        WHEN NEW.creditos > (
+            SELECT b.creditos - COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = NEW.braco
+                   AND e.config_version_id = NEW.config_version_id
+            ), 0)
+              FROM test_credit_budget b
+             WHERE b.braco = NEW.braco
+               AND b.config_version_id = NEW.config_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'creditos insuficientes: o orcamento do braco acabou, e a secao 8.6.1 existe para que acabar signifique parar');
+        END;
+
+        -- Saldo DERIVADO. Mesmo desenho de `account_balance`: uma view sobre
+        -- tabela append-only nao pode divergir do que aconteceu.
+        CREATE VIEW test_credit_balance AS
+        SELECT
+            b.braco,
+            b.config_version_id,
+            b.creditos AS orcamento,
+            COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = b.braco
+                   AND e.config_version_id = b.config_version_id
+            ), 0) AS consumido,
+            b.creditos - COALESCE((
+                SELECT SUM(e.creditos) FROM test_credit_entry e
+                 WHERE e.braco = b.braco
+                   AND e.config_version_id = b.config_version_id
+            ), 0) AS restante
+        FROM test_credit_budget b;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

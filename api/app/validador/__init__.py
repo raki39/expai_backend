@@ -9,6 +9,6 @@ que é o que §11.2.1 descreve para `validate_on_holdout` — "o agente solicita
 quem executa é o Validador".
 """
 
-from . import contador, estados, promocao
+from . import contador, estados, lote, promocao
 
-__all__ = ["contador", "estados", "promocao"]
+__all__ = ["contador", "estados", "lote", "promocao"]

@@ -51,7 +51,9 @@ from ..relatorio import reprodutibilidade as relatorio_reprodutibilidade
 from ..relatorio import texto as relatorio_texto
 from ..relatorio import vinculo as relatorio_vinculo
 from ..simulador import execucao as simulador
+from .. import creditos as creditos_mod
 from ..validador import contador as validador_contador
+from ..validador import lote as validador_lote
 from ..validador import estados as validador_estados
 from ..security import exigir_token_de_servico
 from ..settings import Settings
@@ -328,6 +330,48 @@ def validador_estado(request: Request) -> dict[str, Any]:
             " imutavel e nao tem coluna de estado (secao 8.1, regra 16)"
         ),
     }
+
+
+@router.get("/lote")
+def lote_fechado(request: Request) -> dict[str, Any]:
+    """O procedimento de lote sobre a familia fechada, e o DSR (secao 8.6).
+
+    NAO promove nada: e parecer sobre o conjunto, e por isso da para olhar
+    quantas vezes quiser antes de decidir. Quem move cada hipotese e
+    `promocao`, uma a uma, com a evidencia dela.
+    """
+    conn = _conn(request)
+    vigente = config_service.versao_atual(conn)
+    if vigente is None:
+        raise HTTPException(status_code=409, detail="nao ha config vigente")
+    cfg = vigente.config
+    return {
+        "config_version_id": vigente.id,
+        "parametros": {
+            "familia_max_hipoteses": cfg.familia_max_hipoteses,
+            "fdr_procedimento": cfg.fdr_procedimento,
+            "fdr_alvo_bps": cfg.fdr_alvo_bps,
+            "dsr_minimo_milesimos": cfg.dsr_minimo_milesimos,
+        },
+        "fechamento": validador_lote.fechar(
+            conn,
+            config_version_id=vigente.id,
+            familia_max=cfg.familia_max_hipoteses,
+            procedimento=cfg.fdr_procedimento,
+            alfa_bps=cfg.fdr_alvo_bps,
+            dsr_minimo_milesimos=cfg.dsr_minimo_milesimos,
+        ).como_dict(),
+    }
+
+
+@router.get("/creditos")
+def creditos_de_teste(request: Request) -> dict[str, Any]:
+    """Saldo por braco e os quatro numeros de calibracao da secao 8.6.1.
+
+    O saldo e DERIVADO da view: nao existe coluna de saldo que pudesse
+    divergir do consumo (regra 16).
+    """
+    return creditos_mod.calibracao(_conn(request))
 
 
 @router.get("/validador/hipotese/{hypothesis_id}")
