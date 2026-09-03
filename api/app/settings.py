@@ -79,6 +79,36 @@ class Settings(BaseSettings):
     # vez: e ter um interruptor que quem opera liga, usa e desliga.
     habilitar_docs: bool = False
 
+    @field_validator("habilitar_docs", mode="before")
+    @classmethod
+    def _bool_tolerante(cls, v):
+        """Aceita vazio como desligado, e aceita "sim"/"nao".
+
+        Sem isto, `HABILITAR_DOCS=` derruba o BOOT com `ValidationError` -
+        e era exatamente o que o `.env.example` shipava, com o campo vazio.
+        Quem copiasse o arquivo nao subiria o servico, e a mensagem falaria
+        de booleano invalido em vez de "voce copiou o exemplo".
+
+        Uma variavel de ambiente vazia significa "nao defini". Tratar isso
+        como erro fatal e a forma mais cara de ser rigoroso: derruba o
+        servico inteiro por causa de uma linha que ninguem preencheu.
+
+        E aceita `sim`/`nao` porque o projeto inteiro e escrito em portugues,
+        e `HABILITAR_DOCS=sim` e o que qualquer um digitaria antes de ler a
+        documentacao.
+        """
+        if v is None:
+            return False
+        if isinstance(v, str):
+            limpo = v.strip().lower()
+            if limpo == "":
+                return False
+            if limpo in ("sim", "s"):
+                return True
+            if limpo in ("nao", "não", "n"):
+                return False
+        return v
+
     # ------------------------------------------------------------- CORS
     # Lista separada por virgula. Vazio = nenhuma origem liberada.
     #

@@ -582,3 +582,62 @@ def test_as_rotas_continuam_exigindo_token_com_docs_ligados(
             assert c.get("/api/separacao").status_code == 401
     finally:
         get_settings.cache_clear()
+
+
+def test_habilitar_docs_vazio_nao_derruba_o_boot(monkeypatch, ambiente) -> None:
+    """`HABILITAR_DOCS=` era um `ValidationError` fatal - e estava no exemplo.
+
+    O `.env.example` shipou o campo VAZIO. Quem copiasse o arquivo nao subiria
+    o servico, e a mensagem falaria de booleano invalido em vez de dizer que
+    ele copiou o exemplo.
+
+    Variavel de ambiente vazia significa "nao defini". Derrubar o servico
+    inteiro por isso e a forma mais cara de ser rigoroso.
+    """
+    from app.settings import Settings, get_settings
+
+    get_settings.cache_clear()
+    try:
+        for vazio in ("", "   "):
+            monkeypatch.setenv("HABILITAR_DOCS", vazio)
+            assert Settings().habilitar_docs is False
+    finally:
+        monkeypatch.delenv("HABILITAR_DOCS", raising=False)
+        get_settings.cache_clear()
+
+
+def test_habilitar_docs_aceita_sim_e_nao(monkeypatch, ambiente) -> None:
+    """O projeto e escrito em portugues; `sim` e o que se digita antes de ler."""
+    from app.settings import Settings, get_settings
+
+    get_settings.cache_clear()
+    try:
+        for texto, esperado in (
+            ("sim", True), ("SIM", True), ("nao", False), ("não", False),
+            ("1", True), ("true", True), ("0", False),
+        ):
+            monkeypatch.setenv("HABILITAR_DOCS", texto)
+            assert Settings().habilitar_docs is esperado, texto
+    finally:
+        monkeypatch.delenv("HABILITAR_DOCS", raising=False)
+        get_settings.cache_clear()
+
+
+def test_valor_sem_sentido_continua_sendo_recusado(monkeypatch, ambiente) -> None:
+    """Tolerar vazio nao e tolerar qualquer coisa.
+
+    `HABILITAR_DOCS=talvez` e um engano de quem escreveu, e falhar alto ali e
+    o comportamento certo - diferente de vazio, que significa "nao defini".
+    """
+    import pytest as _pytest
+
+    from app.settings import Settings, get_settings
+
+    get_settings.cache_clear()
+    try:
+        monkeypatch.setenv("HABILITAR_DOCS", "talvez")
+        with _pytest.raises(Exception):
+            Settings()
+    finally:
+        monkeypatch.delenv("HABILITAR_DOCS", raising=False)
+        get_settings.cache_clear()
