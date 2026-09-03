@@ -170,14 +170,33 @@ def atribuicao(
             ),
         }
     if executou:
-        # Nao ha caminho que chegue aqui hoje - `executa_regra_padrao` so
-        # devolve True para `teto_atingido` ou para "sem parada". Fica escrito
-        # porque, se alguem acrescentar categoria a `EXECUTA_MESMO_ASSIM`, o
-        # que precisa aparecer e a atribuicao, e nao um `None` silencioso.
+        # **Eu escrevi aqui que nao havia caminho que chegasse.** Havia: um run
+        # que executou, sem parada e sem regra do cerebro - que e exatamente o
+        # que um run de B4 e. Ele apareceu em producao com o texto
+        # "parada em None, com execucao autorizada", que nao explica nada a
+        # quem le.
+        #
+        # A causa raiz era outra (a rota do agente mostrava run de B4), mas o
+        # texto tem de servir de todo jeito: um ramo alcancavel com mensagem
+        # de ramo impossivel e pior que o ramo nao existir.
+        if categoria is None:
+            return {
+                "atribuivel_ao_agente": False,
+                "o_que_executou": "a regra padrao",
+                "por_que": (
+                    "houve execucao e nenhuma regra veio do cerebro, e tambem"
+                    " nao houve parada. E o formato de um run que nao e do"
+                    " agente - de B4, por exemplo. Se isto aparecer na tela do"
+                    " agente, quem esta errado e a consulta que escolheu o run"
+                ),
+            }
         return {
             "atribuivel_ao_agente": False,
             "o_que_executou": "a regra padrao",
-            "por_que": f"parada em {categoria!r}, com execucao autorizada",
+            "por_que": (
+                f"parada em {categoria!r}, que autoriza executar sem decisao"
+                " do cerebro. Ver `EXECUTA_MESMO_ASSIM`"
+            ),
         }
     return {
         "atribuivel_ao_agente": False,

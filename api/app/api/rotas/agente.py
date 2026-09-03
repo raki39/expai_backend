@@ -45,8 +45,27 @@ def agente_estado(request: Request) -> dict[str, Any]:
     tem, nao passou. Nao ha estado para ficar desatualizado.
     """
     conn = _conn(request)
+    # O ultimo run DO AGENTE, e nao o ultimo run com evento.
+    #
+    # Ate o incremento 12 os dois eram a mesma coisa: so o cerebro emitia
+    # `agent_event`. B4 tambem emite - evento nao cognitivo, provedor nulo -,
+    # e no primeiro B4 rodado em producao esta rota passou a mostrar o run 52,
+    # do controle, com o pre-registro dele e a atribuicao dele.
+    #
+    # O `braco.AGENT_ID = "b4-0001"` foi escrito COM UM COMENTARIO dizendo que
+    # impedia exatamente isso. Nao impedia: o filtro daqui era sobre
+    # `agent_event`, e nao sobre o dono do run. Comentario afirmando protecao
+    # que nao existe e o padrao que este projeto ja registrou treze vezes, e
+    # esta foi escrita por mim no mesmo incremento.
+    #
+    # O filtro e POSITIVO - `= AGENT_ID_PADRAO` - e nao a exclusao de B4: um
+    # terceiro braco que emita evento nao voltaria a aparecer aqui por
+    # esquecimento.
     linha = conn.execute(
-        "SELECT MAX(run_id) AS run_id FROM agent_event WHERE run_id IS NOT NULL"
+        "SELECT MAX(e.run_id) AS run_id FROM agent_event e"
+        " JOIN run r ON r.id = e.run_id"
+        " WHERE r.agent_id = ?",
+        (livro.AGENT_ID_PADRAO,),
     ).fetchone()
     run_id = linha["run_id"] if linha else None
     if run_id is None:
@@ -73,6 +92,7 @@ def agente_estado(request: Request) -> dict[str, Any]:
         executou=ordens > 0,
     )
     do_agente = bool(atribuicao["atribuivel_ao_agente"])
+    b1 = baselines.b1_do_agente(conn)
     hypothesis_id = conn.execute(
         "SELECT MAX(id) AS id FROM hypothesis WHERE run_id = ?", (int(run_id),)
     ).fetchone()["id"]
@@ -107,7 +127,32 @@ def agente_estado(request: Request) -> dict[str, Any]:
         # O controle do acaso casado com o giro DESTE run (D19). O B1 da
         # comparacao e casado com o B3 e tem outro giro - comparar o agente
         # com aquele mediria giro em vez de escolha de momento.
-        "b1_casado": baselines.b1_do_agente(conn),
+        "b1_casado": b1,
+        # A D19 CONFERIDA, e nao suposta.
+        #
+        # `b1_do_agente` devolve o ultimo B1 casado gravado, globalmente - nao
+        # ha ligacao entre o run do B1 e o run que ele casa. Enquanto so o
+        # agente produzia B1 casado, o ultimo era sempre o do ultimo run dele.
+        #
+        # Em producao a tela mostrou 37 idas e voltas do run ao lado de um
+        # controle de 70, porque o run exibido era outro. A D19 existe
+        # exatamente para impedir comparar giros diferentes, e o defeito
+        # aparecia como uma tabela plausivel.
+        #
+        # Enquanto a ligacao nao existe (incremento 13), o campo DIZ quando
+        # nao casa, em vez de deixar a tabela mentir.
+        "b1_casado_confere": (
+            None if not b1 else {
+                "casa": int(b1.get("operacoes_alvo") or -1) == idas_e_voltas,
+                "operacoes_alvo": b1.get("operacoes_alvo"),
+                "idas_e_voltas_do_run": idas_e_voltas,
+                "por_que_importa": (
+                    "cada ida e volta paga um pedagio fixo, entao comparar"
+                    " giros diferentes mede giro e nao escolha de momento"
+                    " (D19, secao 14.3)"
+                ),
+            }
+        ),
         # Onde o resultado caiu na distribuicao do acaso. Vem da api porque
         # classificar e decidir, e decidir sobre o experimento nao acontece no
         # painel (regra 19). Ele comparava com p5/p50/p95 na tela - e a mesma
@@ -119,8 +164,7 @@ def agente_estado(request: Request) -> dict[str, Any]:
         # ao lado diz por que ele esta vazio.
         "faixa": (
             cerebro_avaliacao.faixa_contra_o_acaso(
-                simulador.caixa_cents(conn, int(run_id)),
-                baselines.b1_do_agente(conn),
+                simulador.caixa_cents(conn, int(run_id)), b1
             )
             if do_agente
             else None

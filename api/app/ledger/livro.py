@@ -196,12 +196,19 @@ def estornar(conn: sqlite3.Connection, transaction_id: int, *, memo: str = "") -
 # ---------------------------------------------------------------------------
 
 
+#: O `agent_id` do run DO AGENTE. Nomeado porque agora ha mais de um dono de
+#: run que emite `agent_event`: o braco B4 tambem emite (evento nao cognitivo,
+#: provedor nulo), e sem um identificador para filtrar, "o ultimo run com
+#: evento" passou a incluir os runs do controle.
+AGENT_ID_PADRAO = "agent-0001"
+
+
 def abrir_run(
     conn: sqlite3.Connection,
     *,
     config_version_id: int,
     seed_capital_usd_cents: int,
-    agent_id: str = "agent-0001",
+    agent_id: str = AGENT_ID_PADRAO,
 ) -> tuple[int, int]:
     """Cria o run e credita o capital semente COMO LANCAMENTO.
 

@@ -24,6 +24,7 @@ from app.b4 import braco, busca
 from app.config.schema import ExperimentConfig
 from app.hipotese import registro as hipotese_registro
 from app.validador import contador, lote
+from tests.test_cerebro import settings  # noqa: F401
 from tests.test_maos_rapidas import criar_dataset, precos_passeio
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
@@ -855,3 +856,116 @@ def test_o_post_de_b4_traz_uma_linha_de_resumo(
     # E o corpo inteiro de fato nao cabe - senao este campo seria desnecessario
     # e o teste passaria por vacuidade.
     assert len(_json.dumps(corpo)) > 4_000
+
+
+# ===========================================================================
+# O defeito que o primeiro B4 em producao revelou
+# ===========================================================================
+
+
+def test_a_rota_do_agente_nunca_mostra_um_run_de_b4(
+    client, conn: sqlite3.Connection, cenario_b4, settings  # noqa: F811
+) -> None:
+    """O run 52 apareceu em `/api/agente` com o pre-registro de B4.
+
+    `agente_estado` lia `MAX(run_id) FROM agent_event`, e ate o incremento 12
+    isso bastava: so o cerebro emitia evento. B4 tambem emite - evento nao
+    cognitivo, provedor nulo -, e a rota passou a mostrar o run do CONTROLE
+    como se fosse o do agente: pre-registro dele, atribuicao dele, caminho
+    dele.
+
+    Pior: `braco.AGENT_ID = "b4-0001"` foi escrito COM UM COMENTARIO dizendo
+    que impedia exatamente isso. Nao impedia - o filtro era sobre
+    `agent_event`, e nao sobre o dono do run. Comentario afirmando protecao
+    que nao existe e o padrao que este projeto ja registrou treze vezes, e
+    esta fui eu quem escreveu, no mesmo incremento.
+    """
+    from app.cerebro import ciclo
+    from tests.test_cerebro import (
+        INTERPRETACAO_OK,
+        PROPOSTA_OK,
+        AdaptadorFalso,
+    )
+
+    dataset_id, cfg = cenario_b4
+
+    # Primeiro o agente, DEPOIS o B4 - a ordem em que o defeito aparece.
+    do_agente = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
+    )
+    resultado_b4 = braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    runs_de_b4 = {h.run_id for h in resultado_b4.hipoteses}
+    assert max(runs_de_b4) > do_agente.run_id, (
+        "os runs de B4 tem de ser POSTERIORES, senao o teste nao exercita o"
+        " caso em que o `MAX` os alcanca"
+    )
+
+    corpo = client.get("/api/agente").json()
+    assert corpo["run_id"] == do_agente.run_id
+    assert corpo["run_id"] not in runs_de_b4
+    assert corpo["reflexoes"] > 0, "um run do agente tem reflexao"
+    assert corpo["atribuicao"]["atribuivel_ao_agente"] is True
+    assert "NAO COGNITIVO" not in (corpo["pre_registro"] or {}).get("enunciado", "")
+
+
+def test_a_rota_do_agente_filtra_por_dono_do_run_e_nao_exclui_b4(
+    conn: sqlite3.Connection,
+) -> None:
+    """Filtro POSITIVO: um terceiro braco nao volta a aparecer por esquecimento.
+
+    Excluir `b4-0001` resolveria hoje e falharia calado no dia em que outro
+    dono de run emitisse evento - que e como este defeito nasceu.
+    """
+    fonte = (APP / "api" / "rotas" / "agente.py").read_text(encoding="utf-8")
+    assert "AGENT_ID_PADRAO" in fonte
+
+    # A asercao e sobre o SQL, e nao sobre o arquivo: o comentario ACIMA da
+    # consulta cita `b4-0001` para contar como o defeito apareceu, e proibir a
+    # string no arquivo inteiro empurraria para apagar a explicacao - o mesmo
+    # engano que a guarda de separacao do incremento 11 cometeu com as
+    # docstrings.
+    sql = fonte[fonte.index("SELECT MAX(e.run_id)"):]
+    sql = sql[: sql.index(".fetchone()")]
+    assert "r.agent_id = ?" in sql
+    for negacao in ("agent_id <>", "agent_id !=", "agent_id NOT"):
+        assert negacao not in sql, (
+            f"o filtro exclui por nome ({negacao}); ele tem de INCLUIR o dono"
+            " esperado, senao um braco novo volta a aparecer por esquecimento"
+        )
+
+
+def test_o_painel_acusa_quando_o_b1_casado_nao_casa(
+    client, conn: sqlite3.Connection, cenario_b4, settings  # noqa: F811
+) -> None:
+    """A tela mostrou 37 idas e voltas ao lado de um controle de 70.
+
+    `b1_do_agente` devolve o ultimo B1 casado gravado, globalmente: nao ha
+    ligacao entre o run do B1 e o run que ele casa. A D19 existe exatamente
+    para impedir comparar giros diferentes, e o defeito aparecia como uma
+    tabela plausivel.
+
+    Enquanto a ligacao nao existir (incremento 13), o campo DIZ quando nao
+    casa - em vez de a tabela mentir.
+    """
+    from app.cerebro import ciclo
+    from tests.test_cerebro import (
+        INTERPRETACAO_OK,
+        PROPOSTA_OK,
+        AdaptadorFalso,
+    )
+
+    dataset_id, cfg = cenario_b4
+    ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK]),
+    )
+    corpo = client.get("/api/agente").json()
+    confere = corpo["b1_casado_confere"]
+    assert confere is not None
+    # No caminho normal ele CASA - o ciclo produz o B1 junto.
+    assert confere["casa"] is True
+    assert confere["operacoes_alvo"] == corpo["idas_e_voltas"]
+    assert "D19" in confere["por_que_importa"]
