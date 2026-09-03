@@ -27,12 +27,23 @@ import logging
 from typing import Any
 
 from ...ledger.livro import Uso
+from .. import paradas
 from .base import Credenciais, ErroDoProvedor, Pedido, Resposta
 
 log = logging.getLogger(__name__)
 
 TIMEOUT_S = 120.0
-MAX_RETRIES = 2
+#: **Zero de proposito, e isto e uma mudanca.** Era 2, e o retry do SDK
+#: convivia com o de `reflexao._chamar_com_retry`, criado no incremento 11b -
+#: duas politicas empilhadas, ate 9 tentativas, e a de dentro invisivel: ela
+#: nao loga, nao classifica e nao aparece no evento de parada.
+#:
+#: Uma politica, num lugar. A nossa e a que fica, porque e ela que le
+#: `erro.transitorio`, escreve `cerebro.retry` no log e alimenta
+#: `stop_category`. Deixar a do SDK ligada faria o numero de tentativas que
+#: o teste afirma ser 3 valer 9 na producao - o valor deixando de descrever o
+#: comportamento, que e o padrao que este projeto ja registrou dez vezes.
+MAX_RETRIES = 0
 
 
 def _inteiro_ou_nulo(fonte: Any, campo: str) -> int | None:
@@ -84,8 +95,13 @@ class AdaptadorAnthropic:
                     }
                 },
             )
-        except Exception as erro:  # noqa: BLE001 - o no grava evento de erro
-            raise ErroDoProvedor(f"anthropic: {type(erro).__name__}: {erro}") from erro
+        except Exception as erro:  # noqa: BLE001 - o no grava evento de parada
+            categoria, transitorio = paradas.classificar(erro)
+            raise ErroDoProvedor(
+                f"anthropic: {type(erro).__name__}: {erro}",
+                categoria=categoria,
+                transitorio=transitorio,
+            ) from erro
 
         texto = "".join(
             bloco.text for bloco in resposta.content if bloco.type == "text"
@@ -97,7 +113,12 @@ class AdaptadorAnthropic:
             # antes de sair uma linha de texto. A causa esta no `stop_reason`,
             # e e ele que precisa aparecer.
             raise ErroDoProvedor(
-                "anthropic: resposta sem bloco de texto"
+                # Categoria propria: nao e schema e nao e falha de rede. Sem
+                # ela este caso volta a chegar disfarcado de erro de JSON e
+                # manda procurar no contrato, que esta correto.
+                categoria=paradas.MAX_TOKENS,
+                transitorio=False,
+                mensagem="anthropic: resposta sem bloco de texto"
                 f" (stop_reason={getattr(resposta, 'stop_reason', None)!r},"
                 f" blocos={[b.type for b in resposta.content]}). Com"
                 " stop_reason='max_tokens', o limite de saida acabou antes de"

@@ -21,9 +21,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from ..config.schema import ExperimentConfig
 from ..ledger.livro import Uso, fx_micro, registrar_custo_reflexao
@@ -114,6 +115,67 @@ def reserva_conservadora(
     return -(-int(micro) // 10_000)
 
 
+# ---------------------------------------------------------------------------
+# Retry tecnico
+# ---------------------------------------------------------------------------
+
+#: Quantas vezes chamar o provedor antes de desistir. TRES no total, nao tres
+#: extras.
+#:
+#: Nao e configuravel de propósito. Seria material - muda se o cerebro fala -,
+#: e um campo material a mais na config custa uma `config_version` nova e
+#: invalida toda comparacao que a atravesse (secao 10.2.3). O preco nao paga o
+#: que se ganha: o numero certo aqui e "algumas", e nao ha experimento a fazer
+#: sobre qual.
+TENTATIVAS = 3
+
+#: Espera entre tentativas, em segundos, dobrando. O run inteiro cabe numa
+#: requisicao HTTP (ADR 0018), entao isto tem teto curto por construcao:
+#: 0,5s + 1,0s no pior caso.
+_ESPERA_INICIAL_S = 0.5
+
+
+def _chamar_com_retry(
+    adaptador: Adaptador,
+    pedido: Pedido,
+    *,
+    credenciais,
+    tentativas: int,
+    dormir: Callable[[float], None],
+):
+    """Repete a chamada **so** quando o adaptador marcou o erro transitorio.
+
+    A decisao le `erro.transitorio`, nunca a mensagem. Quem classifica e o
+    adaptador, que e onde a excecao crua do SDK ainda existe.
+
+    Um 400 nao vira retry: reenviar o mesmo corpo produz o mesmo 400, e cada
+    tentativa extra e latencia e risco de cobranca sem nenhuma chance de
+    sucesso. Uma falha que NAO chegou a produzir resposta tambem nao produziu
+    `usage`, entao nenhuma tentativa perdida entra no ledger - o custo do
+    retry e tempo, e nao dinheiro.
+    """
+    espera = _ESPERA_INICIAL_S
+    for tentativa in range(1, max(1, tentativas) + 1):
+        try:
+            return adaptador.chamar(pedido, credenciais=credenciais)
+        except ErroDoProvedor as erro:
+            ultima = tentativa >= max(1, tentativas)
+            if not erro.transitorio or ultima:
+                raise
+            log.warning(
+                "cerebro.retry",
+                extra={
+                    "tentativa": tentativa,
+                    "de": max(1, tentativas),
+                    "categoria": erro.categoria,
+                    "motivo": str(erro),
+                },
+            )
+            dormir(espera)
+            espera *= 2
+    raise AssertionError("inalcancavel: o laco sempre retorna ou levanta")
+
+
 def executar(
     conn: sqlite3.Connection,
     *,
@@ -129,6 +191,8 @@ def executar(
     settings: Settings,
     parent_event_id: int | None = None,
     adaptador: Adaptador | None = None,
+    tentativas: int = TENTATIVAS,
+    dormir: Callable[[float], None] = time.sleep,
 ) -> Chamada:
     """Faz (ou reaproveita) uma chamada e deixa tudo registrado."""
     provider, model = resolver_tier(config, tier)
@@ -162,8 +226,12 @@ def executar(
         origem: Literal["provedor", "cache"] = "cache"
     else:
         adaptador = adaptador or adaptador_de(provider)
-        resposta = adaptador.chamar(
-            pedido, credenciais=credenciais_do_provedor(settings, provider)
+        resposta = _chamar_com_retry(
+            adaptador,
+            pedido,
+            credenciais=credenciais_do_provedor(settings, provider),
+            tentativas=tentativas,
+            dormir=dormir,
         )
         conta = precificacao.calcular(resposta.uso, preco)
         custo_micro = conta.total_micro

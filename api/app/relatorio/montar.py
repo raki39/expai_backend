@@ -166,7 +166,7 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
     # -------------------------------------------------------------- executou
     executou = dict(
         conn.execute(
-            "SELECT COUNT(*) AS execucoes,"
+            "SELECT COUNT(*) AS ordens_executadas,"
             "       SUM(CASE WHEN side = 'compra' THEN 1 ELSE 0 END) AS compras,"
             "       SUM(CASE WHEN side = 'venda'  THEN 1 ELSE 0 END) AS vendas,"
             "       COALESCE(SUM(fee_cents), 0) AS taxa_cents,"
@@ -184,11 +184,16 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
     executou["condicoes_validade"] = condicoes_do_run(conn, run_id)
     # A UNIDADE em que a comparacao com os baselines e feita.
     #
-    # `execucoes` conta linhas de `execution`; uma ida e volta sao duas. B1
-    # reporta `operacoes_alvo`, que sao idas e voltas. Sem este campo a tabela
-    # de comparacao poria 36 execucoes ao lado de 18 operacoes sob o mesmo
-    # rotulo, e o leitor concluiria que o controle girou metade - exatamente o
-    # contrario do que a D19 existe para garantir.
+    # `ordens_executadas` conta linhas de `execution`; uma ida e volta sao
+    # duas. B1 reporta `operacoes_alvo`, que sao idas e voltas. Sem este campo
+    # a tabela de comparacao poria 36 ordens ao lado de 18 idas e voltas sob o
+    # mesmo rotulo, e o leitor concluiria que o controle girou metade -
+    # exatamente o contrario do que a D19 existe para garantir.
+    #
+    # O nome era `execucoes`, e trocou porque `execucoes`/`operacoes` era o
+    # par ambiguo: os dois liam como "quantas vezes operou". Hoje o
+    # vocabulario e um so em todo resultado reportado - `idas_e_voltas` e
+    # `ordens_executadas` -, e ha teste proibindo a volta de `operacoes`.
     #
     # Compras, e nao metade das execucoes: a D1 fixou long/flat, entao ha no
     # maximo uma posicao aberta e cada compra abre exatamente uma ida e volta.
@@ -269,7 +274,7 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
             else None
         ),
         "regra_proposta_com_hash": bool(regra_json and regra_json.get("hash")),
-        "regra_executada": (executou["execucoes"] or 0) > 0,
+        "regra_executada": (executou["ordens_executadas"] or 0) > 0,
         "custos_nos_dois_livros": bool(custos["cambio_do_run"]) if refletiu[
             "houve_cerebro"
         ] else None,

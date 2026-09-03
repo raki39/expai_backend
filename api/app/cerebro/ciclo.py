@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,7 +34,7 @@ from ..settings import Settings
 from ..simulador import execucao as simulador
 from ..simulador.execucao import condicoes_do_run
 from ..validador import promocao as validador_promocao
-from . import avaliacao, grafo, propostas
+from . import avaliacao, grafo, paradas, propostas
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +71,17 @@ class ResultadoDoCiclo:
     parou_em: str | None
     motivo: str | None
     regra_veio_do_cerebro: bool
-    rule_id: int
-    regra_hash: str
+    # A CATEGORIA da parada, e nao so o texto. E ela que decide se as maos
+    # rapidas executaram (D35), entao precisa estar onde quem le o resultado
+    # consegue ve-la.
+    categoria_da_parada: str | None
+    # Quem pode chamar isto de "resultado do agente", e por que. Ver
+    # `paradas.atribuicao`.
+    atribuicao: dict
+    # `None` quando nada executou: nao ha regra a apontar, e um id de uma
+    # regra que nao rodou seria pior que a ausencia dele.
+    rule_id: int | None
+    regra_hash: str | None
     proposal_id: int | None
     expectativa: str | None
     confianca_ppm: int | None
@@ -106,6 +116,8 @@ class ResultadoDoCiclo:
             "parou_em": self.parou_em,
             "motivo": self.motivo,
             "regra_veio_do_cerebro": self.regra_veio_do_cerebro,
+            "categoria_da_parada": self.categoria_da_parada,
+            "atribuicao": self.atribuicao,
             "rule_id": self.rule_id,
             "regra_hash": self.regra_hash,
             "proposal_id": self.proposal_id,
@@ -136,6 +148,7 @@ def rodar(
     config_version_id: int,
     settings: Settings,
     adaptador: Any | None = None,
+    dormir: Any = time.sleep,
 ) -> ResultadoDoCiclo:
     """Abre um run proprio, roda o ciclo inteiro e o encerra.
 
@@ -210,7 +223,8 @@ def rodar(
     )
 
     dep = grafo.Dependencias(
-        conn=conn, config=config, settings=settings, adaptador=adaptador
+        conn=conn, config=config, settings=settings, adaptador=adaptador,
+        dormir=dormir,
     )
     estado = grafo.rodar(
         dep,
@@ -228,26 +242,51 @@ def rodar(
     if hypothesis_id is not None:
         validador_promocao.admitir(conn, int(hypothesis_id), run_id=run_id)
 
+    # ---------------------------------------------------------------- D35
+    #
+    # O QUE executa depende de POR QUE o cerebro parou, e antes nao dependia.
+    #
+    # A secao 3.6, regra 2, e sobre o TETO: "Ao atingir o teto, ele continua
+    # operando com as maos rapidas, mas para de raciocinar ate o proximo
+    # ciclo." Ali o agente DECIDIU nao gastar, e a regra padrao rodar e a
+    # especificacao ao pe da letra.
+    #
+    # Ela nao diz nada sobre o cerebro tentar e falhar tecnicamente. Numa
+    # falha de provedor o agente nao decidiu coisa nenhuma - e rodar a regra
+    # padrao ali produz um resultado de B3 pendurado no run do agente. Foi
+    # exatamente o que aconteceu no run 27: 244 idas e voltas "entre o p50 e o
+    # p95" que nenhuma decisao cognitiva escolheu.
+    #
+    # Entao: teto executa, falha tecnica nao executa nada.
+    categoria_da_parada = estado.get("categoria_da_parada")
     ativa = propostas.regra_ativa(conn, run_id)
+
     if ativa is not None:
         regra: Regra = estado["regra"]
-        rule_id = int(ativa["rule_id"])
+        rule_id: int | None = int(ativa["rule_id"])
         veio_do_cerebro = True
+        executa = True
     else:
-        # O cerebro nao produziu regra valida. As maos rapidas continuam.
-        regra = grafo.regra_padrao(config)
-        rule_id = registro_de_regra.registrar(conn, regra)
         veio_do_cerebro = False
+        executa = paradas.executa_regra_padrao(categoria_da_parada)
+        regra = grafo.regra_padrao(config)
+        # So registra a regra se ela for de fato executar. Registrar uma regra
+        # que nunca rodou deixaria no catalogo uma linha que nao corresponde a
+        # execucao nenhuma.
+        rule_id = registro_de_regra.registrar(conn, regra) if executa else None
 
-    resultado = executor.rodar(
-        conn,
-        run_id=run_id,
-        dataset_id=dataset_id,
-        regra=regra,
-        rule_id=rule_id,
-        config=config,
-        barras=barras,
-    )
+    resultado = None
+    if executa:
+        resultado = executor.rodar(
+            conn,
+            run_id=run_id,
+            dataset_id=dataset_id,
+            regra=regra,
+            rule_id=int(rule_id),
+            config=config,
+            barras=barras,
+        )
+    operacoes = resultado.operacoes if resultado is not None else 0
     livro.encerrar_run(conn, run_id, "concluido")
 
     # O controle do acaso, casado com o giro DESTE run (D19, ADR 0014).
@@ -256,14 +295,14 @@ def rodar(
     # atrito, e o agente pareceria bom por ter operado menos. Produzido aqui
     # para que os dois numeros nunca existam separados.
     b1_casado = None
-    if resultado.operacoes > 0:
+    if operacoes > 0:
         try:
             b1_casado = baselines.b1_casado_com(
                 conn,
                 dataset_id=dataset_id,
                 config=config,
                 config_version_id=config_version_id,
-                operacoes_alvo=resultado.operacoes,
+                operacoes_alvo=operacoes,
                 # O MESMO tamanho de posicao da regra executada (secao 14.3).
                 # Casar o giro e nao casar o tamanho mede dimensionamento em
                 # vez de timing - o mesmo erro da D19, um nivel abaixo.
@@ -296,7 +335,6 @@ def rodar(
         run_id=run_id,
         config=config,
         b1_casado=b1_casado,
-        operacoes=resultado.operacoes,
         reflexoes=reflexoes,
         # A serie de onde sai a autocorrelacao que desconta `n_bruto`
         # (secao 8.3). Vem das barras que este run de fato percorreu - nao de
@@ -338,12 +376,30 @@ def rodar(
         parou_em=estado.get("parou_em"),
         motivo=estado.get("motivo"),
         regra_veio_do_cerebro=veio_do_cerebro,
+        categoria_da_parada=categoria_da_parada,
+        atribuicao=paradas.atribuicao(
+            veio_do_cerebro=veio_do_cerebro,
+            categoria=categoria_da_parada,
+            executou=resultado is not None,
+        ),
         rule_id=rule_id,
-        regra_hash=regra.hash(),
+        regra_hash=regra.hash() if resultado is not None else None,
         proposal_id=int(ativa["proposal_id"]) if ativa else None,
         expectativa=ativa["expectation"] if ativa else None,
         confianca_ppm=ativa["confidence_ppm"] if ativa else None,
-        execucao=resultado.como_dict(),
+        execucao=(
+            resultado.como_dict()
+            if resultado is not None
+            else {
+                "executou": False,
+                "ordens_executadas": 0,
+                "idas_e_voltas": 0,
+                "por_que": (
+                    "nenhuma regra foi executada: o cerebro parou por"
+                    f" {categoria_da_parada!r} (D35)"
+                ),
+            }
+        ),
         patrimonio_final_cents=simulador.caixa_cents(conn, run_id),
         custos={
             "execucao_total": carteira["simulado_usd"]["custo_execucao_minor"],
@@ -364,18 +420,55 @@ def rodar(
             "run_id": run_id,
             "reflexoes": reflexoes,
             "regra_veio_do_cerebro": veio_do_cerebro,
-            "operacoes": resultado.operacoes,
+            "idas_e_voltas": operacoes,
+            "categoria_da_parada": categoria_da_parada,
             "patrimonio_final_cents": simulador.caixa_cents(conn, run_id),
         },
     )
     return ciclo
 
 
+def parada_do_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    """A ultima parada deste run, com categoria e motivo. `None` se nao houve.
+
+    Derivada do evento, e nao de um campo do run: o `agent_event` e a
+    autoridade sobre decisao e caminho (regra 16), e o estado do grafo nao e
+    persistido de proposito. Isto e o que faltava para o GET responder a mesma
+    pergunta que o POST - antes, o motivo existia so no corpo da resposta do
+    POST e no log da plataforma.
+    """
+    linha = conn.execute(
+        "SELECT node, stop_category, stop_reason, occurred_at"
+        "  FROM agent_event"
+        " WHERE run_id = ? AND kind = 'parada'"
+        " ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if linha is None:
+        return None
+    return {
+        "node": linha["node"],
+        "categoria": linha["stop_category"],
+        "motivo": linha["stop_reason"],
+        "quando": linha["occurred_at"],
+        # As paradas gravadas ANTES da migracao 13 tem NULL nas duas colunas.
+        # Dizer isso e melhor que devolver `None` e deixar quem le concluir
+        # que a parada nao teve causa: o registro e incompleto, e o motivo
+        # daquela parada especifica so existe no log da plataforma.
+        "registro_completo": linha["stop_category"] is not None,
+    }
+
+
 def caminho_percorrido(conn: sqlite3.Connection, run_id: int) -> list[dict]:
     """A sequencia de eventos do run, na ordem em que aconteceram (R25.1).
 
-    Inclui paradas e erros. Um caminho que so mostra os runs bem-sucedidos
-    nao e o caminho percorrido, e a metade agradavel dele.
+    Inclui paradas e erros - e, desde a migracao 13, **por que** cada parada
+    aconteceu. Um caminho que so mostra os runs bem-sucedidos nao e o caminho
+    percorrido, e a metade agradavel dele; um que mostra a parada sem a causa
+    e a metade inutil da metade que sobrou.
+
+    Ate aqui esta funcao prometia a primeira frase e nao a segunda: o motivo
+    ia para o log da plataforma e para o corpo do POST, e o GET nao o tinha.
     """
     return [
         dict(l)
@@ -383,6 +476,7 @@ def caminho_percorrido(conn: sqlite3.Connection, run_id: int) -> list[dict]:
             "SELECT id, parent_event_id, occurred_at, node, kind, tier, provider,"
             " model, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write,"
             " cost_usd_minor, cost_usd_micro, price_table_version, expectation,"
+            " stop_category, stop_reason,"
             " confidence_ppm, ledger_transaction_id, profile_id"
             " FROM agent_event WHERE run_id = ? ORDER BY id",
             (run_id,),

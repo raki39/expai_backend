@@ -80,6 +80,13 @@ def _uma_passada(
     rule_id = registrar_baseline(
         conn,
         "aleatorio",
+        # `operacoes` aqui e PARAMETRO da regra, e nao contagem de resultado:
+        # "faca N idas e voltas". Fica com este nome de proposito - ele entra
+        # no `content_hash` da regra, e renomea-lo trocaria o hash de uma
+        # regra que nao mudou. O digest publicado nao depende dele (ele hasheia
+        # lancamentos, nao parametros), mas trocar um hash para ganhar
+        # consistencia de vocabulario num campo que ninguem le como contagem
+        # e preco sem retorno.
         {"operacoes": OPERACOES_DA_PROVA, "prova": "reprodutibilidade"},
         condicoes=baselines.condicoes(config),
     )
@@ -102,7 +109,7 @@ def _uma_passada(
         "run_id": run_id,
         "semente": semente,
         "digest": resultado["digest"],
-        "operacoes": resultado["operacoes"],
+        "idas_e_voltas": resultado["idas_e_voltas"],
         "equity_final_cents": resultado["equity_final_cents"],
         "config_hash": config_hash,
     }

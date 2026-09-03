@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ...ledger.livro import Uso
+from .. import paradas
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,29 @@ class Resposta:
 
 
 class ErroDoProvedor(Exception):
-    """Falha de chamada. O no que a recebe grava evento de erro e para."""
+    """Falha de chamada. O no que a recebe grava evento de parada e para.
+
+    Carrega **categoria** e **transitorio** porque as duas sao decisoes de
+    programa, e antes eram feitas lendo a mensagem - ou nao eram feitas.
+
+    - `categoria` vai para `agent_event.stop_category` e e o que separa
+      "o provedor recusou a nossa requisicao" de "a resposta nao bate com o
+      contrato". Sao defeitos em pontas opostas, e um texto so mandava
+      procurar no lugar errado.
+    - `transitorio` e o que autoriza tentar de novo. So ele: nenhuma decisao
+      de retry le mensagem de erro.
+    """
+
+    def __init__(
+        self,
+        mensagem: str,
+        *,
+        categoria: str = paradas.ERRO_PROVEDOR,
+        transitorio: bool = False,
+    ) -> None:
+        super().__init__(mensagem)
+        self.categoria = categoria
+        self.transitorio = transitorio
 
 
 class Adaptador(Protocol):

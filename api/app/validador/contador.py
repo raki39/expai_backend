@@ -75,6 +75,30 @@ def resumo(conn: sqlite3.Connection) -> dict:
     return {
         "total": total(conn),
         "por_especialidade": por,
+        # De ONDE vem cada tentativa do total. O `total` alimenta o DSR e
+        # soma TODAS as famílias — o que é deliberado (§8.6: "o contador
+        # global é registro histórico") e declarado como brecha no incremento
+        # 11, porque trocar de `config_version` abre família nova e o contador
+        # não reseta.
+        #
+        # Sem esta quebra, o número fica inauditável: em produção o lote da
+        # `config_version` 5 apareceu com `membros: []` ao lado de
+        # `tentativas_globais: 1`, e não havia como descobrir de qual família
+        # era aquela tentativa sem abrir o banco. O critério A4 de §14.4 exige
+        # que "nenhuma tentativa testada some do registro" — e um total que
+        # ninguém consegue decompor não é registro conferível.
+        "por_config_version": [
+            dict(l)
+            for l in conn.execute(
+                "SELECT r.config_version_id AS config_version_id,"
+                "       COUNT(*) AS tentativas,"
+                "       SUM(CASE WHEN h.testavel = 0 THEN 1 ELSE 0 END)"
+                "         AS nao_testaveis"
+                "  FROM hypothesis h JOIN run r ON r.id = h.run_id"
+                " GROUP BY r.config_version_id"
+                " ORDER BY r.config_version_id"
+            )
+        ],
         "retestes": sum(e["retestes"] for e in por),
         "nunca_zerado": (
             "derivado de `hypothesis`, que é append-only por gatilho:"

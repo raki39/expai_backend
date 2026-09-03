@@ -1759,6 +1759,91 @@ MIGRACOES: list[tuple[int, str, str]] = [
         FROM test_credit_budget b;
         """,
     ),
+    (
+        13,
+        "incremento 11b: a parada diz POR QUE parou (D35)",
+        """
+        -- ==================================================================
+        -- O caminho registrava QUE parou e nao POR QUE.
+        --
+        -- `caminho_percorrido` promete: "Inclui paradas e erros. Um caminho
+        -- que so mostra os runs bem-sucedidos nao e o caminho percorrido, e a
+        -- metade agradavel dele." Ele incluia a parada e nao incluia o que a
+        -- causou - a metade que so importa quando algo da errado.
+        --
+        -- O motivo existia: `_parar` o passava a `log.info` e ao resultado do
+        -- POST. Sumia no GET, no export e no painel. Diagnosticar um run
+        -- exigia procurar no log da plataforma, que e o mesmo que dizer que
+        -- nao da para diagnosticar.
+        --
+        -- Decima ocorrencia do padrao deste projeto, e minha: um valor que
+        -- descrevia algo, num lugar onde ninguem consegue le-lo.
+        -- ==================================================================
+        ALTER TABLE agent_event ADD COLUMN stop_category TEXT;
+        ALTER TABLE agent_event ADD COLUMN stop_reason   TEXT;
+
+        -- Os gatilhos sao BEFORE INSERT, e nao CHECK de tabela, de propósito:
+        -- as paradas ja gravadas em producao (o run 27 entre elas) nasceram
+        -- antes destas colunas e tem NULL nas duas. Um CHECK de tabela
+        -- recusaria o proprio banco existente; o gatilho exige a partir daqui
+        -- e deixa o passado legivel como o que ele e - registro incompleto,
+        -- nao registro invalido.
+        CREATE TRIGGER parada_exige_categoria_e_motivo
+        BEFORE INSERT ON agent_event
+        WHEN NEW.kind = 'parada'
+             AND (NEW.stop_category IS NULL
+                  OR NEW.stop_reason IS NULL
+                  OR TRIM(NEW.stop_reason) = '')
+        BEGIN
+            SELECT RAISE(ABORT,
+                'parada sem categoria e motivo nao registra o caminho percorrido');
+        END;
+
+        -- Lista FECHADA, e cada nome tem um caminho que o emite. Nao entra
+        -- categoria "para depois": `sem_hipotese` seria a obvia a acrescentar
+        -- aqui, e nao entra porque o contrato de saida EXIGE uma familia - o
+        -- modelo hoje nao tem como responder "nao achei". Declarar o nome sem
+        -- o caminho e exatamente o defeito `BLOCOS` do incremento 6.
+        --
+        -- `pedido_recusado` e `erro_schema` NAO sao a mesma coisa, e junta-las
+        -- mandaria procurar no lugar errado:
+        --   pedido_recusado -> o provedor recusou a NOSSA requisicao (400).
+        --                      O defeito esta no que enviamos.
+        --   erro_schema     -> a RESPOSTA do modelo nao bate com o contrato.
+        --                      O defeito esta no que voltou.
+        -- Foi exatamente essa confusao que as notas de API ja registraram uma
+        -- vez, quando `max_tokens` estourado chegava disfarcado de "Invalid
+        -- JSON at column 0" e mandava caçar erro de schema.
+        CREATE TRIGGER categoria_de_parada_fechada
+        BEFORE INSERT ON agent_event
+        WHEN NEW.stop_category IS NOT NULL
+             AND NEW.stop_category NOT IN (
+                 'teto_atingido',
+                 'pedido_recusado',
+                 'erro_schema',
+                 'max_tokens',
+                 'erro_provedor',
+                 'provedor_indisponivel',
+                 'tier_nao_configurado',
+                 'erro_interno'
+             )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'categoria de parada fora da lista fechada');
+        END;
+
+        -- A simetria da migracao 8: o campo pertence ao evento que ele
+        -- descreve, e a nenhum outro.
+        CREATE TRIGGER motivo_de_parada_so_em_parada
+        BEFORE INSERT ON agent_event
+        WHEN NEW.kind <> 'parada'
+             AND (NEW.stop_category IS NOT NULL OR NEW.stop_reason IS NOT NULL)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'categoria e motivo pertencem ao evento de parada');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

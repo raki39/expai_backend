@@ -176,7 +176,6 @@ def registrar(
     run_id: int,
     config: ExperimentConfig,
     b1_casado: dict | None,
-    operacoes: int,
     reflexoes: int,
     retornos_bps: list[int] | None = None,
     duracao_barra_ms: int = 900_000,
@@ -185,6 +184,12 @@ def registrar(
 
     O patrimonio vem do LEDGER (regra 16), nao de um acumulador: e o mesmo
     numero que os baselines usam, entao a comparacao e por construcao.
+
+    O giro tambem: havia um parametro `operacoes` que o chamador passava e que
+    esta funcao nunca comparava com o `idas_e_voltas` que ela mesma recalcula.
+    Duas copias do mesmo numero, no mesmo payload, sob nomes diferentes - o
+    arranjo exato que `idas_e_voltas` foi criada para acabar. Agora as duas
+    unidades saem daqui, do banco, e sao as duas que existem.
     """
     pai = evento_da_decisao(conn, run_id)
     if pai is None:
@@ -208,8 +213,8 @@ def registrar(
         "declarado_no_evento": pai,
         "realizado": {
             "patrimonio_final_cents": patrimonio,
-            "operacoes": operacoes,
             "idas_e_voltas": idas,
+            "ordens_executadas": executor.ordens_executadas(conn, run_id),
             "reflexoes": reflexoes,
         },
         "contra_o_acaso": (

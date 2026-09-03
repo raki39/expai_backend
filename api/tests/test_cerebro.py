@@ -22,7 +22,8 @@ from decimal import Decimal
 
 import pytest
 
-from app.cerebro import cache, ciclo, contexto, custo, grafo, prompts, propostas
+from app.cerebro import cache, ciclo, contexto, custo, grafo, paradas
+from app.cerebro import prompts, propostas
 from app.cerebro import reflexao, tetos
 from app.cerebro.contrato import (
     SCHEMA_PROPOSTA,
@@ -117,7 +118,7 @@ class AdaptadorFalso:
 
     def __init__(
         self,
-        respostas: list[str],
+        respostas: list,
         *,
         uso: Uso | None = None,
         provider: str = "anthropic",
@@ -140,7 +141,13 @@ class AdaptadorFalso:
             raise self.erro
         if not self.respostas:
             raise AssertionError("o adaptador falso recebeu mais chamadas que o roteiro")
-        return Resposta(texto=self.respostas.pop(0), uso=self.uso, bruto={})
+        proxima = self.respostas.pop(0)
+        # Excecao NO ROTEIRO, e nao so o `erro` global: o defeito de producao
+        # foi `interpretar` passar e `propor_regra` falhar, e um adaptador que
+        # so sabe falhar sempre nao alcanca esse caso.
+        if isinstance(proxima, BaseException):
+            raise proxima
+        return Resposta(texto=proxima, uso=self.uso, bruto={})
 
 
 @pytest.fixture
@@ -586,7 +593,7 @@ def test_teto_zero_completa_o_run_sem_nenhuma_chamada(
     assert not resultado.regra_veio_do_cerebro
     assert resultado.parou_em == "interpretar"
     # E as maos rapidas rodaram a regra padrao ate o fim.
-    assert resultado.execucao["execucoes"] > 0
+    assert resultado.execucao["ordens_executadas"] > 0
     assert resultado.gasto["gasto_cents"] == 0
 
 
@@ -605,7 +612,7 @@ def test_teto_de_gasto_no_meio_para_o_cerebro_dali_em_diante(
     )
     assert len(adaptador.pedidos) <= 1
     assert resultado.parou_em in ("interpretar", "propor_regra")
-    assert resultado.execucao["execucoes"] > 0   # o run terminou mesmo assim
+    assert resultado.execucao["ordens_executadas"] > 0   # o run terminou mesmo assim
 
 
 def test_teto_do_ambiente_vence_o_teto_da_config(cenario, settings) -> None:
@@ -733,7 +740,12 @@ def test_um_evento_por_no_com_pai_encadeado(
 def test_no_que_falha_grava_o_evento_de_erro(
     conn: sqlite3.Connection, cenario, settings
 ) -> None:
-    """Um no que some do registro faz o caminho contar so a parte boa."""
+    """Um no que some do registro faz o caminho contar so a parte boa.
+
+    **A ultima asercao mudou de sentido com a D35.** Ela dizia "o run terminou
+    com a regra padrao, nao abortou" - e era isso que fazia um resultado de B3
+    aparecer pendurado no run do agente quando o provedor caia.
+    """
     adaptador = AdaptadorFalso([], erro=ErroDoProvedor("provedor fora do ar"))
     resultado = _rodar_ciclo(conn, cenario, settings, adaptador)
 
@@ -742,8 +754,17 @@ def test_no_que_falha_grava_o_evento_de_erro(
     assert caminho[-1]["kind"] == "parada"
     assert resultado.parou_em == "interpretar"
     assert "fora do ar" in (resultado.motivo or "")
-    # E o run terminou com a regra padrao, nao abortou.
-    assert resultado.execucao["execucoes"] > 0
+
+    # O motivo esta NO EVENTO, e nao so no objeto de retorno. Era exatamente
+    # esta metade que faltava: o POST devolvia a razao e o GET nao a tinha.
+    assert caminho[-1]["stop_category"] == paradas.ERRO_PROVEDOR
+    assert "fora do ar" in caminho[-1]["stop_reason"]
+
+    # D35: falha tecnica nao executa nada, e o resultado nao e do agente.
+    assert resultado.execucao["executou"] is False
+    assert resultado.execucao["ordens_executadas"] == 0
+    assert resultado.atribuicao["atribuivel_ao_agente"] is False
+    assert resultado.rule_id is None
 
 
 def test_agent_event_e_imutavel(conn: sqlite3.Connection, cenario, settings) -> None:
@@ -1245,6 +1266,73 @@ def test_cache_de_prompt_funciona_na_segunda_reflexao(
 @pytest.mark.rede
 @pytest.mark.skipif(
     _rede_desligada(),
+    reason=f"incremento 11b gasta dinheiro de verdade; ligue com {INTERRUPTOR}=1",
+)
+def test_o_schema_de_proposta_atual_vai_ao_provedor_padrao(
+    conn: sqlite3.Connection, cenario, settings
+) -> None:
+    """O teste que faltava, e cuja ausencia custou o run 27.
+
+    Havia teste de rede para o SEGUNDO provedor (criterio 7b) e nenhum para o
+    PRIMEIRO com o contrato de proposta. Entao quando o incremento 8 trocou a
+    expectativa por texto pelo pre-registro da secao 8.2 - objeto aninhado,
+    array de objetos -, o schema novo nunca foi enviado a Anthropic antes de
+    a producao envia-lo.
+
+    Este teste monta o pedido **como o no monta**: mesmo sistema, mesma
+    mensagem com o piso de Sharpe, mesmo `MAX_TOKENS_PROPOR`. Um pedido
+    parecido nao serve - foi exatamente um pedido parecido, sem o piso e com
+    outro teto, que o criterio 7b vinha exercitando.
+    """
+    from app.cerebro.provedores import adaptador_de
+    from app.hipotese import poder
+
+    dataset_id, cfg = cenario
+    provedor, modelo = reflexao.resolver_tier(cfg, "padrao")
+    chave = _chave_do_arquivo("ANTHROPIC_API_KEY")
+    if not chave:
+        pytest.skip("ANTHROPIC_API_KEY ausente do .env do servico")
+
+    barras = executor.carregar_janela(conn, dataset_id)
+    resumo = contexto.resumir(barras, cfg)
+    pedido = Pedido(
+        provider=provedor,
+        model=modelo,
+        sistema=prompts.SISTEMA,
+        mensagens=(
+            (
+                "user",
+                prompts.mensagem_propor(
+                    resumo,
+                    Interpretacao.model_validate_json(INTERPRETACAO_OK),
+                    horizonte_barras=len(barras),
+                    sharpe_minimo_milesimos=poder.sharpe_minimo_testavel(
+                        duracao_barra_ms=900_000, horizonte_barras=len(barras)
+                    ),
+                ),
+            ),
+        ),
+        schema=SCHEMA_PROPOSTA,
+        schema_nome="proposta_de_regra",
+        max_tokens=grafo.MAX_TOKENS_PROPOR,
+    )
+    resposta = adaptador_de(provedor).chamar(
+        pedido, credenciais=Credenciais(api_key=chave)
+    )
+    # As duas metades: o provedor aceitou o SCHEMA, e a resposta bate com o
+    # CONTRATO. Uma sem a outra nao prova o caminho.
+    bruta = PropostaBruta.model_validate_json(resposta.texto)
+    montar_regra(bruta, cfg)
+    assert bruta.pre_registro.condicoes_falseamento, (
+        "o array aninhado voltou vazio: o provedor aceitou o schema e nao o"
+        " cumpriu, que e diferente de recusar"
+    )
+    assert resposta.uso.tokens_out is not None
+
+
+@pytest.mark.rede
+@pytest.mark.skipif(
+    _rede_desligada(),
     reason=f"criterio 7b gasta dinheiro de verdade; ligue com {INTERRUPTOR}=1",
 )
 def test_segundo_provedor_valida_contra_o_mesmo_schema(
@@ -1367,7 +1455,7 @@ def test_o_ciclo_produz_o_b1_casado_com_o_proprio_giro(
         conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
     )
     assert resultado.b1_casado is not None
-    assert resultado.b1_casado["operacoes_alvo"] == resultado.execucao["operacoes"]
+    assert resultado.b1_casado["operacoes_alvo"] == resultado.execucao["idas_e_voltas"]
     assert resultado.b1_casado["p5"] <= resultado.b1_casado["p50"]
     assert resultado.b1_casado["p50"] <= resultado.b1_casado["p95"]
 
@@ -1403,7 +1491,7 @@ def test_o_b1_do_agente_nao_contamina_o_b1_da_comparacao(
     assert resumo["B1"]["operacoes_alvo"] == giro_do_b3
 
     do_agente = baselines.b1_do_agente(conn)
-    assert do_agente["operacoes_alvo"] == resultado.execucao["operacoes"]
+    assert do_agente["operacoes_alvo"] == resultado.execucao["idas_e_voltas"]
     assert do_agente["run_id"] != resumo["B1"].get("run_id", -1)
 
 
@@ -1423,7 +1511,7 @@ def test_sem_operacao_nao_ha_b1_para_casar(
         conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
         settings=settings, adaptador=AdaptadorFalso([]),
     )
-    assert resultado.execucao["operacoes"] == 0
+    assert resultado.execucao["idas_e_voltas"] == 0
     assert resultado.b1_casado is None
     assert resultado.como_dict()["excesso_sobre_b1_p50_cents"] is None
 

@@ -9,6 +9,7 @@ import logging
 from ...cerebro import avaliacao as cerebro_avaliacao
 from ...cerebro import cache as cerebro_cache
 from ...cerebro import ciclo as cerebro_ciclo
+from ...cerebro import paradas
 from ...cerebro import propostas as propostas_de_regra
 from ...config import service as config_service
 from ...config.service import (
@@ -50,16 +51,46 @@ def agente_estado(request: Request) -> dict[str, Any]:
         return {"run_id": None, "caminho": [], "propostas": [], "gasto": None}
 
     carteira = livro.carteira(conn, run_id=int(run_id))
+
+    # Quem pode chamar isto de "resultado do agente" - derivado do que ficou
+    # gravado, nunca de um campo do run.
+    #
+    # Este bloco existe porque a alternativa ja produziu um numero errado em
+    # producao: o run 27 apareceu aqui com `faixa: "entre_p50_e_p95"` sobre
+    # 244 idas e voltas que NENHUMA decisao cognitiva escolheu - o cerebro
+    # havia parado em `propor_regra` e a regra padrao rodou por baixo.
+    # `regra_veio_do_cerebro` era calculado no ciclo, ia no corpo do POST e
+    # sumia aqui.
+    parada = cerebro_ciclo.parada_do_run(conn, int(run_id))
+    ativa = propostas_de_regra.regra_ativa(conn, int(run_id))
+    idas_e_voltas = maos_executor.idas_e_voltas(conn, int(run_id))
+    ordens = maos_executor.ordens_executadas(conn, int(run_id))
+    atribuicao = paradas.atribuicao(
+        veio_do_cerebro=ativa is not None,
+        categoria=(parada or {}).get("categoria"),
+        executou=ordens > 0,
+    )
+    do_agente = bool(atribuicao["atribuivel_ao_agente"])
+
     return {
         "run_id": int(run_id),
+        "parada": parada,
+        "atribuicao": atribuicao,
         # O resultado economico do run, do ledger. Sem ele o relatorio diz
         # quantas operacoes houve e nao diz se sobrou dinheiro - que e a unica
         # pergunta que a comparacao com os baselines responde.
         "patrimonio_final_cents": simulador.caixa_cents(conn, int(run_id)),
+        # DUAS unidades, e nomeadas. `operacoes` sozinho era ambiguo: valia
+        # 244 aqui (idas e voltas) ao lado de `operacoes_alvo` do B1, que e a
+        # mesma coisa, e ao lado de `execucoes` do simulador, que e o dobro.
+        # O CLAUDE.md ja registra esse exato erro de unidade uma vez, na
+        # tabela de comparacao do incremento 7.
+        #
         # A mesma definicao que o relatorio e a comparacao usam. Era
         # `COUNT(*) / 2` aqui e contagem de compras la: iguais enquanto toda
         # compra fecha, divergentes no run que termina comprado.
-        "operacoes": maos_executor.idas_e_voltas(conn, int(run_id)),
+        "idas_e_voltas": idas_e_voltas,
+        "ordens_executadas": ordens,
         "custos_cents": {
             "execucao_total": carteira["simulado_usd"]["custo_execucao_minor"],
             "reflexao_total": carteira["simulado_usd"]["tesouraria_minor"],
@@ -76,12 +107,22 @@ def agente_estado(request: Request) -> dict[str, Any]:
         # classificar e decidir, e decidir sobre o experimento nao acontece no
         # painel (regra 19). Ele comparava com p5/p50/p95 na tela - e a mesma
         # regua ficava escrita em dois lugares, livre para divergir.
-        "faixa": cerebro_avaliacao.faixa_contra_o_acaso(
-            simulador.caixa_cents(conn, int(run_id)), baselines.b1_do_agente(conn)
+        # `None` quando o resultado nao e do agente. A faixa nao e um dado
+        # neutro: "entre_p50_e_p95" e uma afirmacao sobre a competencia dele,
+        # e sobre um run em que ele nao decidiu nada e uma afirmacao falsa.
+        # Zerar o campo perde informacao; deixa-lo mente. O `atribuicao`
+        # ao lado diz por que ele esta vazio.
+        "faixa": (
+            cerebro_avaliacao.faixa_contra_o_acaso(
+                simulador.caixa_cents(conn, int(run_id)),
+                baselines.b1_do_agente(conn),
+            )
+            if do_agente
+            else None
         ),
         "caminho": cerebro_ciclo.caminho_percorrido(conn, int(run_id)),
         "propostas": propostas_de_regra.do_run(conn, int(run_id)),
-        "regra_ativa": propostas_de_regra.regra_ativa(conn, int(run_id)),
+        "regra_ativa": ativa,
         "gasto": livro.gasto_com_reflexao(conn, int(run_id)),
         "sobreposicao_amostral": propostas_de_regra.sobreposicao_amostral(
             conn, int(run_id)

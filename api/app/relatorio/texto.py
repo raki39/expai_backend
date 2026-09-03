@@ -206,7 +206,7 @@ def markdown(r: dict) -> str:
     add("## 4. Executou")
     add("")
     add(
-        f"- {x['execucoes']} execucoes ({x['compras']} compras,"
+        f"- {x['ordens_executadas']} ordens ({x['compras']} compras,"
         f" {x['vendas']} vendas)"
     )
     add(f"- nocional girado: {_usd(x['nocional_girado_cents'])}")

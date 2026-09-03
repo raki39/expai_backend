@@ -62,10 +62,17 @@ class ResultadoRegra:
             "rule_id": self.rule_id,
             "regra_hash": self.regra_hash,
             "barras_avaliadas": self.barras_avaliadas,
-            "operacoes": self.operacoes,
+            # `executou` existe para que o consumidor nao tenha de inferir
+            # de um zero. Zero ordens porque a regra nunca disparou e zero
+            # ordens porque nada foi autorizado a rodar sao coisas
+            # diferentes, e a D35 fez a segunda existir.
+            "executou": True,
+            # As duas unidades, nomeadas. `operacoes` valia idas e voltas
+            # aqui e o dobro em `execucoes`, sob o mesmo nome generico.
+            "idas_e_voltas": self.operacoes,
+            "ordens_executadas": self.execucoes,
             "entradas": self.entradas,
             "saidas": self.saidas,
-            "execucoes": self.execucoes,
             "digest": self.digest,
             "fechou_no_fim": self.fechou_no_fim,
             "entradas_recusadas_por_caixa": self.entradas_recusadas_por_caixa,
@@ -88,6 +95,28 @@ def idas_e_voltas(conn: sqlite3.Connection, run_id: int) -> int:
         conn.execute(
             "SELECT COUNT(*) AS n FROM execution"
             " WHERE run_id = ? AND side = 'compra'",
+            (run_id,),
+        ).fetchone()["n"]
+    )
+
+
+def ordens_executadas(conn: sqlite3.Connection, run_id: int) -> int:
+    """Quantas ORDENS o run mandou. A outra unidade, e nao a mesma.
+
+    Existe ao lado de `idas_e_voltas` porque um numero so, chamado
+    `operacoes`, era ambiguo entre tres coisas: idas e voltas (244 num run
+    real), ordens (488 no mesmo run) e `operacoes_alvo` do B1, que casa com a
+    primeira. O CLAUDE.md ja registra esse erro de unidade uma vez - a tabela
+    do incremento 7 punha 36 execucoes do agente ao lado de 18 do controle,
+    sugerindo que o controle girou metade quando a D19 garante o contrario.
+
+    Cada custo de execucao e cobrado por ORDEM, e cada casamento com o B1 e
+    por IDA E VOLTA. Sao os dois numeros que uma pessoa precisa para conferir
+    a conta, e nenhum substitui o outro.
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?",
             (run_id,),
         ).fetchone()["n"]
     )

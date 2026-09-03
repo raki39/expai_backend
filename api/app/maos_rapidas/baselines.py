@@ -257,7 +257,7 @@ def rodar_b2(
         "rule_id": rule_id,
         "entrada": entrada.como_dict(),
         "saida": saida.como_dict(),
-        "operacoes": 1,
+        "idas_e_voltas": 1,
         "digest": executor.digest_do_run(conn, run_id),
     }
 
@@ -420,7 +420,7 @@ def rodar_b1_representativa(
             rule_id=rule_id,
         )
     return {
-        "operacoes": len(pares),
+        "idas_e_voltas": len(pares),
         "digest": executor.digest_do_run(conn, run_id),
         "equity_final_cents": simulador.caixa_cents(conn, run_id),
     }
@@ -666,12 +666,10 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
             # cinco vezes.
             "config_version_id": r["config_version_id"],
             "equity_final_cents": simulador.caixa_cents(conn, r["id"]),
-            "execucoes": conn.execute(
-                "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?", (r["id"],)
-            ).fetchone()["n"],
+            "ordens_executadas": executor.ordens_executadas(conn, r["id"]),
             # A unidade em que a comparacao e lida. Sem ela o painel dividia
-            # execucoes por dois na tela - conta de negocio no frontend, que
-            # a regra 19 proibe, e com a suposicao errada embutida.
+            # ordens por dois na tela - conta de negocio no frontend, que a
+            # regra 19 proibe, e com a suposicao errada embutida.
             "idas_e_voltas": executor.idas_e_voltas(conn, r["id"]),
             "digest": executor.digest_do_run(conn, r["id"]),
         }

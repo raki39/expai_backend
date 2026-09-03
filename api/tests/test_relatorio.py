@@ -13,6 +13,7 @@ equacao e compara numero com numero.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 import pytest
@@ -86,7 +87,7 @@ def test_do_evento_se_chega_ao_custo_a_regra_e_as_execucoes(
     assert ida["existe"]
     assert ida["proposta"]["status"] == "aceita"
     assert ida["regra"]["regra_hash"] == run_do_agente.regra_hash
-    assert ida["execucoes"]["quantas"] == run_do_agente.execucao["execucoes"]
+    assert ida["execucoes"]["quantas"] == run_do_agente.execucao["ordens_executadas"]
     # O custo lido do LEDGER, e nao do campo do evento.
     assert ida["custo"]["custo_simulado_minor"] > 0
 
@@ -480,7 +481,7 @@ def test_o_relatorio_afirma_as_seis_coisas_com_numero(
     assert isinstance(r["propos"]["regra"]["params"], dict)
 
     # executou: contagem de ordens e execucoes
-    assert r["executou"]["execucoes"] == run_do_agente.execucao["execucoes"]
+    assert r["executou"]["ordens_executadas"] == run_do_agente.execucao["ordens_executadas"]
     assert r["executou"]["compras"] and r["executou"]["vendas"]
     assert r["executou"]["digest"]
 
@@ -862,9 +863,9 @@ def test_a_comparacao_usa_uma_unidade_so(
     r = montar.montar(conn, resultado.run_id)
 
     # A unidade do agente e a mesma que o ciclo usou para casar o B1.
-    assert r["executou"]["idas_e_voltas"] == resultado.execucao["operacoes"]
-    assert r["executou"]["execucoes"] == resultado.execucao["execucoes"]
-    assert r["executou"]["execucoes"] > r["executou"]["idas_e_voltas"]
+    assert r["executou"]["idas_e_voltas"] == resultado.execucao["idas_e_voltas"]
+    assert r["executou"]["ordens_executadas"] == resultado.execucao["ordens_executadas"]
+    assert r["executou"]["ordens_executadas"] > r["executou"]["idas_e_voltas"]
 
     b1 = r["comparado"]["b1_casado_com_o_agente"]
     assert b1["operacoes_alvo"] == r["executou"]["idas_e_voltas"], (
@@ -873,7 +874,7 @@ def test_a_comparacao_usa_uma_unidade_so(
     # E os baselines reportam na mesma unidade, nunca em linhas de execucao.
     for marcador in ("B2", "B3"):
         bloco = r["comparado"][marcador]
-        assert bloco["idas_e_voltas"] * 2 <= bloco["execucoes"] + 1
+        assert bloco["idas_e_voltas"] * 2 <= bloco["ordens_executadas"] + 1
 
 
 def test_o_readme_descreve_todas_as_rotas() -> None:
@@ -932,11 +933,86 @@ def test_o_export_reune_as_telas_e_baixa_como_arquivo(
     assert corpo["fase"] == fase.FASE
     assert corpo["partes_que_falharam"] == {}, corpo["partes_que_falharam"]
     for parte in (
-        "health", "config", "config_history", "dataset", "ledger",
-        "ledger_transacoes", "simulador", "execucoes", "comparacao", "curva",
-        "agente", "relatorio", "sentinelas",
+        "health", "config", "config_history", "dataset", "separacao",
+        "ledger", "ledger_transacoes", "simulador", "execucoes", "comparacao",
+        "curva", "agente", "validador", "lote", "creditos", "relatorio",
+        "sentinelas",
     ):
         assert parte in corpo["partes"], parte
+
+
+#: Rotas GET que NAO entram no export, cada uma com o motivo. A lista existe
+#: para que acrescentar rota force uma decisao - o contrario de lembrar.
+#:
+#: Ela e a guarda que faltava: o export foi escrito no incremento 7 com uma
+#: tupla literal de treze partes, e quando a 0B acrescentou `separacao`,
+#: `validador`, `lote` e `creditos`, ele simplesmente parou de descrever o
+#: sistema. Nada acusou - foi preciso o usuario mandar os JSONs a mao para a
+#: falta aparecer.
+FORA_DO_EXPORT = {
+    # Baixar o export nao inclui o export.
+    "/api/relatorio/exportar": "e o proprio pacote",
+    # Renderizacao do que `relatorio` ja carrega, em texto.
+    "/api/relatorio/markdown": "mesma fonte que a parte `relatorio`",
+    # Parametrizadas por id: sem id nao ha o que exportar, e exportar TODAS
+    # seria um pacote de tamanho aberto.
+    "/api/relatorio/vinculo/execucao/{execution_id}": "por id",
+    "/api/relatorio/vinculo/evento/{event_id}": "por id",
+    "/api/validador/hipotese/{hypothesis_id}": "por id",
+}
+
+
+def test_toda_rota_de_leitura_esta_no_export_ou_na_lista_de_excecoes(
+    client,
+) -> None:
+    """Acrescentar rota tem de forcar uma decisao sobre o export.
+
+    A alternativa e a que falhou: uma tupla literal de partes, escrita uma vez,
+    que envelhece calada. Aqui uma rota GET nova quebra este teste ate alguem
+    dizer se ela entra no pacote ou por que nao entra.
+
+    A comparacao e CAMINHO com CAMINHO, e nao nome de parte com sufixo de
+    rota: a versao por heuristica errava `sentinelas` -> `/sentinela` e
+    `ledger_transacoes` -> `/ledger/transacoes`, e o jeito de fazer a
+    heuristica passar seria afrouxa-la ate ela nao provar mais nada.
+    """
+    import inspect
+
+    from app.api.rotas import MODULOS
+    from app.api.rotas.relatorio import exportar
+
+    fonte = inspect.getsource(exportar)
+    cobertas = set(re.findall(r'\(\s*"[a-z_]+",\s*"(/api/[a-z_/]+)"', fonte))
+    assert len(cobertas) > 10, f"so {len(cobertas)} partes? a extracao falhou"
+
+    # Pelos MODULOS, e nao por `client.app.routes`: o FastAPI resolve router
+    # incluido de forma preguicosa, e varrer o app devolve objetos de router
+    # em vez de rotas achatadas - a varredura passaria vazia, e o teste
+    # passaria por vacuidade. E a mesma travessia das outras guardas.
+    gets = {
+        rota.path
+        for modulo in MODULOS
+        for rota in modulo.router.routes
+        if "GET" in (getattr(rota, "methods", None) or set())
+    }
+    assert len(gets) > 15, f"so {len(gets)} rotas GET? a varredura falhou"
+
+    sem_cobertura = sorted(gets - cobertas - set(FORA_DO_EXPORT))
+    assert not sem_cobertura, (
+        "rotas GET que nao estao no export nem em FORA_DO_EXPORT: "
+        f"{sem_cobertura}. Decida: ou a rota entra em `exportar` com o"
+        " caminho declarado, ou entra na lista com o motivo."
+    )
+
+    # E a via oposta: uma parte que aponte para rota inexistente.
+    fantasmas = sorted(cobertas - gets)
+    assert not fantasmas, f"o export declara rota que nao existe: {fantasmas}"
+
+    # A lista de excecoes tambem nao pode apodrecer.
+    excecoes_mortas = sorted(set(FORA_DO_EXPORT) - gets)
+    assert not excecoes_mortas, (
+        f"FORA_DO_EXPORT cita rota que nao existe mais: {excecoes_mortas}"
+    )
 
 
 def test_o_export_nao_tem_leitor_proprio(conn: sqlite3.Connection) -> None:
@@ -1049,7 +1125,21 @@ def test_ha_uma_definicao_so_de_ida_e_volta(
     verdade = maos.idas_e_voltas(conn, run_id)
 
     assert montar.montar(conn, run_id)["executou"]["idas_e_voltas"] == verdade
-    assert client.get("/api/agente").json()["operacoes"] == verdade
+
+    # As DUAS unidades, com nomes que dizem qual e qual. O campo chamado
+    # `operacoes` valia idas e voltas aqui e ordens no simulador, e um leitor
+    # nao tinha como saber qual dos dois estava vendo.
+    ag = client.get("/api/agente").json()
+    assert ag["idas_e_voltas"] == verdade
+    assert ag["ordens_executadas"] == maos.ordens_executadas(conn, run_id)
+    assert "operacoes" not in ag, (
+        "o nome ambiguo nao pode voltar: ele era a unica coisa que fazia"
+        " 244 idas e volta e 488 ordens parecerem o mesmo numero"
+    )
+    # Num run que fecha tudo, ordens = 2 x idas e voltas. A asercao vale a
+    # relacao, e nao um numero fixo: e ela que prova que os dois campos
+    # medem coisas diferentes em vez de serem apelidos.
+    assert ag["ordens_executadas"] == 2 * verdade
 
     resumo = baselines.resumo_comparacao(conn)
     for marcador in ("B2", "B3"):

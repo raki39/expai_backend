@@ -572,7 +572,7 @@ def test_hipotese_nao_testavel_nao_recebe_parecer(
     `inconclusiva` que já se sabia antes de olhar.
     """
     assert run.hypothesis_id is not None
-    assert run.execucao["execucoes"] > 0, "arquivada ainda executa (D33)"
+    assert run.execucao["ordens_executadas"] > 0, "arquivada ainda executa (D33)"
     assert run.parecer_do_validador is None
     assert estados.atual(conn, run.hypothesis_id).estado == "nao_testavel"
 

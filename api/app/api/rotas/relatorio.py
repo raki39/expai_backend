@@ -37,11 +37,12 @@ from ..comum import _conn
 from .agente import agente_estado
 from .baselines import comparacao_atual, curva
 from .config import config_atual, config_historico
-from .dataset import dataset_atual
+from .dataset import dataset_atual, separacao_de_dados
 from .diagnostico import sentinela_listar
 from .ledger import ledger_estado, ledger_transacoes
 from .simulador import execucoes_listar, simulador_estado
 from .substrato import health
+from .validador import creditos_de_teste, lote_fechado, validador_estado
 
 log = logging.getLogger(__name__)
 
@@ -77,20 +78,43 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
 
     partes: dict[str, Any] = {}
     falhas: dict[str, str] = {}
-    for nome, produzir in (
-        ("health", lambda: health(request)),
-        ("config", lambda: config_atual(request)),
-        ("config_history", lambda: config_historico(request, limite=200)),
-        ("dataset", lambda: dataset_atual(request)),
-        ("ledger", lambda: ledger_estado(request)),
-        ("ledger_transacoes", lambda: ledger_transacoes(request, limite=200)),
-        ("simulador", lambda: simulador_estado(request)),
-        ("execucoes", lambda: execucoes_listar(request, limite=200)),
-        ("comparacao", lambda: comparacao_atual(request)),
-        ("curva", lambda: curva(request)),
-        ("agente", lambda: agente_estado(request)),
-        ("relatorio", lambda: relatorio(request, run_id)),
-        ("sentinelas", lambda: sentinela_listar(request)),
+    # (nome da parte, ROTA que ela espelha, como produzi-la).
+    #
+    # A rota esta na tupla de proposito. Sem ela, a unica maneira de conferir
+    # se o export cobre as telas era casar nome de parte com caminho por
+    # heuristica - e heuristica de nome erra em `sentinelas` -> `/sentinela` e
+    # em `ledger_transacoes` -> `/ledger/transacoes`. Com a rota declarada, o
+    # teste compara caminho com caminho, e uma rota nova quebra a guarda ate
+    # alguem decidir se ela entra no pacote.
+    for nome, _rota, produzir in (
+        ("health", "/api/substrato/health", lambda: health(request)),
+        ("config", "/api/config", lambda: config_atual(request)),
+        ("config_history", "/api/config/historico",
+         lambda: config_historico(request, limite=200)),
+        ("dataset", "/api/dataset", lambda: dataset_atual(request)),
+        ("separacao", "/api/dataset/separacao",
+         lambda: separacao_de_dados(request)),
+        ("ledger", "/api/ledger", lambda: ledger_estado(request)),
+        ("ledger_transacoes", "/api/ledger/transacoes",
+         lambda: ledger_transacoes(request, limite=200)),
+        ("simulador", "/api/simulador", lambda: simulador_estado(request)),
+        ("execucoes", "/api/simulador/execucoes",
+         lambda: execucoes_listar(request, limite=200)),
+        ("comparacao", "/api/baselines", lambda: comparacao_atual(request)),
+        ("curva", "/api/baselines/curva", lambda: curva(request)),
+        ("agente", "/api/agente", lambda: agente_estado(request)),
+        # As quatro partes da 0B. Faltavam: este export foi escrito no
+        # incremento 7 com uma tupla literal, e parou de descrever o sistema
+        # no instante em que a 0B acrescentou rota - em silencio, que e o
+        # padrao de sempre. Foi preciso o usuario mandar os JSONs a mao para
+        # a falta aparecer.
+        ("validador", "/api/validador", lambda: validador_estado(request)),
+        ("lote", "/api/validador/lote", lambda: lote_fechado(request)),
+        ("creditos", "/api/validador/creditos",
+         lambda: creditos_de_teste(request)),
+        ("relatorio", "/api/relatorio", lambda: relatorio(request, run_id)),
+        ("sentinelas", "/api/diagnostico/sentinela",
+         lambda: sentinela_listar(request)),
     ):
         try:
             partes[nome] = produzir()

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
@@ -28,6 +29,7 @@ from pydantic import ValidationError
 
 from ..config.schema import ExperimentConfig
 from ..dataset.loader import BarraCarregada
+from . import paradas
 from ..hipotese import poder
 from ..hipotese import registro as hipotese_registro
 from ..ledger.livro import fx_micro, registrar_custo_reflexao
@@ -55,7 +57,24 @@ log = logging.getLogger(__name__)
 # de "JSON invalido". A reserva do teto de gasto usa este numero como limite
 # superior, entao aumenta-lo torna o teto mais conservador, nunca menos.
 MAX_TOKENS_INTERPRETAR = 8_000
-MAX_TOKENS_PROPOR = 8_000
+
+#: **16.000, e nao 8.000.** O teto e limite, nao gasto: cobra-se o que sai.
+#:
+#: O texto que o contrato PEDE cabe em ~300 tokens (o `maxLength` de todo
+#: campo de texto do pre-registro somado, dividido por quatro). Os outros
+#: 7.700 do teto antigo eram todos do pensamento - e o pensamento conta em
+#: `max_tokens`. Estourar devolve resposta VAZIA, que chegava a validacao
+#: disfarcada de "Invalid JSON at column 0" e mandava procurar defeito no
+#: schema; hoje o adaptador recusa citando o `stop_reason`, e a categoria
+#: `max_tokens` diz isso no evento.
+#:
+#: E a causa mais provavel da parada do run 27 em producao: o `interpretar`
+#: passou com 2.639 tokens de saida sob um contrato MENOR, e o `propor_regra`
+#: falhou logo depois com o mesmo teto e mais coisa a escrever. Nao afirmo que
+#: era isso - o motivo daquele run especifico so existe no log da plataforma,
+#: porque ele rodou antes de a migracao 13 persistir a categoria. O proximo
+#: run diz sozinho.
+MAX_TOKENS_PROPOR = 16_000
 TIER = "padrao"
 
 
@@ -81,6 +100,16 @@ class Estado(TypedDict, total=False):
     eventos: list[int]
     parou_em: str | None
     motivo: str | None
+    # A CATEGORIA da parada, e nao so o texto: e ela que decide se as maos
+    # rapidas executam a regra padrao (D35).
+    #
+    # Declarada aqui porque `Estado` e um `TypedDict` e o LangGraph **descarta
+    # em silencio** a chave que um no devolve e que nao esta declarada. O
+    # `_parar` passou a devolver `categoria_da_parada`, o campo chegava sempre
+    # `None` no ciclo, e todo run caia na regra padrao como antes - a correcao
+    # inteira ficaria inerte, sem erro nenhum. Foi um teste do comportamento
+    # novo que acusou; nada no caminho do LangGraph reclama.
+    categoria_da_parada: str | None
 
 
 @dataclass(frozen=True)
@@ -97,6 +126,10 @@ class Dependencias:
     config: ExperimentConfig
     settings: Settings
     adaptador: Any | None = None
+    # Como esperar entre tentativas. Injetavel so para que a suite nao durma
+    # de verdade - o retry tem espera real, e uma suite que a paga fica lenta
+    # sem medir nada a mais.
+    dormir: Any = time.sleep
 
 
 def _duracao_da_barra(estado: Estado, config: ExperimentConfig) -> int:
@@ -149,6 +182,8 @@ def _evento(
     outputs_digest: str | None = None,
     expectation: str | None = None,
     confidence_ppm: int | None = None,
+    stop_category: str | None = None,
+    stop_reason: str | None = None,
 ) -> int:
     event_id, _ = registrar_custo_reflexao(
         dep.conn,
@@ -163,6 +198,8 @@ def _evento(
         outputs_digest=outputs_digest,
         expectation=expectation,
         confidence_ppm=confidence_ppm,
+        stop_category=stop_category,
+        stop_reason=stop_reason,
     )
     return event_id
 
@@ -172,8 +209,32 @@ def _ultimo_evento(estado: Estado) -> int | None:
     return eventos[-1] if eventos else None
 
 
-def _parar(estado: Estado, dep: Dependencias, no: str, motivo: str) -> dict:
-    """Grava o evento de parada e devolve a atualizacao de estado."""
+def _categoria_do_erro(erro: BaseException) -> str:
+    """A categoria fechada correspondente a excecao que chegou.
+
+    `ErroDoProvedor` ja vem classificado do adaptador - e onde a excecao crua
+    do SDK ainda existe, e portanto o unico lugar em que da para distinguir
+    "o provedor recusou nossa requisicao" de "o provedor caiu". Reclassificar
+    aqui, pela mensagem, seria adivinhar o que la se sabia.
+    """
+    if isinstance(erro, ErroDoProvedor):
+        return erro.categoria
+    if isinstance(erro, reflexao.TierNaoConfigurado):
+        return paradas.TIER_NAO_CONFIGURADO
+    if isinstance(erro, ProvedorIndisponivel):
+        return paradas.PROVEDOR_INDISPONIVEL
+    return paradas.ERRO_INTERNO
+
+
+def _parar(
+    estado: Estado, dep: Dependencias, no: str, motivo: str, categoria: str
+) -> dict:
+    """Grava o evento de parada, COM a categoria e o motivo, e atualiza o estado.
+
+    `categoria` e obrigatoria e posicional de proposito: com valor padrao,
+    um caminho novo de parada herdaria silenciosamente a categoria errada, e
+    e justamente a categoria que decide se as maos rapidas executam (D35).
+    """
     event_id = _evento(
         dep,
         run_id=estado["run_id"],
@@ -182,12 +243,18 @@ def _parar(estado: Estado, dep: Dependencias, no: str, motivo: str) -> dict:
         parent_event_id=_ultimo_evento(estado),
         outputs_digest=None,
         expectation=None,
+        stop_category=categoria,
+        stop_reason=motivo,
     )
-    log.info("cerebro.parou", extra={"no": no, "motivo": motivo})
+    log.info(
+        "cerebro.parou",
+        extra={"no": no, "categoria": categoria, "motivo": motivo},
+    )
     return {
         "eventos": [*(estado.get("eventos") or []), event_id],
         "parou_em": no,
         "motivo": motivo,
+        "categoria_da_parada": categoria,
     }
 
 
@@ -201,7 +268,10 @@ def no_observar(estado: Estado, dep: Dependencias) -> dict:
     try:
         resumo = contexto.resumir(estado["barras"], dep.config)
     except Exception as erro:  # noqa: BLE001
-        return _parar(estado, dep, "observar", f"{type(erro).__name__}: {erro}")
+        return _parar(
+            estado, dep, "observar",
+            f"{type(erro).__name__}: {erro}", paradas.ERRO_INTERNO,
+        )
 
     event_id = _evento(
         dep,
@@ -234,12 +304,19 @@ def no_interpretar(estado: Estado, dep: Dependencias) -> dict:
             settings=dep.settings,
             parent_event_id=_ultimo_evento(estado),
             adaptador=dep.adaptador,
+            dormir=dep.dormir,
         )
     except reflexao.TetoAtingido as teto:
-        return _parar(estado, dep, "interpretar", teto.veredito.motivo)
+        return _parar(
+            estado, dep, "interpretar",
+            teto.veredito.motivo, paradas.TETO_ATINGIDO,
+        )
     except (ErroDoProvedor, reflexao.TierNaoConfigurado,
             ProvedorIndisponivel) as erro:
-        return _parar(estado, dep, "interpretar", f"{type(erro).__name__}: {erro}")
+        return _parar(
+            estado, dep, "interpretar",
+            f"{type(erro).__name__}: {erro}", _categoria_do_erro(erro),
+        )
 
     eventos = [*(estado.get("eventos") or []), chamada.event_id]
     try:
@@ -254,6 +331,7 @@ def no_interpretar(estado: Estado, dep: Dependencias) -> dict:
             # registrou quatro vezes. O que custa caro nao e falhar, e falhar
             # sem dizer onde.
             _motivo_legivel(erro),
+            paradas.ERRO_SCHEMA,
         )
     return {"interpretacao": leitura, "eventos": eventos}
 
@@ -303,12 +381,19 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
             settings=dep.settings,
             parent_event_id=_ultimo_evento(estado),
             adaptador=dep.adaptador,
+            dormir=dep.dormir,
         )
     except reflexao.TetoAtingido as teto:
-        return _parar(estado, dep, "propor_regra", teto.veredito.motivo)
+        return _parar(
+            estado, dep, "propor_regra",
+            teto.veredito.motivo, paradas.TETO_ATINGIDO,
+        )
     except (ErroDoProvedor, reflexao.TierNaoConfigurado,
             ProvedorIndisponivel) as erro:
-        return _parar(estado, dep, "propor_regra", f"{type(erro).__name__}: {erro}")
+        return _parar(
+            estado, dep, "propor_regra",
+            f"{type(erro).__name__}: {erro}", _categoria_do_erro(erro),
+        )
 
     eventos = [*(estado.get("eventos") or []), chamada.event_id]
 
@@ -327,7 +412,8 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
             observado_ate_ms=resumo.ate_ms,
         )
         atualizado = _parar(
-            {**estado, "eventos": eventos}, dep, "propor_regra", motivo
+            {**estado, "eventos": eventos}, dep, "propor_regra", motivo,
+            paradas.ERRO_SCHEMA,
         )
         return {**atualizado, "proposal_id": proposal_id}
 
@@ -384,7 +470,8 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
         )
     except Exception as erro:  # noqa: BLE001
         return _parar(
-            estado, dep, "registrar_intencao", f"{type(erro).__name__}: {erro}"
+            estado, dep, "registrar_intencao",
+            f"{type(erro).__name__}: {erro}", paradas.ERRO_INTERNO,
         )
 
     if not testavel:

@@ -28,12 +28,23 @@ import logging
 from typing import Any
 
 from ...ledger.livro import Uso
+from .. import paradas
 from .base import Credenciais, ErroDoProvedor, Pedido, Resposta
 
 log = logging.getLogger(__name__)
 
 TIMEOUT_S = 120.0
-MAX_RETRIES = 2
+#: **Zero de proposito, e isto e uma mudanca.** Era 2, e o retry do SDK
+#: convivia com o de `reflexao._chamar_com_retry`, criado no incremento 11b -
+#: duas politicas empilhadas, ate 9 tentativas, e a de dentro invisivel: ela
+#: nao loga, nao classifica e nao aparece no evento de parada.
+#:
+#: Uma politica, num lugar. A nossa e a que fica, porque e ela que le
+#: `erro.transitorio`, escreve `cerebro.retry` no log e alimenta
+#: `stop_category`. Deixar a do SDK ligada faria o numero de tentativas que
+#: o teste afirma ser 3 valer 9 na producao - o valor deixando de descrever o
+#: comportamento, que e o padrao que este projeto ja registrou dez vezes.
+MAX_RETRIES = 0
 
 
 class AdaptadorOpenAI:
@@ -68,8 +79,31 @@ class AdaptadorOpenAI:
                     },
                 },
             )
-        except Exception as erro:  # noqa: BLE001 - o no grava evento de erro
-            raise ErroDoProvedor(f"openai: {type(erro).__name__}: {erro}") from erro
+        except Exception as erro:  # noqa: BLE001 - o no grava evento de parada
+            categoria, transitorio = paradas.classificar(erro)
+            raise ErroDoProvedor(
+                f"openai: {type(erro).__name__}: {erro}",
+                categoria=categoria,
+                transitorio=transitorio,
+            ) from erro
+
+        # A simetria do adaptador da Anthropic, e ela precisa existir aqui pelo
+        # mesmo motivo: `content` vazio virava `""`, que chega a validacao como
+        # "Invalid JSON at column 0" e manda procurar defeito no contrato. A
+        # secao 3.9 exige DOIS provedores viaveis, e um deles diagnosticar bem
+        # enquanto o outro mente nao e ter dois.
+        escolha = resposta.choices[0] if resposta.choices else None
+        if escolha is None or not (escolha.message.content or "").strip():
+            motivo = getattr(escolha, "finish_reason", None)
+            raise ErroDoProvedor(
+                f"openai: resposta sem texto (finish_reason={motivo!r}).",
+                categoria=(
+                    paradas.MAX_TOKENS
+                    if motivo == "length"
+                    else paradas.ERRO_SCHEMA
+                ),
+                transitorio=False,
+            )
 
         uso_bruto = getattr(resposta, "usage", None)
         prompt_tokens = _inteiro_ou_nulo(uso_bruto, "prompt_tokens")
@@ -86,7 +120,7 @@ class AdaptadorOpenAI:
             tokens_in = max(prompt_tokens - cache_read, 0)
 
         return Resposta(
-            texto=resposta.choices[0].message.content or "",
+            texto=escolha.message.content or "",
             uso=Uso(
                 tokens_in=tokens_in,
                 tokens_out=_inteiro_ou_nulo(uso_bruto, "completion_tokens"),

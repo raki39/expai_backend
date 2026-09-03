@@ -245,7 +245,7 @@ def test_b2_e_exatamente_uma_ida_e_volta_conferida_a_mao(
     assert simulador.caixa_cents(conn, run_id) == esperado
 
     # Um par de custos, e nao mais: B2 nao gira.
-    assert resultado["operacoes"] == 1
+    assert resultado["idas_e_voltas"] == 1
     assert conn.execute(
         "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?", (run_id,)
     ).fetchone()["n"] == 2
@@ -334,8 +334,8 @@ def test_b1_casa_o_giro_com_o_b3(conn: sqlite3.Connection, cenario) -> None:
     r = baselines.rodar_comparacao(
         conn, dataset_id=dataset_id, config=cfg, config_version_id=1, semente=42
     )
-    assert r["B1"]["operacoes_alvo"] == r["B3"]["operacoes"]
-    assert r["B3"]["operacoes"] > 0
+    assert r["B1"]["operacoes_alvo"] == r["B3"]["idas_e_voltas"]
+    assert r["B3"]["idas_e_voltas"] > 0
 
 
 def test_percentil_nao_interpola() -> None:
@@ -760,8 +760,8 @@ def test_rota_roda_a_comparacao_completa(
     assert resposta.status_code == 201
     corpo = resposta.json()
     assert corpo["B1"]["repeticoes"] == 1_000
-    assert corpo["B1"]["operacoes_alvo"] == corpo["B3"]["operacoes"]
-    assert corpo["B2"]["operacoes"] == 1
+    assert corpo["B1"]["operacoes_alvo"] == corpo["B3"]["idas_e_voltas"]
+    assert corpo["B2"]["idas_e_voltas"] == 1
 
     resumo = client.get("/api/baselines").json()
     assert resumo["existe"] is True
