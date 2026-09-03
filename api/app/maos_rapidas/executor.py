@@ -72,6 +72,27 @@ class ResultadoRegra:
         }
 
 
+def idas_e_voltas(conn: sqlite3.Connection, run_id: int) -> int:
+    """Quantas idas e voltas o run fez. A UNIDADE da comparacao.
+
+    Uma definicao so, num lugar so. Havia duas: `COUNT(*) / 2` sobre as
+    execucoes numa rota, e a contagem de compras no relatorio. As duas dao o
+    mesmo numero enquanto toda compra fecha - e divergem em silencio no
+    unico caso em que importa, o run que termina comprado.
+
+    Compras, e nao metade das execucoes: a D1 fixou long/flat, entao ha no
+    maximo uma posicao aberta e cada compra abre exatamente uma ida e volta.
+    Dividir por dois SUPOE que a ultima fechou.
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM execution"
+            " WHERE run_id = ? AND side = 'compra'",
+            (run_id,),
+        ).fetchone()["n"]
+    )
+
+
 def digest_do_run(conn: sqlite3.Connection, run_id: int) -> str:
     """Hash da sequencia ordenada de lancamentos do run (criterio 2).
 

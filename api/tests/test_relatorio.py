@@ -778,3 +778,197 @@ def test_o_readme_descreve_todas_as_rotas() -> None:
     sobrando = sorted(documentadas - reais)
     assert not faltando, f"rotas sem linha no README: {faltando}"
     assert not sobrando, f"linhas no README sem rota: {sobrando}"
+
+
+# ===========================================================================
+# O export: um arquivo com o estado inteiro, sem leitor novo e sem segredo
+# ===========================================================================
+
+
+def test_o_export_reune_as_telas_e_baixa_como_arquivo(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    resposta = client.get("/api/exportar")
+    assert resposta.status_code == 200
+    assert "attachment" in resposta.headers["content-disposition"]
+    assert ".json" in resposta.headers["content-disposition"]
+
+    corpo = resposta.json()
+    assert corpo["fase"] == "0A"
+    assert corpo["partes_que_falharam"] == {}, corpo["partes_que_falharam"]
+    for parte in (
+        "health", "config", "config_history", "dataset", "ledger",
+        "ledger_transacoes", "simulador", "execucoes", "comparacao", "curva",
+        "agente", "relatorio", "sentinelas",
+    ):
+        assert parte in corpo["partes"], parte
+
+
+def test_o_export_nao_tem_leitor_proprio(conn: sqlite3.Connection) -> None:
+    """Reimplementar as consultas criaria um segundo jeito de responder.
+
+    E no dia em que os dois discordassem, o arquivo exportado seria a versao
+    que alguem leva para analisar sem ter como conferir (regra 16).
+
+    A varredura e por AST: dentro da funcao `exportar` nao pode haver SQL nem
+    aritmetica - ela so chama as funcoes de rota que ja servem cada tela.
+    """
+    import ast
+    import pathlib
+
+    fonte = (
+        pathlib.Path(__file__).resolve().parents[1] / "app" / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    arvore = ast.parse(fonte)
+    alvo = next(
+        no
+        for no in ast.walk(arvore)
+        if isinstance(no, ast.FunctionDef) and no.name == "exportar"
+    )
+
+    for no in ast.walk(alvo):
+        if isinstance(no, ast.Constant) and isinstance(no.value, str):
+            texto = no.value.upper()
+            assert "SELECT " not in texto, f"SQL dentro de exportar: {no.value!r}"
+        # As operacoes ARITMETICAS, nomeadas uma a uma. Excluir por lista
+        # negativa marcava `int | None` da assinatura como conta: `|` e
+        # BinOp tambem, e anotacao de tipo nao e calculo.
+        if isinstance(no, ast.BinOp) and isinstance(
+            no.op, (ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Pow)
+        ):
+            raise AssertionError(f"conta dentro de exportar, linha {no.lineno}")
+
+
+def test_o_export_nao_carrega_segredo(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    """Regra 15: segredo nunca aparece em log, em /api/health ou em pagina.
+
+    O export e o caso mais perigoso dos tres: e um arquivo feito para ser
+    ENVIADO a outra pessoa. Um vazamento aqui sai da maquina junto.
+    """
+    _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    bruto = client.get("/api/exportar").text
+
+    for chave in (
+        settings.anthropic_api_key.get_secret_value(),
+        settings.openai_api_key.get_secret_value(),
+        settings.api_service_token.get_secret_value(),
+    ):
+        if chave:
+            assert chave not in bruto
+
+    # E o que aparece sobre credencial e PRESENCA, nunca valor.
+    corpo = client.get("/api/exportar").json()
+    credenciais = corpo["partes"]["health"]["credenciais_configuradas"]
+    assert set(map(type, credenciais.values())) == {bool}
+
+
+def test_uma_tela_quebrada_nao_derruba_o_export_inteiro(
+    client, conn: sqlite3.Connection, monkeypatch
+) -> None:
+    """E justamente quando algo quebrou que alguem exporta o estado.
+
+    Um export vazio por causa de uma tela e pior que um que diz qual tela.
+    """
+    from app.api import routes
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("tela quebrada de proposito")
+
+    monkeypatch.setattr(routes, "simulador_estado", explode)
+    corpo = client.get("/api/exportar").json()
+
+    assert "simulador" in corpo["partes_que_falharam"]
+    assert "tela quebrada" in corpo["partes_que_falharam"]["simulador"]
+    # E o resto veio inteiro.
+    assert "ledger" in corpo["partes"]
+    assert "health" in corpo["partes"]
+
+
+def test_ha_uma_definicao_so_de_ida_e_volta(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    """Havia duas, e elas divergem exatamente no caso que importa.
+
+    `COUNT(*) / 2` sobre as execucoes e a contagem de compras dao o mesmo
+    numero enquanto toda compra fecha. Num run que termina COMPRADO, a
+    divisao arredonda para baixo e some com a ida que ficou aberta.
+    """
+    from app.maos_rapidas import executor as maos
+
+    dataset_id, cfg = cenario
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        semente=cfg.default_seed,
+    )
+    run_id = resultado.run_id
+    verdade = maos.idas_e_voltas(conn, run_id)
+
+    assert montar.montar(conn, run_id)["executou"]["idas_e_voltas"] == verdade
+    assert client.get("/api/agente").json()["operacoes"] == verdade
+
+    resumo = baselines.resumo_comparacao(conn)
+    for marcador in ("B2", "B3"):
+        bloco = resumo[marcador]
+        assert bloco["idas_e_voltas"] == maos.idas_e_voltas(conn, bloco["run_id"])
+
+    # E a divergencia que motivou a unificacao: com uma compra sem venda, a
+    # divisao por dois perde a ida aberta.
+    execucoes = conn.execute(
+        "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?", (run_id,)
+    ).fetchone()["n"]
+    conn.execute(
+        "INSERT INTO execution (run_id, dataset_id, decision_bar_ms,"
+        " execution_bar_ms, side, quantity_sats, price_ref, price_exec,"
+        " notional_ref_cents, fee_cents, spread_cents, slippage_cents,"
+        " penalty_cents, fidelity_level, ledger_transaction_id, rule_id)"
+        " SELECT run_id, dataset_id, decision_bar_ms + 1, execution_bar_ms + 1,"
+        " 'compra', quantity_sats, price_ref, price_exec, notional_ref_cents,"
+        " fee_cents, spread_cents, slippage_cents, penalty_cents,"
+        " fidelity_level, ledger_transaction_id, rule_id"
+        " FROM execution WHERE run_id = ? AND side = 'compra' LIMIT 1",
+        (run_id,),
+    )
+    assert maos.idas_e_voltas(conn, run_id) == verdade + 1
+    assert (execucoes + 1) // 2 == verdade, "a divisao por dois perde a ida aberta"
+
+
+def test_a_faixa_contra_o_acaso_vem_da_api(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    """Classificar e decidir, e decidir sobre o experimento nao e do painel."""
+    _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    corpo = client.get("/api/agente").json()
+    assert corpo["faixa"] in (
+        "abaixo_p5", "entre_p5_e_p50", "entre_p50_e_p95", "acima_p95",
+        "sem_controle",
+    )
+
+
+def test_a_rota_do_agente_informa_quantas_reflexoes_houve(
+    client, conn: sqlite3.Connection, cenario, settings  # noqa: F811
+) -> None:
+    """Por D23, zero reflexoes significa que o agente E o B3.
+
+    E afirmacao forte demais para o painel produzir por acidente, a partir de
+    um campo que a api nao mandou. O painel mostrava 0 num run com duas
+    reflexoes exatamente assim - `?? 0` transformando ausencia em zero, que e
+    a confusao que a secao 5.2 proibe no custo.
+    """
+    resultado = _rodar_ciclo(
+        conn, cenario, settings, AdaptadorFalso([INTERPRETACAO_OK, PROPOSTA_OK])
+    )
+    corpo = client.get("/api/agente").json()
+    assert corpo["reflexoes"] == resultado.reflexoes
+    assert corpo["reflexoes"] > 0

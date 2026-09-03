@@ -669,6 +669,10 @@ def resumo_comparacao(conn: sqlite3.Connection) -> dict:
             "execucoes": conn.execute(
                 "SELECT COUNT(*) AS n FROM execution WHERE run_id = ?", (r["id"],)
             ).fetchone()["n"],
+            # A unidade em que a comparacao e lida. Sem ela o painel dividia
+            # execucoes por dois na tela - conta de negocio no frontend, que
+            # a regra 19 proibe, e com a suposicao errada embutida.
+            "idas_e_voltas": executor.idas_e_voltas(conn, r["id"]),
             "digest": executor.digest_do_run(conn, r["id"]),
         }
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -42,6 +43,54 @@ def conectar(db_path: Path) -> sqlite3.Connection:
     for pragma in _PRAGMAS:
         conn.execute(pragma)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Uma conexao POR THREAD
+# ---------------------------------------------------------------------------
+#
+# O FastAPI roda endpoint sincrono no threadpool, e o painel dispara catorze
+# requisicoes em paralelo a cada carga. Com uma conexao unica de processo -
+# que era o desenho - varias threads usavam o MESMO `sqlite3.Connection` ao
+# mesmo tempo. Medido: 3 falhas em 208 requisicoes concorrentes, `500` em
+# `/api/curva` e `503` em `/api/config`, ~1,4%.
+#
+# A suite nunca veria: `TestClient` chama uma rota de cada vez, e o defeito so
+# existe quando duas chamadas se cruzam. E mais uma vez o que o CLAUDE.md ja
+# registra - o que a suite nao consegue observar, ela nao protege.
+#
+# Conexao por thread e o modo normal de operar SQLite: com `journal_mode=WAL`,
+# varios leitores e um escritor convivem sem se bloquear, e `busy_timeout`
+# cobre a espera de escrita. Nada aqui vira concorrencia de ESCRITA: na 0A o
+# run e atomico (ADR 0018) e ha um agente so.
+_local = threading.local()
+
+
+def conexao_do_thread(db_path: Path) -> sqlite3.Connection:
+    """A conexao desta thread, criada na primeira vez que ela pede.
+
+    Guardada por CAMINHO tambem: se o caminho mudar (acontece nos testes, que
+    dao um banco novo por caso), a conexao velha apontaria para outro arquivo
+    e a thread leria o banco errado - um defeito silencioso, do tipo que este
+    projeto ja colecionou.
+    """
+    atual = getattr(_local, "caminho", None)
+    if atual != db_path or getattr(_local, "conn", None) is None:
+        anterior = getattr(_local, "conn", None)
+        if anterior is not None:
+            anterior.close()
+        _local.conn = conectar(db_path)
+        _local.caminho = db_path
+    return _local.conn
+
+
+def fechar_conexao_do_thread() -> None:
+    """Fecha e esquece a conexao desta thread. Usado no encerramento e nos testes."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        conn.close()
+    _local.conn = None
+    _local.caminho = None
 
 
 @contextmanager

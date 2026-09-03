@@ -389,3 +389,109 @@ def test_health_separa_gravavel_de_montado(client: TestClient) -> None:
     corpo = client.get("/api/health").json()
     assert "volume_gravavel" in corpo
     assert "volume_montado" in corpo
+
+
+# ===========================================================================
+# Concorrencia: o painel faz catorze chamadas em paralelo
+# ===========================================================================
+
+
+def test_cada_thread_tem_a_propria_conexao(ambiente) -> None:
+    """Uma conexao unica de processo era usada por varias threads ao mesmo
+    tempo, e `sqlite3.Connection` nao suporta isso.
+
+    Medido antes do conserto: 3 falhas em 208 requisicoes concorrentes -
+    `sqlite3.InterfaceError` virando `500` em `/api/curva` e `503` em
+    `/api/config`, cerca de 1,4%.
+
+    A suite nunca viu porque `TestClient` chama uma rota de cada vez. O
+    defeito so existe quando duas chamadas se cruzam - mais uma vez, o que a
+    suite nao consegue observar ela nao protege.
+    """
+    import threading
+
+    from app.store import conectar, conexao_do_thread, fechar_conexao_do_thread
+
+    caminho = ambiente
+    # O banco nasce ANTES da corrida. Deixar oito threads criarem o arquivo
+    # ao mesmo tempo mede outra coisa - primeiro toque concorrente - e nao a
+    # propriedade que interessa aqui.
+    conectar(caminho).close()
+
+    vistas: list[int] = []
+    trava = threading.Lock()
+
+    def usar() -> None:
+        conn = conexao_do_thread(caminho)
+        # Usa de verdade: obter o objeto nao prova que ele funciona.
+        conn.execute("SELECT 1").fetchone()
+        with trava:
+            vistas.append(id(conn))
+        fechar_conexao_do_thread()
+
+    threads = [threading.Thread(target=usar) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(vistas) == 8
+    assert len(set(vistas)) == 8, "duas threads compartilharam a mesma conexao"
+
+
+def test_a_mesma_thread_reaproveita_a_conexao(ambiente) -> None:
+    """Abrir uma conexao por consulta funcionaria e desperdicaria; o contrato
+    e uma por thread."""
+    from app.store import conexao_do_thread, fechar_conexao_do_thread
+
+    try:
+        primeira = conexao_do_thread(ambiente)
+        assert conexao_do_thread(ambiente) is primeira
+    finally:
+        fechar_conexao_do_thread()
+
+
+def test_trocar_de_banco_troca_a_conexao(ambiente, tmp_path) -> None:
+    """Guardar so a conexao, sem o caminho, faria a thread continuar lendo o
+    banco anterior - defeito silencioso e do tipo que este projeto coleciona.
+    """
+    from app.store import conexao_do_thread, fechar_conexao_do_thread
+
+    try:
+        primeira = conexao_do_thread(ambiente)
+        outro = tmp_path / "outro.sqlite3"
+        segunda = conexao_do_thread(outro)
+        assert segunda is not primeira
+        assert conexao_do_thread(outro) is segunda
+    finally:
+        fechar_conexao_do_thread()
+
+
+def test_o_painel_inteiro_em_paralelo_nao_derruba_rota_nenhuma(
+    client, ambiente
+) -> None:
+    """A forma exata do que o painel faz: todas as telas de uma vez.
+
+    E o teste que teria pego o defeito. Repetido, porque uma falha de
+    interleaving nao acontece na primeira tentativa.
+    """
+    import concurrent.futures as cf
+
+    rotas = [
+        "/api/health", "/api/config", "/api/dataset", "/api/ledger",
+        "/api/ledger/transacoes", "/api/sentinel", "/api/simulador",
+        "/api/execucoes", "/api/comparacao", "/api/agente", "/api/curva",
+        "/api/relatorio", "/api/exportar",
+    ]
+
+    def bater(rota: str) -> tuple[str, int]:
+        return rota, client.get(rota).status_code
+
+    ruins: list[tuple[str, int]] = []
+    with cf.ThreadPoolExecutor(max_workers=len(rotas)) as ex:
+        for _ in range(6):
+            for rota, status in ex.map(bater, rotas):
+                if status != 200:
+                    ruins.append((rota, status))
+
+    assert not ruins, ruins

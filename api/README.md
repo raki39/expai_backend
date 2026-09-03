@@ -85,6 +85,7 @@ envelhecido, listando 6 rotas quando existiam 26.
 | POST | `/api/agente` | **roda o ciclo com LLM — gasta dinheiro de verdade** |
 | GET | `/api/relatorio` | relatório de fechamento da 0A, em JSON |
 | GET | `/api/relatorio/markdown` | o mesmo relatório, para humano |
+| GET | `/api/exportar` | baixa um JSON com o estado inteiro, para anexar |
 | POST | `/api/reprodutibilidade` | prova de R12: três digests, sem LLM |
 | GET | `/api/vinculo/execucao/{execution_id}` | da execução ao evento cognitivo (R25.2) |
 | GET | `/api/vinculo/evento/{event_id}` | da decisão ao custo, regra, execuções e resultado |

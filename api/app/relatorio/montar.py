@@ -192,7 +192,7 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
     # Compras, e nao metade das execucoes: a D1 fixou long/flat, entao ha no
     # maximo uma posicao aberta e cada compra abre exatamente uma ida e volta.
     # Dividir por dois suporia que toda compra fechou, e a ultima pode nao ter.
-    executou["idas_e_voltas"] = executou["compras"] or 0
+    executou["idas_e_voltas"] = executor.idas_e_voltas(conn, run_id)
 
     # ---------------------------------------------------------------- custos
     carteira = livro.carteira(conn, run_id=run_id)
@@ -218,19 +218,6 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
     b1_do_agente = baselines.b1_do_agente(conn)
     patrimonio = custos["patrimonio_final_cents"]
 
-    # Idas e voltas de cada baseline, na mesma unidade do agente e de B1.
-    # `resumo_comparacao` devolve `execucoes` para B2 e B3, que e o dobro -
-    # e por um instante o relatorio comparou as duas coisas na mesma coluna.
-    for marcador in ("B2", "B3"):
-        bloco = comparado.get(marcador)
-        if isinstance(bloco, dict) and bloco.get("run_id"):
-            bloco["idas_e_voltas"] = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS n FROM execution"
-                    " WHERE run_id = ? AND side = 'compra'",
-                    (bloco["run_id"],),
-                ).fetchone()["n"]
-            )
     if b1_do_agente:
         comparado = {
             **comparado,

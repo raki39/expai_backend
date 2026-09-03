@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi import Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 # O cerebro lento e importado aqui, mas nenhum SDK de provedor vem junto:
 # os adaptadores carregam o proprio SDK dentro da funcao que chama. Subir a
 # API nao carrega provedor nenhum, e ha teste que confere a variacao de
 # `sys.modules` em vez do estado absoluto dela.
+from ..cerebro import avaliacao as cerebro_avaliacao
 from ..cerebro import cache as cerebro_cache
 from ..cerebro import ciclo as cerebro_ciclo
 from ..cerebro import propostas as propostas_de_regra
@@ -37,6 +40,7 @@ from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDe
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
 from ..ledger import livro
 from ..maos_rapidas import baselines
+from ..maos_rapidas import executor as maos_executor
 from ..maos_rapidas import curva as curva_de_patrimonio
 from ..relatorio import montar as relatorio_montar
 from ..relatorio import reprodutibilidade as relatorio_reprodutibilidade
@@ -45,7 +49,12 @@ from ..relatorio import vinculo as relatorio_vinculo
 from ..simulador import execucao as simulador
 from ..security import exigir_token_de_servico
 from ..settings import Settings
-from ..store import versao_schema, volume_gravavel, volume_montado
+from ..store import (
+    conexao_do_thread,
+    versao_schema,
+    volume_gravavel,
+    volume_montado,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +62,11 @@ router = APIRouter(prefix="/api", dependencies=[Depends(exigir_token_de_servico)
 
 
 def _conn(request: Request) -> sqlite3.Connection:
-    return request.app.state.conn
+    # A conexao DESTA thread, e nao uma unica compartilhada pelo processo.
+    # O painel faz catorze chamadas em paralelo, e o threadpool do FastAPI
+    # as espalha por threads diferentes: uma conexao so entre elas produzia
+    # `sqlite3.InterfaceError` em cerca de 1,4% das requisicoes.
+    return conexao_do_thread(request.app.state.settings.db_path)
 
 
 def _settings(request: Request) -> Settings:
@@ -692,10 +705,10 @@ def agente_estado(request: Request) -> dict[str, Any]:
         # quantas operacoes houve e nao diz se sobrou dinheiro - que e a unica
         # pergunta que a comparacao com os baselines responde.
         "patrimonio_final_cents": simulador.caixa_cents(conn, int(run_id)),
-        "operacoes": conn.execute(
-            "SELECT COUNT(*) / 2 AS n FROM execution WHERE run_id = ?",
-            (int(run_id),),
-        ).fetchone()["n"],
+        # A mesma definicao que o relatorio e a comparacao usam. Era
+        # `COUNT(*) / 2` aqui e contagem de compras la: iguais enquanto toda
+        # compra fecha, divergentes no run que termina comprado.
+        "operacoes": maos_executor.idas_e_voltas(conn, int(run_id)),
         "custos_cents": {
             "execucao_total": carteira["simulado_usd"]["custo_execucao_minor"],
             "reflexao_total": carteira["simulado_usd"]["tesouraria_minor"],
@@ -708,6 +721,13 @@ def agente_estado(request: Request) -> dict[str, Any]:
         # comparacao e casado com o B3 e tem outro giro - comparar o agente
         # com aquele mediria giro em vez de escolha de momento.
         "b1_casado": baselines.b1_do_agente(conn),
+        # Onde o resultado caiu na distribuicao do acaso. Vem da api porque
+        # classificar e decidir, e decidir sobre o experimento nao acontece no
+        # painel (regra 19). Ele comparava com p5/p50/p95 na tela - e a mesma
+        # regua ficava escrita em dois lugares, livre para divergir.
+        "faixa": cerebro_avaliacao.faixa_contra_o_acaso(
+            simulador.caixa_cents(conn, int(run_id)), baselines.b1_do_agente(conn)
+        ),
         "caminho": cerebro_ciclo.caminho_percorrido(conn, int(run_id)),
         "propostas": propostas_de_regra.do_run(conn, int(run_id)),
         "regra_ativa": propostas_de_regra.regra_ativa(conn, int(run_id)),
@@ -716,6 +736,15 @@ def agente_estado(request: Request) -> dict[str, Any]:
             conn, int(run_id)
         ),
         "condicoes_validade": simulador.condicoes_do_run(conn, int(run_id)),
+        # Quantas vezes o cerebro falou neste run. O painel precisa disto
+        # para nao confundir ausencia com zero: por D23, ZERO reflexoes
+        # significa que o agente E o B3, que e uma afirmacao forte - e nao
+        # pode ser o que a tela mostra so porque o campo nao veio.
+        "reflexoes": conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_event"
+            " WHERE run_id = ? AND provider IS NOT NULL",
+            (int(run_id),),
+        ).fetchone()["n"],
         "cache_de_respostas": cerebro_cache.tamanho(conn),
         "arredondamento_do_custo_ok": (
             livro.conferir_arredondamento_do_custo(conn) == []
@@ -851,6 +880,81 @@ def reprodutibilidade_provar(
     except ValueError as erro:
         raise HTTPException(status.HTTP_409_CONFLICT, str(erro)) from erro
 
+
+# ---------------------------------------------------------------- exportar
+#
+# Um arquivo com tudo o que o painel mostra, para sair da tela e virar anexo.
+#
+# **Nao existe leitor novo aqui.** Esta rota chama as PROPRIAS funcoes de rota
+# que servem cada tela. Reimplementar as consultas produziria um segundo jeito
+# de responder as mesmas perguntas - e no dia em que os dois discordassem, o
+# arquivo exportado seria a versao que alguem leva para analisar sem ter como
+# conferir. A regra 16 vale aqui como vale para saldo.
+#
+# Por isso tambem nao ha calculo: se um numero nao esta numa tela, ele nao
+# esta no export.
+
+
+
+
+@router.get("/exportar")
+def exportar(request: Request, run_id: int | None = None) -> Response:
+    """Baixa um JSON com o estado inteiro do experimento.
+
+    Serve para tirar o estado da tela sem copiar texto do navegador, que perde
+    a estrutura e transforma campo em prosa.
+
+    Nenhum segredo entra: as partes sao as mesmas que as telas ja mostram, e
+    `/api/health` reporta presenca de credencial, nunca valor (secao 10.2.4).
+    Ha teste conferindo chave por chave.
+    """
+    conn = _conn(request)
+
+    partes: dict[str, Any] = {}
+    falhas: dict[str, str] = {}
+    for nome, produzir in (
+        ("health", lambda: health(request)),
+        ("config", lambda: config_atual(request)),
+        ("config_history", lambda: config_historico(request, limite=200)),
+        ("dataset", lambda: dataset_atual(request)),
+        ("ledger", lambda: ledger_estado(request)),
+        ("ledger_transacoes", lambda: ledger_transacoes(request, limite=200)),
+        ("simulador", lambda: simulador_estado(request)),
+        ("execucoes", lambda: execucoes_listar(request, limite=200)),
+        ("comparacao", lambda: comparacao_atual(request)),
+        ("curva", lambda: curva(request)),
+        ("agente", lambda: agente_estado(request)),
+        ("relatorio", lambda: relatorio(request, run_id)),
+        ("sentinelas", lambda: sentinela_listar(request)),
+    ):
+        try:
+            partes[nome] = produzir()
+        except Exception as erro:  # noqa: BLE001
+            # Uma parte que falha nao derruba o pacote. Um export vazio por
+            # causa de uma tela quebrada e pior que um export que diz qual
+            # tela quebrou - e e justamente quando algo quebrou que alguem
+            # exporta o estado.
+            falhas[nome] = f"{type(erro).__name__}: {erro}"
+            log.warning("export.parte_falhou", extra={"parte": nome})
+
+    corpo = {
+        "gerado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fase": "0A",
+        "schema_version": versao_schema(conn),
+        "build": request.app.state.build_id,
+        "partes": partes,
+        "partes_que_falharam": falhas,
+        "aviso": (
+            "Estado do experimento na Fase 0A. Nenhuma conclusao estatistica,"
+            " nenhum conhecimento promovido. Numeros em amostra."
+        ),
+    }
+
+    nome = f"fase0a-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
+    return JSONResponse(
+        corpo,
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
 
 # --------------------------------------------------------------- sentinela
 
