@@ -30,6 +30,7 @@ from ..regra.schema import Regra
 from ..settings import Settings
 from ..simulador import execucao as simulador
 from ..simulador.execucao import condicoes_do_run
+from ..validador import promocao as validador_promocao
 from . import avaliacao, grafo, propostas
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,11 @@ class ResultadoDoCiclo:
     # (R25.3). `None` quando o cerebro nao declarou nada - nao ha o que
     # avaliar, e pendurar a comparacao em quem nao afirmou seria invencao.
     avaliacao_event_id: int | None
+    # O parecer independente do validador, e o estado da hipotese depois dele.
+    # `None` quando nao houve hipotese - com o teto zerado o cerebro nao fala
+    # (D23), e nao ha o que julgar.
+    parecer_do_validador: dict | None
+    hypothesis_id: int | None
 
     def como_dict(self) -> dict:
         return {
@@ -106,6 +112,8 @@ class ResultadoDoCiclo:
             "sobreposicao_amostral": self.sobreposicao,
             "condicoes_validade": self.condicoes_validade,
             "avaliacao_event_id": self.avaliacao_event_id,
+            "hypothesis_id": self.hypothesis_id,
+            "parecer_do_validador": self.parecer_do_validador,
         }
 
 
@@ -167,6 +175,13 @@ def rodar(
         # observacao: a amostra da hipotese vem de onde ela roda.
         horizonte_execucao=len(barras),
     )
+
+    # A hipotese entra na maquina de estados (§8.1). O agente SOLICITA; quem
+    # escreve a linha e o validador - a insercao em `hypothesis_state` so
+    # acontece dentro de `app/validador`, e ha teste varrendo o codigo.
+    hypothesis_id = estado.get("hypothesis_id")
+    if hypothesis_id is not None:
+        validador_promocao.admitir(conn, int(hypothesis_id), run_id=run_id)
 
     ativa = propostas.regra_ativa(conn, run_id)
     if ativa is not None:
@@ -249,6 +264,24 @@ def rodar(
         ),
     )
 
+    # O parecer INDEPENDENTE do validador (§8.1, R36). Vem depois da
+    # autoavaliacao do agente e nao a le: sao as duas avaliacoes que a visao
+    # do painel lista lado a lado, e se a segunda copiasse a primeira seriam
+    # uma so com dois nomes.
+    #
+    # Ele pode nao mover a hipotese, e isso e resultado: `inconclusiva` nem
+    # promove nem descarta (§14.4).
+    parecer = None
+    if hypothesis_id is not None:
+        try:
+            parecer = validador_promocao.avaliar_in_sample(
+                conn, hypothesis_id=int(hypothesis_id), run_id=run_id
+            ).como_dict()
+        except validador_promocao.NaoAvaliavel as erro:
+            # Hipotese nao testavel ja foi arquivada na admissao, e arquivada
+            # nao volta para a fila. Nao e falha do run.
+            log.info("validador.sem_parecer", extra={"motivo": str(erro)})
+
     # Do LEDGER, e nao de um acumulador do executor: o saldo tem uma fonte
     # so (regra 16). E o mesmo `caixa_cents` que os baselines usam, entao os
     # numeros sao comparaveis por construcao e nao por coincidencia.
@@ -277,6 +310,8 @@ def rodar(
         sobreposicao=propostas.sobreposicao_amostral(conn, run_id),
         condicoes_validade=condicoes_do_run(conn, run_id),
         avaliacao_event_id=avaliacao_event_id,
+        hypothesis_id=int(hypothesis_id) if hypothesis_id else None,
+        parecer_do_validador=parecer,
     )
     log.info(
         "cerebro.ciclo",

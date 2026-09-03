@@ -41,6 +41,7 @@ from ..dataset import selado as dataset_selado
 from ..dataset import split as dataset_split
 from ..dataset.binance import BloqueioPorJurisdicao, DadosInconsistentes, ErroDeFonte
 from ..dataset.ingest import DivergenciaNaReingestao, LacunasNaoAceitas
+from ..hipotese import registro as hipotese_registro
 from ..ledger import livro
 from ..maos_rapidas import baselines
 from ..maos_rapidas import executor as maos_executor
@@ -50,6 +51,8 @@ from ..relatorio import reprodutibilidade as relatorio_reprodutibilidade
 from ..relatorio import texto as relatorio_texto
 from ..relatorio import vinculo as relatorio_vinculo
 from ..simulador import execucao as simulador
+from ..validador import contador as validador_contador
+from ..validador import estados as validador_estados
 from ..security import exigir_token_de_servico
 from ..settings import Settings
 from ..store import (
@@ -295,6 +298,52 @@ def dataset_atual(request: Request) -> dict[str, Any]:
     if meta is None:
         return {"existe": False, "aviso": "dataset ainda nao ingerido"}
     return {"existe": True, **dataset_loader.resumo(_conn(request), meta.id)}
+
+
+@router.get("/validador")
+def validador_estado(request: Request) -> dict[str, Any]:
+    """A maquina de estados do conhecimento, e o contador de tentativas.
+
+    Existe pelo mesmo motivo de `/api/separacao`: uma maquina de estados que
+    ninguem consulta e uma tabela declarada e nunca lida. E porque o Portao A
+    vai precisar dela - o criterio A4 exige que "nenhuma tentativa testada
+    some do registro", e conferir isso pede o numero visivel.
+    """
+    conn = _conn(request)
+    return {
+        "populacao": validador_estados.populacao(conn),
+        "contador": validador_contador.resumo(conn),
+        "transicoes_legais": {
+            de: validador_estados.transicoes_legais(conn, de)
+            for de in sorted(
+                {
+                    l["de"]
+                    for l in conn.execute("SELECT DISTINCT de FROM transicao_legal")
+                }
+            )
+        },
+        "quem_promove": validador_estados.PROMOTOR,
+        "nota": (
+            "estado corrente e DERIVADO da ultima transicao; `hypothesis` e"
+            " imutavel e nao tem coluna de estado (secao 8.1, regra 16)"
+        ),
+    }
+
+
+@router.get("/validador/hipotese/{hypothesis_id}")
+def validador_hipotese(request: Request, hypothesis_id: int) -> dict[str, Any]:
+    """O caminho inteiro de uma hipotese. E ele que prova que nada foi pulado."""
+    conn = _conn(request)
+    hip = hipotese_registro.por_id(conn, hypothesis_id)
+    if hip is None:
+        raise HTTPException(status_code=404, detail="hipotese nao existe")
+    estado = validador_estados.atual(conn, hypothesis_id)
+    return {
+        "pre_registro": hip,
+        "estado": estado.como_dict() if estado else None,
+        "historico": validador_estados.historico(conn, hypothesis_id),
+        "holdout_consumido": dataset_selado.ja_consumiu(conn, hypothesis_id),
+    }
 
 
 @router.get("/separacao")

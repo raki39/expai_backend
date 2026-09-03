@@ -875,15 +875,52 @@ def test_o_saldo_vem_do_ledger_e_nao_do_fluxo_de_eventos(
     assert vinculo["eventos_com_custo_sem_lancamento"]
 
 
+# Tabelas com "state" no nome que NAO sao estado de grafo. A lista e explicita
+# de proposito: acrescentar uma exige escrever aqui por que ela nao e
+# checkpointer, e a guarda continua pegando o caso que importa.
+TABELAS_DE_ESTADO_LEGITIMAS = {
+    # Maquina de estados do CONHECIMENTO (§8.1, incremento 10). Nao tem
+    # relacao com o grafo: guarda em que ponto do protocolo de validacao cada
+    # HIPOTESE esta, e o grafo nem sabe que ela existe - quem escreve nela e
+    # o validador.
+    "hypothesis_state",
+}
+
+
 def test_o_estado_do_grafo_nao_e_persistido(
     conn: sqlite3.Connection, cenario, settings
 ) -> None:
-    """Criterio 12: o estado e efemero. Nao existe tabela para ele."""
+    """Criterio 12: o estado do GRAFO e efemero. Nao existe tabela para ele.
+
+    A guarda foi afiada no incremento 10, e nao afrouxada. Ela proibia
+    qualquer tabela com "state" no nome; `hypothesis_state` e legitima e
+    passou a constar de uma lista explicita. O que a guarda continua pegando -
+    um checkpointer do LangGraph, que tornaria o estado do grafo duravel e
+    faria dele uma segunda fonte de verdade - segue proibido.
+    """
     tabelas = {
         l["name"]
         for l in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    assert not {t for t in tabelas if "state" in t or "checkpoint" in t}
+    suspeitas = {
+        t for t in tabelas
+        if ("state" in t or "checkpoint" in t)
+        and t not in TABELAS_DE_ESTADO_LEGITIMAS
+    }
+    assert not suspeitas, f"tabela de estado nao declarada: {suspeitas}"
+
+    # A guarda nao pode ser vazia: se `hypothesis_state` sumisse, este teste
+    # passaria por nao haver nada a filtrar.
+    assert "hypothesis_state" in tabelas
+
+    # E o que ela protege continua verdade: nenhuma tabela guarda o estado do
+    # GRAFO. As colunas de `hypothesis_state` sao sobre a hipotese, nao sobre
+    # nos percorridos.
+    colunas = {
+        l["name"]
+        for l in conn.execute("PRAGMA table_info(hypothesis_state)")
+    }
+    assert not {c for c in colunas if "node" in c or "checkpoint" in c}
 
 
 # ===========================================================================

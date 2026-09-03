@@ -193,6 +193,37 @@ def carregar(
     return barras
 
 
+def retornos_bps_entre(
+    conn: sqlite3.Connection, dataset_id: int, de_ms: int, ate_ms: int
+) -> list[int]:
+    """Retornos de fechamento a fechamento no intervalo, em bps inteiros.
+
+    Existe aqui, e nao em quem precisa, porque **quem le barra e este
+    modulo**. O validador precisou desta serie para descontar autocorrelacao
+    (secao 8.3) e a primeira versao dele escreveu o `SELECT ... FROM bar`
+    dentro de si - furando a fronteira que o incremento 9 criou, e sob um
+    comentario afirmando que o validador nao era excecao a ela.
+
+    Nao devolve barra: devolve a serie derivada. Nao ha como usar esta funcao
+    para ver preco.
+    """
+    fechamentos = [
+        int(l["close"])
+        for l in conn.execute(
+            "SELECT close FROM bar WHERE dataset_id = ?"
+            " AND open_time_ms >= ? AND open_time_ms <= ?"
+            " ORDER BY open_time_ms",
+            (dataset_id, de_ms, ate_ms),
+        )
+    ]
+    saida: list[int] = []
+    for anterior, atual in zip(fechamentos, fechamentos[1:]):
+        saida.append(
+            0 if anterior <= 0 else (atual - anterior) * 10_000 // anterior
+        )
+    return saida
+
+
 def barra_em(
     conn: sqlite3.Connection, dataset_id: int, open_time_ms: int
 ) -> BarraCarregada | None:

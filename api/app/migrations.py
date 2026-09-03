@@ -1335,6 +1335,214 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        11,
+        "incremento 10: maquina de estados do conhecimento e o validador",
+        """
+        -- ==================================================================
+        -- ESTADOS DO CONHECIMENTO (secao 8.1).
+        --
+        -- "Nenhum estado pode ser pulado. Um agente nao pode promover a
+        -- propria hipotese; a promocao e feita pelo modulo validador, que e
+        -- independente do agente."
+        --
+        -- **Log de transicoes, e nao coluna em `hypothesis`.** O pre-registro
+        -- e imutavel desde a migracao 9 - nao existe UPDATE nele. Um estado
+        -- que muda precisaria de UPDATE, entao o estado corrente e DERIVADO
+        -- da ultima transicao. Mesmo desenho do saldo, que sai do ledger e
+        -- nao de uma coluna (regra 16): duas fontes de verdade sobre o
+        -- estado divergiriam no dia em que alguem esquecesse de atualizar uma.
+        -- ==================================================================
+        CREATE TABLE transicao_legal (
+            de   TEXT NOT NULL,
+            para TEXT NOT NULL,
+            PRIMARY KEY (de, para)
+        );
+
+        -- O grafo da secao 8.1, como DADO. Em tabela, e nao numa cadeia de
+        -- CASE dentro do gatilho: a lista de transicoes validas e a coisa
+        -- mais provavel de mudar entre fases, e mudar dado e mais barato e
+        -- mais visivel que mudar logica escondida num trigger.
+        INSERT INTO transicao_legal (de, para) VALUES
+            -- o caminho principal
+            ('hipotese_registrada', 'candidata'),
+            ('candidata',           'em_quarentena'),
+            ('em_quarentena',       'conhecimento_validado'),
+            -- monitoramento continuo, depois de validado
+            ('conhecimento_validado', 'revalidado'),
+            ('conhecimento_validado', 'condicionado'),
+            ('conhecimento_validado', 'em_suspeita'),
+            ('conhecimento_validado', 'invalidado'),
+            ('revalidado',            'em_suspeita'),
+            ('revalidado',            'invalidado'),
+            ('condicionado',          'em_suspeita'),
+            ('condicionado',          'invalidado'),
+            ('em_suspeita',           'revalidado'),
+            ('em_suspeita',           'invalidado'),
+            -- Saidas por REFUTACAO, antes de validar. A secao 8.1 desenha a
+            -- seta de INVALIDADO saindo so do monitoramento; a secao 14.4
+            -- exige o desfecho "rejeitado" tambem antes disso, e a secao 8.6
+            -- exige que toda tentativa fique registrada, inclusive as que
+            -- falharam. Sem estas duas linhas, uma hipotese refutada no
+            -- in-sample nao teria para onde ir - e ficaria parada em
+            -- `hipotese_registrada`, indistinguivel de uma que nunca foi
+            -- testada.
+            ('hipotese_registrada', 'invalidado'),
+            ('candidata',           'invalidado'),
+            -- Triagem da secao 8.3: nao testavel e ARQUIVADA, e terminal.
+            ('hipotese_registrada', 'nao_testavel');
+
+        CREATE TABLE hypothesis_state (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id INTEGER NOT NULL REFERENCES hypothesis(id),
+
+            -- Ordem dentro da hipotese. Torna a sequencia reconstruivel sem
+            -- depender do id global, que mistura hipoteses.
+            seq INTEGER NOT NULL CHECK (seq >= 1),
+
+            from_state TEXT,
+            state      TEXT NOT NULL
+                CHECK (state IN (
+                    'hipotese_registrada', 'candidata', 'em_quarentena',
+                    'conhecimento_validado', 'revalidado', 'condicionado',
+                    'em_suspeita', 'invalidado', 'nao_testavel'
+                )),
+
+            occurred_at TEXT NOT NULL,
+
+            -- QUEM promoveu. A secao 8.1 e literal: "um agente nao pode
+            -- promover a propria hipotese". O CHECK aqui e a metade da
+            -- garantia que o banco consegue dar sozinho; a outra metade e a
+            -- fronteira de importacao, verificada por AST.
+            promoted_by TEXT NOT NULL CHECK (promoted_by = 'validador'),
+
+            -- O que sustentou a transicao. Obrigatorio e nao vazio: uma
+            -- promocao sem evidencia registrada e indistinguivel de uma
+            -- promocao por engano, e e justamente a que o Portao A precisa
+            -- ser capaz de pegar.
+            evidence_json TEXT NOT NULL
+                CHECK (json_valid(evidence_json)
+                       AND json_type(evidence_json) = 'object'),
+
+            UNIQUE (hypothesis_id, seq)
+        );
+
+        CREATE INDEX idx_hstate_hyp ON hypothesis_state(hypothesis_id, seq);
+        CREATE INDEX idx_hstate_state ON hypothesis_state(state);
+
+        CREATE TRIGGER hypothesis_state_sem_update
+        BEFORE UPDATE ON hypothesis_state
+        BEGIN
+            SELECT RAISE(ABORT,
+                'transicao de estado e imutavel: corrija com uma transicao nova, como o estorno no ledger');
+        END;
+
+        CREATE TRIGGER hypothesis_state_sem_delete
+        BEFORE DELETE ON hypothesis_state
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar transicao e apagar a historia que prova que nenhum estado foi pulado');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- As tres metades da invariante "nenhum estado pode ser pulado".
+        -- ------------------------------------------------------------------
+
+        -- 1. A entrada e sempre por `hipotese_registrada`, e vinda do nada.
+        --
+        -- IDEIA existe na secao 8.1 e NAO e persistida: antes do pre-registro
+        -- nao ha hipotese a que atribuir estado - a secao 8.2 diz que ela e
+        -- gravada NO pre-registro. Gravar 'ideia' e 'hipotese_registrada' no
+        -- mesmo instante seria uma transicao que nunca falha e nada informa.
+        -- Declarado aqui em vez de resolvido em silencio.
+        CREATE TRIGGER estado_entra_por_registrada
+        BEFORE INSERT ON hypothesis_state
+        WHEN NEW.seq = 1
+             AND (NEW.from_state IS NOT NULL
+                  OR NEW.state <> 'hipotese_registrada')
+        BEGIN
+            SELECT RAISE(ABORT,
+                'toda hipotese entra na maquina por hipotese_registrada, sem estado anterior (secao 8.1)');
+        END;
+
+        -- 2. A transicao parte do estado ATUAL, e nao de um estado antigo.
+        --
+        -- Sem isto, daria para promover de `hipotese_registrada` para
+        -- `candidata` uma hipotese que ja esta em `invalidado`, bastando
+        -- declarar o `from_state` conveniente. Pular estado nao seria o unico
+        -- jeito de burlar a maquina - voltar no tempo tambem seria.
+        CREATE TRIGGER estado_parte_do_atual
+        BEFORE INSERT ON hypothesis_state
+        WHEN NEW.seq > 1
+             AND NEW.from_state IS NOT (
+                 SELECT state FROM hypothesis_state
+                 WHERE hypothesis_id = NEW.hypothesis_id
+                 ORDER BY seq DESC LIMIT 1
+             )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a transicao precisa partir do estado atual da hipotese, e nao de um estado ja superado');
+        END;
+
+        -- 3. O par (de, para) precisa existir no grafo da secao 8.1.
+        CREATE TRIGGER estado_nao_pula
+        BEFORE INSERT ON hypothesis_state
+        WHEN NEW.from_state IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM transicao_legal
+                 WHERE de = NEW.from_state AND para = NEW.state
+             )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'transicao inexistente no grafo da secao 8.1: nenhum estado pode ser pulado');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- O estado corrente, DERIVADO. Nunca armazenado.
+        -- ------------------------------------------------------------------
+        CREATE VIEW hypothesis_estado_atual AS
+        SELECT
+            h.id AS hypothesis_id,
+            h.agente_origem,
+            h.content_hash,
+            COALESCE(
+                (SELECT s.state FROM hypothesis_state s
+                  WHERE s.hypothesis_id = h.id
+                  ORDER BY s.seq DESC LIMIT 1),
+                'sem_estado'
+            ) AS estado,
+            (SELECT s.occurred_at FROM hypothesis_state s
+              WHERE s.hypothesis_id = h.id
+              ORDER BY s.seq DESC LIMIT 1) AS desde,
+            (SELECT COUNT(*) FROM hypothesis_state s
+              WHERE s.hypothesis_id = h.id) AS transicoes
+        FROM hypothesis h;
+
+        -- ==================================================================
+        -- CONTADOR GLOBAL DE TENTATIVAS (R37, secao 8.6).
+        --
+        -- "O sistema mantem um contador global de hipoteses testadas por
+        -- especialidade. Esse contador NUNCA e zerado."
+        --
+        -- View, e nao coluna. Um numero armazenado poderia ser zerado por
+        -- UPDATE, e a secao 8.6 diz que "descartar tentativas fracassadas do
+        -- registro e o mecanismo exato que produz falsas descobertas".
+        -- Derivar de uma tabela append-only torna zerar impossivel em vez de
+        -- proibido.
+        --
+        -- Conta hipoteses REGISTRADAS, nao promovidas: e o numero que alimenta
+        -- o DSR, e o DSR desconta por tentativas, nao por sucessos.
+        -- ==================================================================
+        CREATE VIEW tentativas_por_especialidade AS
+        SELECT
+            agente_origem AS especialidade,
+            COUNT(*)      AS tentativas,
+            COUNT(DISTINCT content_hash) AS hipoteses_distintas,
+            SUM(CASE WHEN testavel = 0 THEN 1 ELSE 0 END) AS nao_testaveis
+        FROM hypothesis
+        GROUP BY agente_origem;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

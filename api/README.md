@@ -72,6 +72,8 @@ envelhecido, listando 6 rotas quando existiam 26.
 | POST | `/api/config/reancorar` | regrava a config sob o hash correto após deriva de schema |
 | GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
 | `/api/separacao` | GET | Os quatro conjuntos por finalidade, as janelas de walk-forward e o uso do holdout. Nao devolve barra nenhuma |
+| `/api/validador` | GET | Maquina de estados do conhecimento, contador de tentativas e as transicoes legais |
+| `/api/validador/hipotese/{hypothesis_id}` | GET | O caminho inteiro de uma hipotese: pre-registro, estado e historico |
 | POST | `/api/dataset/ingest` | baixa e fixa o dataset (~35 s, 46 arquivos) |
 | GET | `/api/ledger` | carteira e escopo (run ativo, ou livro inteiro) |
 | GET | `/api/ledger/transacoes` | histórico, com estornos |
