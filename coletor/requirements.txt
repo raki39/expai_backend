@@ -1,0 +1,7 @@
+# Fase 0C - servico `coletor` (ADR 0028).
+# Versoes fixadas por reprodutibilidade (regra 13 do CLAUDE.md).
+#
+# DELIBERADAMENTE MINIMO. Este servico nao importa fastapi, langgraph, nem
+# adaptador de provedor nenhum: ele nao decide nada (R83), e a lista curta e o
+# que torna essa afirmacao verificavel por leitura.
+websockets==16.1.1

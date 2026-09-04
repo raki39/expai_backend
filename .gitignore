@@ -10,3 +10,7 @@ var/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Dados do coletor (ADR 0028): volume proprio, nunca o repositorio.
+*.jsonl.gz
+dados/

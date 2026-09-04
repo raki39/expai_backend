@@ -1,0 +1,37 @@
+# Servico `coletor` da Fase 0C - Railway (ADR 0028).
+#
+# ===========================================================================
+# CONFIGURACAO NO PAINEL DA RAILWAY
+# ===========================================================================
+#
+#   Settings > Source > Root Directory ......... VAZIO (raiz do repositorio)
+#   Settings > Build  > Builder ................ Dockerfile
+#   Settings > Build  > Dockerfile Path ........ coletor/Dockerfile
+#   Settings > Config-as-code > Config File .... /coletor/railway.toml
+#
+#   Volume ............ mount path /dados     <- PROPRIO, nunca o /data da api
+#   Dominio publico ... NAO. Ele nao serve nada; so consome e grava.
+#
+# Variaveis (ver .env.example):
+#   APP_ENV=railway         OBRIGATORIO - sem volume montado, RECUSA subir
+#   COLETOR_DIR=/dados      CAMINHO ABSOLUTO, volume proprio
+#   COLETOR_SIMBOLO=btcusdt
+#
+# NAO defina DB_PATH neste servico. Ele so existe para o pre-voo detectar
+# colisao com o volume do experimento e recusar o boot.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "coletor/Dockerfile"
+
+# Sem isto, qualquer push que mexa na `api` redeploya o coletor - e redeploy
+# de coletor e lacuna no dado, que e o unico ativo que ele produz.
+watchPatterns = ["/coletor/**"]
+
+[deploy]
+# SEM startCommand: com Dockerfile ele sobrescreveria o CMD, pulando o pre-voo
+# e o `exec` que garante o SIGTERM.
+#
+# ALWAYS, e nao ON_FAILURE: o coletor e um laco que deve estar sempre de pe.
+# Se ele sair por qualquer motivo, o custo e dado perdido que nao volta.
+restartPolicyType = "ALWAYS"

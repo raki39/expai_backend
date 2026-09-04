@@ -14,6 +14,16 @@ api/.env.local
 api/README.md
 api/railway.toml
 
+coletor/.venv/
+coletor/venv/
+coletor/.env
+coletor/.env.local
+coletor/README.md
+coletor/railway.toml
+coletor/tests/
+coletor/pytest.ini
+coletor/requirements-dev.txt
+
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/

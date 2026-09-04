@@ -37,5 +37,21 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
+  # ------------------------------------------------------------- coletor
+  # Fase 0C, ADR 0028. Volume PROPRIO: o pre-voo recusa subir se COLETOR_DIR
+  # colidir com o diretorio do banco do experimento.
+  coletor:
+    build:
+      context: .
+      dockerfile: coletor/Dockerfile
+    environment:
+      APP_ENV: local
+      COLETOR_DIR: /dados
+      COLETOR_SIMBOLO: btcusdt
+    volumes:
+      - dados_coletor:/dados
+    restart: unless-stopped
+
 volumes:
   dados_api:
+  dados_coletor:
