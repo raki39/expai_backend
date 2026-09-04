@@ -92,6 +92,10 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 | GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
 | POST | `/api/dataset/ingestao` | baixa e fixa o dataset (~35 s, 46 arquivos) |
 | GET | `/api/dataset/separacao` | os quatro conjuntos, janelas de walk-forward e uso do holdout — **não devolve barra nenhuma** |
+| POST | `/api/aovivo/barras` | **a única rota que RECEBE dado.** Lote de klines fechadas do relé, com HMAC, carimbo e nonce. `409` em divergência de conteúdo — erro alto, não aviso |
+| GET | `/api/aovivo/ponto` | de que barra o relé retoma o backfill. Coordenação, não estado do experimento |
+| GET | `/api/aovivo/estado` | atraso e contagem do fluxo. **Atraso não é lacuna**: kline é recuperável |
+| GET | `/api/aovivo/snapshots` | os intervalos **fechados**, com hash, completude e finalidade. Todo resultado do forward cita um deles |
 | POST | `/api/dataset/separacao` | cria a divisão de um dataset já ingerido; idempotente |
 
 ### ledger — partidas dobradas, dois livros, ciclo do run

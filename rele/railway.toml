@@ -1,0 +1,37 @@
+# Servico `rele` da Fase 0C - Railway (ADR 0029).
+#
+# ===========================================================================
+# CONFIGURACAO NO PAINEL
+# ===========================================================================
+#
+#   Settings > Build  > Dockerfile Path ........ rele/Dockerfile
+#   Settings > Config-as-code > Config File .... /rele/railway.toml
+#   Settings > Regions ......................... Southeast Asia (Singapore)
+#
+#   Volume ............ NAO. O rele nao guarda estado.
+#   Dominio publico ... NAO. Ele nao serve nada.
+#
+# A REGIAO NAO E PREFERENCIA. US East devolve HTTP 451: a Binance recusa por
+# jurisdicao no api.binance.com e no stream.binance.com. Foi medido no
+# primeiro deploy do coletor, e esta no ADR 0028.
+#
+# Variaveis (ver .env.example):
+#   RELE_API_URL=https://<dominio-publico-da-api>
+#   API_SERVICE_TOKEN=...      o MESMO da api
+#   RELE_HMAC_SECRET=...       o MESMO da api, e DIFERENTE do token acima
+#   RELE_SIMBOLO=BTCUSDT
+#   RELE_TIMEFRAME=15m
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "rele/Dockerfile"
+
+# Sem isto, push na `api` ou no `coletor` redeploya o rele. Redeploy do rele e
+# inofensivo - ele nao tem estado -, mas ruido de deploy esconde deploy real.
+watchPatterns = ["/rele/**"]
+
+[deploy]
+# ALWAYS: o rele e um laco que deve estar sempre de pe. Se ele sair, as barras
+# param de chegar - e o que se perde e ATRASO recuperavel, nao lacuna, mas
+# atraso longo o bastante vira lacuna quando o backfill da Binance nao alcanca.
+restartPolicyType = "ALWAYS"

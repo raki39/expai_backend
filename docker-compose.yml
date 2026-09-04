@@ -52,6 +52,26 @@ services:
       - dados_coletor:/dados
     restart: unless-stopped
 
+  # ---------------------------------------------------------------- rele
+  # Fase 0C, ADR 0029. SEM volume: ele nao guarda estado - o ponto de
+  # retomada e perguntado a api a cada volta.
+  #
+  # Em producao ele roda em SINGAPURA, porque US East devolve HTTP 451 na
+  # Binance (ADR 0028). Local nao tem essa restricao.
+  rele:
+    build:
+      context: .
+      dockerfile: rele/Dockerfile
+    environment:
+      RELE_API_URL: http://api:8000
+      RELE_SIMBOLO: BTCUSDT
+      RELE_TIMEFRAME: 15m
+    env_file:
+      - ./rele/.env
+    depends_on:
+      - api
+    restart: unless-stopped
+
 volumes:
   dados_api:
   dados_coletor:

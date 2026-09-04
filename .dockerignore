@@ -24,6 +24,16 @@ coletor/tests/
 coletor/pytest.ini
 coletor/requirements-dev.txt
 
+rele/.venv/
+rele/venv/
+rele/.env
+rele/.env.local
+rele/README.md
+rele/railway.toml
+rele/tests/
+rele/pytest.ini
+rele/requirements-dev.txt
+
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/

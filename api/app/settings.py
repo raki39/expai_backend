@@ -27,7 +27,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Nomes dos campos que carregam segredo. A unica fonte desta lista.
 # Usada pela redacao de log e pelo teste que garante que nada vaza.
 SECRET_FIELDS = frozenset(
-    {"api_service_token", "anthropic_api_key", "openai_api_key"}
+    {"api_service_token", "anthropic_api_key", "openai_api_key",
+     "rele_hmac_secret"}
 )
 
 
@@ -53,6 +54,12 @@ class Settings(BaseSettings):
     api_service_token: SecretStr = SecretStr("")
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
+
+    # Segredo do HMAC do rele (ADR 0029, incremento 16). SEPARADO do
+    # `api_service_token` de proposito: um deixa ler o painel, o outro deixa
+    # ESCREVER no fluxo. Reusar o mesmo faria o comprometimento de um dar o
+    # outro.
+    rele_hmac_secret: SecretStr = SecretStr("")
 
     # Nao e segredo: e o identificador do workspace em que a chave age. Uma
     # chave ligada a identidade (e nao ao workspace) e recusada com 400 sem

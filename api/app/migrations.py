@@ -2483,6 +2483,39 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        18,
+        "incremento 16: nonce do rele, a metade que a janela nao cobre",
+        """
+        -- ==================================================================
+        -- Nonce do rele. A METADE da protecao contra replay que a janela de
+        -- tempo nao cobre.
+        --
+        -- A janela limita por quanto tempo um pedido capturado serve; o nonce
+        -- impede reenvio DENTRO dela. Nenhuma das duas basta sozinha, e a
+        -- janela nao pode ser curta o bastante para dispensar o nonce -
+        -- relogio de maquina gerenciada deriva, e o coletor MEDIU offset de
+        -- 2.450 ms contra a Binance numa maquina real.
+        --
+        -- ESTA E A UNICA TABELA DO PROJETO QUE PODE SER APAGADA, e a excecao
+        -- fica escrita aqui: ela nao e registro de experimento, e cache de
+        -- protecao. Fora da janela o carimbo ja recusa, entao guardar o nonce
+        -- por mais tempo nao acrescenta protecao e a tabela cresceria sem
+        -- limite.
+        --
+        -- Nao ha gatilho de append-only por isso, e a ausencia e deliberada -
+        -- o resto do banco tem, e alguem lendo o schema precisa saber que aqui
+        -- e diferente de proposito.
+        -- ==================================================================
+        CREATE TABLE rele_nonce (
+            nonce      TEXT    PRIMARY KEY,
+            carimbo_ms INTEGER NOT NULL,
+            visto_em   TEXT    NOT NULL
+        );
+
+        CREATE INDEX idx_rele_nonce_carimbo ON rele_nonce(carimbo_ms);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

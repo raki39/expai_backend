@@ -21,6 +21,7 @@ from . import (
     a1a,
     a1b,
     agente,
+    aovivo,
     b4,
     baselines,
     config,
@@ -47,6 +48,11 @@ MODULOS = (
     substrato,
     config,
     dataset,
+    # `aovivo` vem logo depois de `dataset` porque e a mesma pergunta - de onde
+    # vem a barra - com a natureza invertida: `dataset` e corpo fechado com
+    # hash, `aovivo` e fluxo aberto sem hash mais snapshots fechados com hash.
+    # Ler os dois em sequencia e o que torna a distincao visivel.
+    aovivo,
     ledger,
     simulador,
     baselines,

@@ -1,0 +1,13 @@
+# Fase 0C - servico `rele` (ADR 0029, incremento 16).
+# Versoes fixadas por reprodutibilidade (regra 13).
+#
+# VAZIO de proposito: o rele usa apenas a biblioteca padrao.
+#
+# Ele busca klines por REST e faz POST autenticado - `urllib.request` faz as
+# duas coisas. Nao ha fastapi (ele nao serve nada), nao ha websockets (kline
+# fechada nao precisa de stream, e o pull e o que torna o backfill trivial),
+# e nao ha cliente HTTP de terceiros (uma dependencia por conveniencia num
+# servico de 200 linhas).
+#
+# A lista curta e o que torna verificavel a afirmacao de que o rele NAO
+# DECIDE nada: ele nao tem com o que decidir.

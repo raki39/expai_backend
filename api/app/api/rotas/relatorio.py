@@ -45,6 +45,10 @@ from .agente import agente_estado
 from .b4 import b4_estado
 from .baselines import comparacao_atual, curva
 from .config import config_atual, config_historico
+from .aovivo import (
+    estado as aovivo_estado,
+    listar_snapshots as aovivo_snapshots,
+)
 from .dataset import dataset_atual, separacao_de_dados
 from .diagnostico import sentinela_listar
 from .ledger import ledger_estado, ledger_transacoes
@@ -256,6 +260,16 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         ("dataset", "/api/dataset", lambda: dataset_atual(request)),
         ("separacao", "/api/dataset/separacao",
          lambda: separacao_de_dados(request)),
+        # O fluxo ao vivo e os intervalos fechados (ADR 0029). As duas entram
+        # porque respondem perguntas que o export sem elas nao responderia:
+        # `aovivo` diz quanto ATRASO existe - e atraso nao e lacuna, porque
+        # kline e recuperavel -, e `snapshots` diz quais intervalos fechados
+        # existem, com hash e completude. Todo resultado do forward cita um
+        # deles, entao um export sem eles mostraria o resultado e nao a
+        # procedencia dele.
+        ("aovivo", "/api/aovivo/estado", lambda: aovivo_estado(request)),
+        ("snapshots", "/api/aovivo/snapshots",
+         lambda: aovivo_snapshots(request)),
         ("ledger", "/api/ledger", lambda: ledger_estado(request)),
         ("ledger_transacoes", "/api/ledger/transacoes",
          lambda: ledger_transacoes(request, limite=200)),

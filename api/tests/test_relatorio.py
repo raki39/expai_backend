@@ -964,6 +964,13 @@ FORA_DO_EXPORT = {
     # exportar a auditoria de toda hipotese do lote produziria o roteiro
     # de coisas que nao passaram - o que sugere que passaram.
     "/api/relatorio/auditoria/{hypothesis_id}": "por id, e so para candidata aprovada",
+    # Rota de COORDENACAO do rele, e nao estado do experimento: ela diz de que
+    # barra retomar o backfill. Quem quer saber onde o fluxo esta olha
+    # `/api/aovivo/estado`, que ESTA no export com atraso e contagem.
+    #
+    # Exportar isto acrescentaria um numero que so faz sentido para quem esta
+    # enviando dado, e nao para quem esta lendo o experimento.
+    "/api/aovivo/ponto": "coordenacao do rele, nao estado do experimento",
 }
 
 
