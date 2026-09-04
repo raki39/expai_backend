@@ -834,6 +834,52 @@ def test_a1b_grava_em_pedacos_sem_contar_a_mesma_execucao_duas_vezes(
     ) == 0
 
 
+def test_de_ponta_a_ponta_pelas_ROTAS(
+    client, conn: sqlite3.Connection, cenario  # noqa: F811
+) -> None:
+    """O caminho que o painel percorre, pelo HTTP, e não pelos módulos.
+
+    Os dois defeitos que o incremento 12 levou a produção eram **de rota**:
+    `/api/agente` mostrando um run de B4, e `/api/baselines/curva` fazendo a
+    mesma coisa pela segunda vez. Chamar o módulo direto não vê nenhum dos
+    dois — e o export, que é o que o usuário manda de volta, é montado a
+    partir das funções de rota.
+    """
+    dataset_id, cfg = cenario
+
+    # POST dos dois controles, pelo HTTP.
+    r = client.post("/api/a1a", json={"author": "teste"})
+    assert r.status_code == 201, r.text
+    corpo = r.json()
+    assert corpo["quantos"] == 6
+    assert corpo["promovidos"] == []
+    assert "Nenhum promovido" in corpo["mensagem"]
+
+    r = client.post("/api/a1b", json={"author": "teste", "quantas": 2})
+    assert r.status_code == 201, r.text
+    assert r.json()["gravadas_agora"] == 2
+
+    # GET dos dois, e do relatório.
+    assert client.get("/api/a1a").json()["quantas"] == 6
+    assert client.get("/api/a1b").json()["gravadas"] == 2
+    portao = client.get("/api/relatorio/portao-a").json()
+    assert portao["existe"] is True
+    assert portao["condicoes"]["a1a_nenhum_controle_promovido"] is True
+    # Com 2 de 200 execuções, os desenhos ficam PENDENTES — e pendente não é
+    # aprovado.
+    assert portao["passa"] is False
+    assert "a1b_nula_global_no_alvo" in portao["pendentes"]
+
+    # E o export carrega as três partes novas. Foi a falta delas que obrigou o
+    # usuário a mandar JSON à mão nos primeiros runs da 0B.
+    exportado = client.get("/api/relatorio/exportar")
+    assert exportado.status_code == 200
+    pacote = exportado.json()
+    for parte in ("a1a", "a1b", "portao_a"):
+        assert parte in pacote["partes"], f"{parte} fora do export"
+    assert pacote["partes_que_falharam"] == {}
+
+
 def test_o_portao_b_nao_e_avaliado_enquanto_o_a_nao_passa(
     conn: sqlite3.Connection, cenario
 ) -> None:
