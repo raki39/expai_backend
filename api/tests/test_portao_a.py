@@ -738,6 +738,62 @@ def test_a3_pergunta_ao_BANCO_e_nao_a_suite(
     assert a3["sem_vazamento"] in (True, None)
 
 
+def test_a3_atribui_a_execucao_em_conjunto_do_validador(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Um número sem atribuição não permite decidir nada.
+
+    Em produção a primeira versão devolveu **5.377** execuções em conjunto do
+    validador, e mais nada. Esse número tanto pode ser o código de hoje
+    vazando quanto os runs da 0A, que executaram sobre a janela inteira porque
+    a D22 mandava e a divisão por finalidade só passou a existir no incremento
+    9 — e as duas coisas pedem respostas opostas.
+
+    Aqui a execução é plantada sob **outra** `config_version`, que é o caso
+    real: ela conta no global, **não** conta na família avaliada, e aparece
+    nomeada em `walk_forward_ja_visto`.
+    """
+    from app.ledger import livro
+
+    dataset_id, cfg = cenario
+    wf = conn.execute(
+        "SELECT from_ms FROM dataset_split"
+        " WHERE dataset_id = ? AND finalidade = 'walk_forward'",
+        (dataset_id,),
+    ).fetchone()
+    assert wf is not None
+
+    # Uma config_version a mais, e um run sob ela executando no walk-forward.
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, payload_json,"
+        " config_hash, material) VALUES (datetime('now'),'0A','{}','x',1)"
+    )
+    outra = int(conn.execute("SELECT MAX(id) AS id FROM config_version").fetchone()["id"])
+    run_id, tx = livro.abrir_run(
+        conn, config_version_id=outra,
+        seed_capital_usd_cents=cfg.seed_capital_usd_cents,
+    )
+    conn.execute(
+        "INSERT INTO execution (run_id, dataset_id, decision_bar_ms,"
+        " execution_bar_ms, side, quantity_sats, price_ref, price_exec,"
+        " notional_ref_cents, fee_cents, spread_cents, slippage_cents,"
+        " penalty_cents, fidelity_level, ledger_transaction_id)"
+        " VALUES (?,?,?,?,'compra',1,100,100,1,0,0,0,0,1,?)",
+        (run_id, dataset_id, int(wf["from_ms"]) - 1, int(wf["from_ms"]), tx),
+    )
+
+    a3 = _portao(conn, dataset_id, cfg)["a3"]
+    assert a3["execucoes_em_conjunto_do_validador_global"] == 1
+    # NÃO conta na família avaliada, e por isso o portão não reprova por ela.
+    assert a3["execucoes_em_conjunto_do_validador"] == 0
+    assert a3["conferencias"]["nenhuma_execucao_em_conjunto_do_validador"]
+    # Mas está nomeada, com a config_version de onde veio.
+    visto = a3["walk_forward_ja_visto"]
+    assert visto["execucoes"] == 1
+    assert visto["por_config_version"][0]["config_version_id"] == outra
+    assert "8.5.1" in visto["o_que_isso_levanta"]
+
+
 def test_a4_confere_o_registro_nos_dois_sentidos(
     conn: sqlite3.Connection, cenario, a1a
 ) -> None:

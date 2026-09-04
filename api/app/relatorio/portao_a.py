@@ -152,7 +152,11 @@ def _a2(
 # ---------------------------------------------------------------------------
 
 
-def _a3(conn: sqlite3.Connection, dataset_id: int | None) -> dict:
+def _a3(
+    conn: sqlite3.Connection,
+    dataset_id: int | None,
+    config_version_id: int,
+) -> dict:
     """Nenhum acesso a dado posterior ao timestamp da decisão.
 
     §14.4 exige que isto seja "verificado por teste automatizado, não por
@@ -169,15 +173,65 @@ def _a3(conn: sqlite3.Connection, dataset_id: int | None) -> dict:
     # Execucao dentro de conjunto que o agente nao pode ver. O `acesso` vem de
     # `dataset_split`, que e a fronteira do incremento 9 - a consulta pergunta
     # se alguma execucao caiu do lado do validador.
-    fora_do_conjunto = int(
-        conn.execute(
-            "SELECT COUNT(*) AS n FROM execution e"
+    #
+    # POR config_version e POR conjunto, e nao um numero so.
+    #
+    # A primeira versao devolvia a contagem global, e em producao ela deu
+    # 5.377 sem dizer de quem. Um numero desse tamanho sem atribuicao nao
+    # permite decidir nada: ele tanto pode ser o codigo de hoje vazando quanto
+    # os runs da 0A, que rodaram sobre a janela inteira porque a D22 mandava e
+    # a divisao por finalidade nem existia.
+    #
+    # Sao perguntas diferentes com respostas diferentes, e o relatorio precisa
+    # separa-las para que a segunda nao passe por vazamento e a primeira nao
+    # se esconda atras dela.
+    por_origem = [
+        {
+            "config_version_id": int(l["cv"]),
+            "finalidade": l["finalidade"],
+            "execucoes": int(l["n"]),
+            "runs": int(l["runs"]),
+        }
+        for l in conn.execute(
+            "SELECT r.config_version_id AS cv, s.finalidade AS finalidade,"
+            "       COUNT(*) AS n, COUNT(DISTINCT e.run_id) AS runs"
+            "  FROM execution e"
+            "  JOIN run r ON r.id = e.run_id"
             "  JOIN dataset_split s ON s.dataset_id = e.dataset_id"
             " WHERE s.acesso = 'validador'"
             "   AND e.execution_bar_ms >= s.from_ms"
             "   AND e.execution_bar_ms <  s.to_ms_exclusive"
-        ).fetchone()["n"]
+            " GROUP BY r.config_version_id, s.finalidade"
+            " ORDER BY r.config_version_id, s.finalidade"
+        )
+    ]
+    fora_do_conjunto = sum(x["execucoes"] for x in por_origem)
+    nesta_familia = sum(
+        x["execucoes"]
+        for x in por_origem
+        if x["config_version_id"] == config_version_id
     )
+
+    # A PERGUNTA DE DESENHO que o numero global levanta, e que nao e a mesma
+    # que o portao faz.
+    #
+    # O walk-forward e os 30% que a D27 recortou dos 56.064 que a 0A usou
+    # INTEIROS. Entao os runs da 0A executaram sobre ele, e os resultados
+    # foram lidos - B3 em US$ 151,34, o agente em US$ 620,32. §8.5.1 diz que
+    # "um holdout que depende de boa vontade ja foi consumido", e a duvida e
+    # se a mesma frase alcanca o walk-forward.
+    #
+    # O holdout NAO tem esse problema: ele e a reserva da D11, carvada na
+    # ingestao e nunca tocada - e a linha `holdout_so_pelo_validador` ao lado
+    # e a prova disso.
+    #
+    # Isto e FATO reportado, e nao criterio: transformar em portao seria eu
+    # decidir sozinho o alcance de §8.5.1.
+    ja_visto = [
+        x for x in por_origem
+        if x["finalidade"] == "walk_forward"
+        and x["config_version_id"] != config_version_id
+    ]
     holdout_por_outro = int(
         conn.execute(
             "SELECT COUNT(*) AS n FROM holdout_access"
@@ -191,14 +245,46 @@ def _a3(conn: sqlite3.Connection, dataset_id: int | None) -> dict:
     )
     conferidas = {
         "nenhuma_execucao_na_barra_da_decisao": executou_na_decisao == 0,
-        "nenhuma_execucao_em_conjunto_do_validador": fora_do_conjunto == 0,
+        # NESTA familia. As de outras config_versions aparecem em
+        # `execucoes_em_conjunto_do_validador_por_origem`, com o numero e o
+        # motivo - elas nao somem, mas tambem nao reprovam o lote corrente por
+        # terem rodado sob um desenho em que a divisao nem existia.
+        "nenhuma_execucao_em_conjunto_do_validador": nesta_familia == 0,
         "holdout_so_pelo_validador": holdout_por_outro == 0,
         "janelas_sem_sobreposicao": sem_vazamento_nas_janelas.get("conferido"),
     }
     return {
         "conferencias": conferidas,
         "execucoes_na_barra_da_decisao": executou_na_decisao,
-        "execucoes_em_conjunto_do_validador": fora_do_conjunto,
+        "execucoes_em_conjunto_do_validador": nesta_familia,
+        "execucoes_em_conjunto_do_validador_global": fora_do_conjunto,
+        "execucoes_em_conjunto_do_validador_por_origem": por_origem,
+        "por_que_o_global_nao_reprova": (
+            "os runs da 0A executaram sobre a janela inteira porque a D22"
+            " mandava e a divisao por finalidade so passou a existir no"
+            " incremento 9. Aplicar a fronteira de hoje a eles seria o"
+            " relatorio reprovando o passado por uma regra que nao existia."
+            " O que ISSO levanta - se o walk-forward continua sendo"
+            " out-of-sample depois de a 0A ter rodado sobre ele - e pergunta"
+            " de desenho, e esta em `walk_forward_ja_visto`"
+        ),
+        "walk_forward_ja_visto": {
+            "execucoes": sum(x["execucoes"] for x in ja_visto),
+            "runs": sum(x["runs"] for x in ja_visto),
+            "por_config_version": ja_visto,
+            "o_que_isso_levanta": (
+                "o walk-forward sao 30% dos 56.064 que a 0A usou INTEIROS, e"
+                " os resultados daqueles runs foram lidos. §8.5.1 diz que 'um"
+                " holdout que depende de boa vontade ja foi consumido' - e a"
+                " duvida e se a mesma frase alcanca o walk-forward. O holdout"
+                " nao tem esse problema: e a reserva da D11, carvada na"
+                " ingestao e nunca tocada"
+            ),
+            "e_fato_e_nao_criterio": (
+                "reportado, e nao gateado: transformar isto em portao seria"
+                " decidir sozinho o alcance de §8.5.1"
+            ),
+        },
         "acessos_ao_holdout_por_outro": holdout_por_outro,
         "janelas": sem_vazamento_nas_janelas,
         "sem_vazamento": (
@@ -348,7 +434,7 @@ def montar(
         conn, config_version_id, config, dataset_id=dataset_id
     )
     a2 = _a2(conn, config_version_id, config)
-    a3 = _a3(conn, dataset_id)
+    a3 = _a3(conn, dataset_id, config_version_id)
     a4 = _a4(conn, config_version_id)
     ic_antes = _ic_antes_do_teste(conn, config_version_id)
 
