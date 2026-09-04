@@ -929,6 +929,52 @@ def test_a1b_acusa_quando_o_contador_global_muda_no_meio(
     )
 
 
+def test_a_tabela_de_bracos_nao_mistura_config_versions(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Cada linha diz de qual `config_version` ela é, e conta o que é dela.
+
+    Em produção a tabela mostrou **três** linhas "agente" e **duas** "B4",
+    todas com o mesmo rótulo — e com `hipoteses` e `reflexoes` do braço
+    **vigente** repetidos em todas, porque o painel lia `b4.quantas` e
+    `agente.reflexoes` em vez de números por linha. Números de um experimento
+    ao lado do consumo de outro, embaixo de uma legenda afirmando que a
+    comparação exige a mesma `config_version`.
+
+    O orçamento é por `config_version` desde o incremento 11; o que faltava
+    era a tabela dizer isso.
+    """
+    from app import creditos as creditos_mod
+
+    dataset_id, cfg = cenario  # a fixture ja rodou B4: 16 hipoteses na v1
+    # Uma segunda config, com orçamento próprio para o mesmo braço.
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, payload_json,"
+        " config_hash, material) VALUES (datetime('now'),'t','{}','y',1)"
+    )
+    outra = int(
+        conn.execute("SELECT MAX(id) AS id FROM config_version").fetchone()["id"]
+    )
+    creditos_mod.conceder(
+        conn, braco="b4", config_version_id=outra, creditos=60
+    )
+
+    linhas = creditos_mod.calibracao(conn)["por_braco"]
+    de_b4 = [l for l in linhas if l["braco"] == "b4"]
+    assert len(de_b4) == 2, "as duas config_versions precisam ser duas linhas"
+
+    # Cada uma diz qual config é, e só uma é a vigente.
+    assert {l["config_version_id"] for l in de_b4} == {1, outra}
+    assert sum(1 for l in de_b4 for _ in [0] if l["vigente"]) == 1
+
+    # E `hipoteses` é POR LINHA: a config nova não herda as 16 da antiga.
+    por_cv = {l["config_version_id"]: l for l in de_b4}
+    assert por_cv[1]["hipoteses"] == 16
+    assert por_cv[outra]["hipoteses"] == 0
+    # B4 não consome tokens (§14.3), e o zero sai do registro.
+    assert all(l["reflexoes"] == 0 for l in de_b4)
+
+
 def test_de_ponta_a_ponta_pelas_ROTAS(
     client, conn: sqlite3.Connection, cenario  # noqa: F811
 ) -> None:

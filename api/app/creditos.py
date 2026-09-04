@@ -317,6 +317,60 @@ def saldo(
     )
 
 
+#: Do BRACO para a `agente_origem` das hipoteses dele. O inverso de
+#: `ORIGEM_PARA_BRACO`, derivado dele para que as duas nao possam divergir.
+BRACO_PARA_ORIGEM: dict[str, str] = {
+    braco: origem for origem, braco in ORIGEM_PARA_BRACO.items()
+}
+
+
+def _config_vigente(conn: sqlite3.Connection) -> int | None:
+    """A `config_version` mais recente. Lida aqui, e não importada de
+    `app/config`: este módulo não depende do serviço de configuração, e um
+    import só para descobrir um id criaria a dependência ao contrário.
+    """
+    linha = conn.execute(
+        "SELECT MAX(id) AS id FROM config_version"
+    ).fetchone()
+    return int(linha["id"]) if linha and linha["id"] is not None else None
+
+
+def _por_braco_e_config(conn: sqlite3.Connection, braco: str, cv: int) -> dict:
+    """Quantas hipóteses e quantas reflexões **daquele braço, naquela config**.
+
+    Existe porque o painel mostrava, para cada linha da tabela de braços, os
+    números do braço **vigente**: `b4.quantas` em toda linha de B4 e as
+    reflexões do último run em toda linha do agente. Com um orçamento por
+    `config_version`, isso põe o número de um experimento ao lado do consumo
+    de outro, sob o mesmo rótulo — e a legenda da própria tabela diz que a
+    comparação exige a mesma `config_version`.
+
+    Décima quinta ocorrência do padrão: um valor que descrevia uma linha e
+    passou a descrever todas.
+    """
+    origem = BRACO_PARA_ORIGEM.get(braco)
+    hipoteses = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM hypothesis h JOIN run r ON r.id = h.run_id"
+            " WHERE h.agente_origem = ? AND r.config_version_id = ?",
+            (origem, cv),
+        ).fetchone()["n"]
+    )
+    # Reflexao e evento COM provedor: §14.3 diz que B4 nao consome tokens, e
+    # o zero dele precisa sair do registro, e nao de uma promessa.
+    reflexoes = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_event e"
+            "  JOIN run r ON r.id = e.run_id"
+            " WHERE e.provider IS NOT NULL AND r.config_version_id = ?"
+            "   AND r.id IN (SELECT run_id FROM hypothesis"
+            "                 WHERE agente_origem = ?)",
+            (cv, origem),
+        ).fetchone()["n"]
+    )
+    return {"hipoteses": hipoteses, "reflexoes": reflexoes}
+
+
 def calibracao(conn: sqlite3.Connection) -> dict:
     """Os quatro números de §8.6.1, agregados por tipo de teste.
 
@@ -348,8 +402,16 @@ def calibracao(conn: sqlite3.Connection) -> dict:
                 " FROM test_credit_entry GROUP BY tipo ORDER BY tipo"
             )
         ],
+        # Uma linha por (braco, config_version), e a linha DIZ qual config é.
+        # Sem isso o painel mostrava três linhas "agente" e duas "B4", todas
+        # com o mesmo rótulo e números de experimentos diferentes — ao lado de
+        # uma legenda afirmando que a comparação exige a mesma config_version.
         "por_braco": [
-            s.como_dict()
+            {
+                **s.como_dict(),
+                **_por_braco_e_config(conn, s.braco, s.config_version_id),
+                "vigente": s.config_version_id == _config_vigente(conn),
+            }
             for s in (
                 saldo(
                     conn,
@@ -358,7 +420,7 @@ def calibracao(conn: sqlite3.Connection) -> dict:
                 )
                 for l in conn.execute(
                     "SELECT braco, config_version_id FROM test_credit_budget"
-                    " ORDER BY braco, config_version_id"
+                    " ORDER BY config_version_id DESC, braco"
                 )
             )
             if s is not None
