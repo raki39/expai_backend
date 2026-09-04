@@ -504,3 +504,123 @@ def test_a_fase_declara_o_limite_do_DSR_em_vez_de_esconde_lo(
     assert portao_b.LIMITE_DO_DSR in r["nao_respondeu"]
     assert "APROVAR" in portao_b.LIMITE_DO_DSR
     assert "publicado" in portao_b.LIMITE_DO_DSR
+
+
+# ===========================================================================
+# O achado que fechou a fase: o braco do agente produz UMA hipotese
+# ===========================================================================
+
+
+def test_rodar_o_agente_de_novo_produz_a_MESMA_hipotese(
+    conn: sqlite3.Connection, cenario_com_agente, settings  # noqa: F811
+) -> None:
+    """A comparacao 16 x 16 da D25 nunca foi arquiteturalmente possivel.
+
+    O cache e enderecado por CONTEUDO (criterio 4 do incremento 5): a chave e o
+    hash do pedido inteiro. O agente observa `exploracao`, que e fixa - mesmo
+    contexto, mesma chave, mesma resposta byte a byte.
+
+    Entao B4 gera 16 hipoteses por construcao (grade mais sorteio) e o agente
+    gera UMA. A D25 dimensionou 16 para cada braco sem notar isso.
+
+    Confirmado em producao antes de virar teste: a hipotese 41 (config_version
+    6) tem a mesma regra, a mesma fracao de caixa e o mesmo giro da do run 30
+    (config_version 5), e foi cobrada como RETESTE - 3 creditos, o peso de
+    §8.6.1 para hipotese cujo `content_hash` ja apareceu.
+
+    Rodar quinze vezes mais queimaria 45 creditos e 15 vagas da familia para
+    registrar quinze copias: o cenario do controle de duplicacao disfarcada,
+    sem o disfarce.
+
+    **O segundo adaptador nao tem resposta nenhuma.** Se o cache falhasse, o
+    ciclo pediria ao provedor e o teste quebraria - e e isso que torna a
+    asercao sobre o cache positiva, e nao uma coincidencia de igualdade.
+    """
+    from app.cerebro import ciclo
+    from app.hipotese import registro as hipotese_registro
+    from tests.test_cerebro import AdaptadorFalso
+
+    dataset_id, cfg, primeiro = cenario_com_agente
+    segundo = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([]),
+    )
+
+    a = hipotese_registro.por_id(conn, primeiro.hypothesis_id)
+    b = hipotese_registro.por_id(conn, segundo.hypothesis_id)
+    assert a["content_hash"] == b["content_hash"], (
+        "o agente produziu hipotese diferente com o mesmo contexto: o cache"
+        " deixou de ser enderecado por conteudo, ou o contexto deixou de ser"
+        " fixo. Se foi deliberado, o braco do agente passa a poder ter mais de"
+        " uma hipotese e a D25 volta a fazer sentido - reveja este teste"
+    )
+    assert a["rule_id"] == b["rule_id"]
+    # E nenhum centavo REAL saiu no segundo run: o acerto de cache lanca no
+    # livro simulado, e nao no real (D21).
+    assert segundo.gasto["gasto_real_brl_cents"] == 0
+
+
+# ===========================================================================
+# O achado que fechou a fase: o braco do agente produz UMA hipotese
+# ===========================================================================
+
+
+def test_rodar_o_agente_de_novo_produz_a_MESMA_hipotese(
+    conn: sqlite3.Connection, cenario_com_agente, settings  # noqa: F811
+) -> None:
+    """A comparacao 16 x 16 da D25 nunca foi arquiteturalmente possivel.
+
+    O cache e enderecado por CONTEUDO (criterio 4 do incremento 5): a chave e o
+    hash do pedido inteiro. O agente observa `exploracao`, que e fixa - mesmo
+    contexto, mesma chave, mesma resposta byte a byte.
+
+    Entao B4 gera 16 hipoteses por construcao (grade mais sorteio) e o agente
+    gera UMA. A D25 dimensionou 16 para cada braco sem notar isso, e o braco do
+    agente fechou a fase em 1 de 16.
+
+    Confirmado em producao ANTES de virar teste: a hipotese 41 (config_version
+    6) tem a mesma regra, a mesma fracao de caixa e o mesmo giro da do run 30
+    (config_version 5), e foi cobrada como RETESTE - 3 creditos, o peso de
+    §8.6.1 para hipotese cujo `content_hash` ja apareceu.
+
+    Rodar quinze vezes mais queimaria 45 creditos e 15 vagas da familia para
+    registrar quinze copias: o cenario do controle de duplicacao disfarcada,
+    sem o disfarce.
+
+    **O segundo adaptador nao tem resposta nenhuma**, e um adaptador falso
+    vazio levanta `AssertionError` quando chamado. Se o cache nao respondesse,
+    o grafo converteria isso em PARADA - por isso o teste afirma primeiro que
+    o segundo run nao parou. Sem essa asercao ele falharia pelo caminho errado
+    e o motivo ficaria ilegivel, que e exatamente o defeito do run 27.
+    """
+    from app.cerebro import ciclo
+    from app.hipotese import registro as hipotese_registro
+    from tests.test_cerebro import AdaptadorFalso
+
+    dataset_id, cfg, primeiro = cenario_com_agente
+    segundo = ciclo.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        settings=settings, adaptador=AdaptadorFalso([]),
+    )
+
+    # O cache respondeu: o cerebro chegou ao fim sem pedir nada ao provedor.
+    assert segundo.categoria_da_parada is None, (
+        f"o segundo run PAROU em {segundo.parou_em!r}: o cache nao respondeu,"
+        " e o adaptador vazio recusou a chamada"
+    )
+    assert segundo.hypothesis_id is not None
+
+    a = hipotese_registro.por_id(conn, primeiro.hypothesis_id)
+    b = hipotese_registro.por_id(conn, segundo.hypothesis_id)
+    assert a["content_hash"] == b["content_hash"], (
+        "o agente produziu hipotese DIFERENTE com o mesmo contexto: ou o cache"
+        " deixou de ser enderecado por conteudo, ou o contexto deixou de ser"
+        " fixo. Se foi deliberado, o braco do agente passa a poder ter mais de"
+        " uma hipotese e a D25 volta a fazer sentido - reveja este teste em vez"
+        " de apaga-lo"
+    )
+    assert a["rule_id"] == b["rule_id"]
+    # E nenhum centavo REAL saiu no segundo run: o acerto de cache lanca no
+    # livro simulado, e nao no real (D21). O agente pagou pelo pensamento; nos
+    # e que nao pagamos de novo.
+    assert segundo.gasto["gasto_real_brl_cents"] == 0
