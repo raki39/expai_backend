@@ -325,10 +325,26 @@ def agregar(
             ),
             "execucoes_com_promocao": com_promocao,
             "intervalo": ic.como_dict(),
-            # OS DOIS criterios, e a divergencia entre eles esta declarada no
-            # relatorio. Escolher um por conta propria seria decidir a regua.
-            "ic_contem_o_alvo": ic.contem_ppm(alvo_ppm),
+            # O CRITERIO e o limite superior (D37, ADR 0024).
             "limite_superior_ate_o_alvo": ic.alto_ppm <= alvo_ppm,
+            # A leitura ANTIGA, calculada e reportada ao lado. A D29 escreveu
+            # "o IC contem o FDR alvo de 10%", e isso e inalcancavel sob BY:
+            # na nula global ele rejeita com probabilidade no maximo
+            # alfa / H(48) = 2,24%, entao um IC de 200 execucoes em torno
+            # disso nunca chega a 10%. O criterio como redigido reprovaria um
+            # BY correto por ele ser conservador.
+            #
+            # Fica no relatorio porque apagar a leitura antiga esconderia que
+            # houve correcao - e a correcao e o tipo de coisa que este projeto
+            # exige poder conferir depois.
+            "ic_contem_o_alvo": ic.contem_ppm(alvo_ppm),
+            "por_que_o_criterio_e_o_limite_superior": (
+                "D37 (ADR 0024): §14.4 pede 'compativel com o nivel de FDR"
+                " pre-registrado', e sob BY 'compativel' so pode significar"
+                " 'nao excede'. A redacao da D29 exigia conter 10%, o que e"
+                " aritmeticamente impossivel para um procedimento cujo teto e"
+                " alfa / H(m)"
+            ),
         }
     else:
         razoes = [e.razao_lote for e in do_desenho]

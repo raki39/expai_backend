@@ -11,6 +11,7 @@ from ... import fase as fase_mod
 from ...config import service as config_service
 from ...dataset import loader as dataset_loader
 from ...relatorio import montar as relatorio_montar
+from ...relatorio import portao_a as relatorio_portao_a
 from ...relatorio import reprodutibilidade as relatorio_reprodutibilidade
 from ...relatorio import texto as relatorio_texto
 from ...relatorio import vinculo as relatorio_vinculo
@@ -58,6 +59,31 @@ router = APIRouter(prefix="/api/relatorio", tags=["relatorio"])
 def relatorio(request: Request, run_id: int | None = None) -> dict[str, Any]:
     """O relatorio de fechamento em JSON. `run_id` ausente usa o ultimo run."""
     return relatorio_montar.montar(_conn(request), run_id)
+
+
+@router.get("/portao-a")
+def portao_a(request: Request) -> dict[str, Any]:
+    """O relatório do Portão A: **o protocolo rejeita defeito?** (§14.4).
+
+    Pergunta diferente da do `/api/relatorio`, que é o fechamento da 0A e
+    responde "o ciclo básico fecha?". Rota própria porque juntar as duas faria
+    um relatório de fase antiga responder pela fase corrente — e o campo
+    `fase` de `/api/health` já mentiu uma vez por menos que isso.
+    """
+    conn = _conn(request)
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        return {"existe": False, "motivo": "configuracao nao inicializada"}
+    meta = dataset_loader.dataset_vigente(conn)
+    return {
+        "existe": True,
+        **relatorio_portao_a.montar(
+            conn,
+            config_version_id=atual.id,
+            config=atual.config,
+            dataset_id=meta.id if meta else None,
+        ),
+    }
 
 
 @router.get("/markdown", response_class=PlainTextResponse)
@@ -128,6 +154,9 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         ("creditos", "/api/validador/creditos",
          lambda: creditos_de_teste(request)),
         ("relatorio", "/api/relatorio", lambda: relatorio(request, run_id)),
+        # O PRODUTO da fase corrente. O `relatorio` acima e o fechamento
+        # da 0A e responde a pergunta DELA; este responde a da 0B.
+        ("portao_a", "/api/relatorio/portao-a", lambda: portao_a(request)),
         ("sentinelas", "/api/diagnostico/sentinela",
          lambda: sentinela_listar(request)),
     ):

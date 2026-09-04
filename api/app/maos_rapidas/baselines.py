@@ -607,6 +607,40 @@ def b1_do_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
     return _distribuicao_b1_do_run(conn, int(linha["id"]), casa_run_id=int(run_id))
 
 
+def todos_os_b1(
+    conn: sqlite3.Connection, config_version_id: int
+) -> list[dict]:
+    """Toda distribuicao de B1 gravada sob esta config, uma por run.
+
+    O criterio A2 de §14.4 - "B1 produz resultado negativo, **proporcional ao
+    numero de operacoes**" - precisa de mais de um giro para ter inclinacao, e
+    os giros diferentes vivem em runs diferentes: o casado com o B3 e o casado
+    com cada run do agente.
+
+    Por `config_version` porque comparar atravessando mudanca material e o que
+    §10.2.3 invalida - e o modelo de execucao e o custo de giro sao campos
+    materiais, que e exatamente o que esta sendo medido aqui.
+    """
+    saida = []
+    for l in conn.execute(
+        "SELECT DISTINCT b.run_id AS run_id, r.casa_run_id AS casa_run_id"
+        "  FROM baseline_result b JOIN run r ON r.id = b.run_id"
+        " WHERE b.baseline = 'B1' AND r.config_version_id = ?"
+        " ORDER BY b.run_id",
+        (config_version_id,),
+    ):
+        d = _distribuicao_b1_do_run(
+            conn,
+            int(l["run_id"]),
+            casa_run_id=(
+                int(l["casa_run_id"]) if l["casa_run_id"] is not None else None
+            ),
+        )
+        if d:
+            saida.append(d)
+    return saida
+
+
 def _distribuicao_b1_do_run(
     conn: sqlite3.Connection, run_id: int, *, casa_run_id: int | None
 ) -> dict | None:

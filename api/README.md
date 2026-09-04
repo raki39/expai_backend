@@ -145,6 +145,7 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 | Método | Rota | Função |
 |---|---|---|
 | GET | `/api/relatorio` | relatório de fechamento da 0A, em JSON |
+| GET | `/api/relatorio/portao-a` | **o Portão A (§14.4): o protocolo rejeita defeito?** — passa / reprova / pendente |
 | GET | `/api/relatorio/markdown` | o mesmo relatório, para humano |
 | GET | `/api/relatorio/exportar` | baixa um JSON com o estado inteiro, para anexar |
 | POST | `/api/relatorio/reprodutibilidade` | prova de R12: três digests, sem LLM |

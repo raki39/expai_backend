@@ -423,6 +423,42 @@ def test_o_desenho_2_conta_v_como_subconjunto_de_r() -> None:
         assert e.promovidos_detectavel <= e.sinais_detectavel
 
 
+def test_o_criterio_do_desenho_1_e_o_limite_superior_e_nao_conter_o_alvo(
+) -> None:
+    """D37 (ADR 0024): a redação da D29 era aritmeticamente inalcançável.
+
+    Sob a nula global, BY rejeita com probabilidade no máximo `alfa / H(m)` —
+    2,24% com m = 48. Um IC de 200 execuções em torno disso jamais contém 10%,
+    então "o IC contém o alvo" reprovaria um BY **correto** por ele ser
+    conservador. §14.4 diz "compatível com o nível", e sob BY compatível só
+    pode significar "não excede".
+
+    Este teste fixa as duas coisas: que o critério mudou, e que a leitura
+    antiga continua **calculada e visível** — apagá-la esconderia que houve
+    correção.
+    """
+    from app.a1b import calibre
+
+    cfg = ExperimentConfig()
+    # 200 execuções sem nenhuma promoção: o caso que a D29 reprovaria.
+    zeradas = [
+        calibre.Uma(
+            desenho=calibre.NULA_GLOBAL, indice=i, r_lote=0, v_lote=0,
+            r_com_portao=0, v_com_portao=0, sinais_piso=0, promovidos_piso=0,
+            sinais_detectavel=0, promovidos_detectavel=0,
+        )
+        for i in range(cfg.a1b_execucoes)
+    ]
+    bloco = calibre.agregar(
+        zeradas, desenho=calibre.NULA_GLOBAL, config=cfg
+    )["promocao_do_lote"]
+    assert bloco["ic_contem_o_alvo"] is False
+    assert bloco["limite_superior_ate_o_alvo"] is True
+    assert "D37" in bloco["por_que_o_criterio_e_o_limite_superior"]
+    # E o intervalo de 0/200 é o que a aritmética manda: [0 ; ~1,9%].
+    assert bloco["intervalo"]["alto_ppm"] < 20_000
+
+
 def test_agregar_sem_execucao_nao_inventa_proporcao() -> None:
     """Zero execuções não é proporção zero.
 
@@ -485,3 +521,248 @@ def test_o_calibre_usa_a_MESMA_decisao_do_lote_real() -> None:
     ).read_text(encoding="utf-8")
     assert "lote_mod.decidir(" in fonte
     assert "fdr_mod.aplicar(" not in fonte
+
+
+# ===========================================================================
+# O relatório do Portão A — o produto do incremento
+# ===========================================================================
+
+
+def _portao(conn: sqlite3.Connection, dataset_id: int, cfg: ExperimentConfig):
+    from app.relatorio import portao_a
+
+    return portao_a.montar(
+        conn, config_version_id=1, config=cfg, dataset_id=dataset_id
+    )
+
+
+def test_cada_condicao_do_portao_sai_de_uma_consulta(
+    conn: sqlite3.Connection, cenario, a1a
+) -> None:
+    """Nenhuma condição é digitada, e todas são booleano ou `None`.
+
+    Um relatório de portão escrito à mão diria "o protocolo funciona" com a
+    mesma confiança tivesse ele funcionado ou não.
+    """
+    dataset_id, cfg = cenario
+    r = _portao(conn, dataset_id, cfg)
+    assert r["portao"] == "A"
+    assert r["pergunta"] == "o protocolo rejeita defeito?"
+    for nome, valor in r["condicoes"].items():
+        assert valor is None or isinstance(valor, bool), (nome, valor)
+    # Dez condições, cobrindo A1a, A1b, A2, A3 e A4.
+    assert len(r["condicoes"]) == 10
+
+
+def test_o_portao_tem_TRES_resultados_e_pendente_nao_e_passa(
+    conn: sqlite3.Connection, cenario, a1a
+) -> None:
+    """`None` continua diferente de `False` — e deixa de ser igual a aprovado.
+
+    O relatório da 0A tratava `None` como neutro, e ali estava certo: com o
+    teto em zero não há custo de decisão a registrar (D23). Aqui não pode: o
+    Portão A é "obrigatório, eliminatório", e um critério que ninguém mediu
+    não é um critério satisfeito.
+    """
+    dataset_id, cfg = cenario
+    r = _portao(conn, dataset_id, cfg)
+    # A1b não rodou neste cenário: os dois desenhos estão pendentes.
+    assert "a1b_nula_global_no_alvo" in r["pendentes"]
+    assert r["passa"] is False
+    assert r["pendente"] is True
+    assert r["reprova"] is False
+    # E os três são mutuamente exclusivos onde precisam ser.
+    assert not (r["passa"] and r["pendente"])
+    assert not (r["passa"] and r["reprova"])
+
+
+@pytest.fixture
+def cenario_testavel(conn: sqlite3.Connection):
+    """Janela em que os controles estatísticos CHEGAM a ser avaliados.
+
+    Com 3.000 barras o in-sample tem 900, o Sharpe mínimo testável passa do
+    teto do schema, e toda hipótese nasce arquivada como não testável — então
+    nenhuma delas pode sequer ser promovida, e um teste de "promoção reprova o
+    portão" passaria por não conseguir plantar o defeito.
+
+    20.000 barras dão in-sample de 6.000, e aí o caminho inteiro roda.
+    """
+    from app.maos_rapidas import baselines
+    from tests.test_maos_rapidas import criar_dataset, precos_passeio
+
+    cfg = ExperimentConfig()
+    dataset_id = criar_dataset(conn, precos_passeio(20_000))
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        semente=cfg.default_seed,
+    )
+    return dataset_id, cfg
+
+
+@pytest.fixture
+def a1a_testavel(conn: sqlite3.Connection, cenario_testavel):
+    from app.a1a import braco
+
+    dataset_id, cfg = cenario_testavel
+    return braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+
+
+def test_os_controles_estatisticos_sao_avaliados_e_nao_promovidos(
+    conn: sqlite3.Connection, a1a_testavel
+) -> None:
+    """Numa janela testável eles chegam ao validador, pagam crédito e caem.
+
+    Sem esta asserção, "nenhum promovido" nos controles estatísticos poderia
+    estar passando por eles nunca terem sido julgados — que é a forma de
+    aprovação por vacuidade que o Portão A não pode ter.
+    """
+    from app.a1a import catalogo
+
+    estatisticos = [
+        c for c in a1a_testavel.controles if c.tipo == catalogo.ESTATISTICO
+    ]
+    assert len(estatisticos) == 2
+    avaliados = [c for c in estatisticos if c.veredito is not None]
+    assert avaliados, "nenhum controle estatistico chegou a receber veredito"
+    for c in avaliados:
+        assert c.creditos_cobrados and c.creditos_cobrados > 0
+        assert c.veredito != "sustentada"
+        assert c.promovido is False
+
+
+def test_um_controle_promovido_REPROVA_o_portao_e_diz_qual(
+    conn: sqlite3.Connection, cenario_testavel, a1a_testavel
+) -> None:
+    """**Um portão que nunca reprova não é portão.**
+
+    Este é o critério 2 do plano, e ele é a metade que falta: `passa` sozinho
+    poderia estar sempre verdadeiro por não olhar nada. Aqui um defeito é
+    plantado de propósito — um controle determinístico é movido para
+    `candidata` — e o portão precisa reprovar E dizer qual controle passou.
+
+    A promoção é escrita pelo caminho normal do validador, e não por `UPDATE`
+    solto: se fosse por fora, o teste provaria que dá para burlar a máquina de
+    estados, e não que o portão vê a promoção.
+    """
+    from app.validador import estados
+
+    dataset_id, cfg = cenario_testavel
+    antes = _portao(conn, dataset_id, cfg)
+    assert antes["reprova"] is False
+
+    alvo = next(
+        c for c in a1a_testavel.controles
+        if estados.atual(conn, c.hypothesis_id).estado == estados.ENTRADA
+    )
+    estados.transitar(
+        conn,
+        alvo.hypothesis_id,
+        para="candidata",
+        evidencia={"etapa": "defeito_plantado", "creditos": 0},
+    )
+
+    depois = _portao(conn, dataset_id, cfg)
+    assert depois["reprova"] is True
+    assert depois["passa"] is False
+    assert "a1a_nenhum_controle_promovido" in depois["reprovando"]
+    # E o relatório diz QUAL: o nome do controle é o ponteiro para onde
+    # procurar o defeito, e uma contagem não aponta para lugar nenhum.
+    assert alvo.chave in depois["a1a"]["promovidos"] or (
+        alvo.hypothesis_id in depois["a1a"]["promovidos"]
+    )
+
+
+def test_a2_recusa_afirmar_proporcionalidade_com_um_ponto_so(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Um ponto não tem inclinação.
+
+    Na 0A o B1 negativo era sanidade observada; §14.4 o torna portão. E o
+    portão precisa distinguir "medi e é proporcional" de "só tenho um giro" —
+    devolver `True` com uma medida só afirmaria a segunda medida.
+    """
+    dataset_id, cfg = cenario
+    r = _portao(conn, dataset_id, cfg)
+    a2 = r["a2"]
+    assert a2["negativo"] is True, "operar ao acaso deu lucro no simulador"
+    assert a2["proporcional_ao_giro"] is None
+    assert "um ponto nao tem inclinacao" in a2["por_que_sem_proporcional"]
+
+
+def test_a2_mede_proporcionalidade_com_dois_giros(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Com dois giros a inclinação existe, e mais giro perde mais.
+
+    É a forma executável de "B1 produz resultado negativo, **proporcional ao
+    número de operações**" (§14.4, §8.4.1.3).
+    """
+    from app.ledger import livro
+    from app.maos_rapidas import baselines, executor
+
+    dataset_id, cfg = cenario
+    barras = executor.carregar_janela(conn, dataset_id)
+    alvo = livro.abrir_run(
+        conn, config_version_id=1,
+        seed_capital_usd_cents=cfg.seed_capital_usd_cents,
+    )[0]
+    baselines.b1_casado_com(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        operacoes_alvo=8, fracao_bps=10_000, semente=42, barras=barras,
+        casa_run_id=alvo,
+    )
+
+    a2 = _portao(conn, dataset_id, cfg)["a2"]
+    assert a2["proporcional_ao_giro"] is True
+    giros = sorted(c["operacoes_alvo"] for c in a2["corridas"])
+    assert len(giros) >= 2 and giros[0] != giros[-1]
+
+
+def test_a3_pergunta_ao_BANCO_e_nao_a_suite(
+    conn: sqlite3.Connection, cenario, a1a
+) -> None:
+    """Um teste verde numa máquina não diz nada sobre as linhas que existem lá.
+
+    §14.4 exige que A3 seja "verificado por teste automatizado, não por
+    inspeção". A suíte tem os testes; este bloco faz as mesmas perguntas ao
+    banco de produção, sobre o que de fato ficou gravado.
+    """
+    dataset_id, cfg = cenario
+    a3 = _portao(conn, dataset_id, cfg)["a3"]
+    assert a3["execucoes_na_barra_da_decisao"] == 0
+    assert a3["execucoes_em_conjunto_do_validador"] == 0
+    assert a3["acessos_ao_holdout_por_outro"] == 0
+    assert a3["sem_vazamento"] in (True, None)
+
+
+def test_a4_confere_o_registro_nos_dois_sentidos(
+    conn: sqlite3.Connection, cenario, a1a
+) -> None:
+    """"Nenhuma tentativa testada some do registro" é a condição mais fácil de
+    esquecer, e a conferência é nos dois sentidos.
+
+    Só o primeiro deixaria o registro acumular linhas que nenhuma tentativa
+    produziu — o erro simétrico, e igualmente invisível.
+    """
+    dataset_id, cfg = cenario
+    a4 = _portao(conn, dataset_id, cfg)["a4"]
+    assert a4["testadas_sem_estado"] == []
+    assert a4["hipoteses_na_tabela"] == a4["contador_global"]
+    assert a4["conferencias"]["nenhuma_tentativa_some"] is True
+    assert a4["conferencias"]["ledger_reconcilia"] is True
+
+
+def test_o_portao_b_nao_e_avaliado_enquanto_o_a_nao_passa(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """R49, literal: "Portão B só avaliado se o Portão A passar integralmente".
+
+    Calculá-lo antes seria produzir o número que a fase existe para não
+    produzir cedo demais.
+    """
+    dataset_id, cfg = cenario
+    r = _portao(conn, dataset_id, cfg)
+    assert r["portao_b"]["avaliado"] is False
+    assert "R49" in r["portao_b"]["por_que"]

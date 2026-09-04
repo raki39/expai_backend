@@ -538,13 +538,29 @@ def resumo(conn: sqlite3.Connection, config_version_id: int) -> dict:
     for l in conn.execute(
         "SELECT h.id AS hypothesis_id, h.run_id AS run_id,"
         "       h.content_hash AS content_hash, h.enunciado AS enunciado,"
-        "       h.metrica_primaria AS metrica_primaria"
+        "       h.metrica_primaria AS metrica_primaria,"
+        # A CHAVE do controle, do `node` do evento que o produziu.
+        #
+        # Estrutural, e nao lida do enunciado. A primeira versao extraia a
+        # familia do texto do pre-registro e falhava justamente no controle de
+        # DUPLICACAO - cujo enunciado e, por construcao, o texto reescrito de
+        # outra hipotese. O relatorio dizia "familia faltando" sobre um
+        # controle que tinha rodado, e reprovava o portao por isso.
+        "       e.node AS node"
         "  FROM hypothesis h JOIN run r ON r.id = h.run_id"
+        "  JOIN agent_event e ON e.id = h.agent_event_id"
         " WHERE h.agente_origem = ? AND r.config_version_id = ?"
         " ORDER BY h.id",
         (hipotese_registro.AGENTE_ORIGEM_A1A, config_version_id),
     ):
         linha = dict(l)
+        chave = str(l["node"] or "").removeprefix("a1a_")
+        linha["chave"] = chave
+        familia = catalogo.POR_CHAVE.get(chave)
+        linha["familia_de_defeito"] = (
+            familia.familia_de_defeito if familia else None
+        )
+        linha["tipo"] = familia.tipo if familia else None
         estado = validador_estados.atual(conn, int(l["hypothesis_id"]))
         linha["estado"] = estado.estado if estado else None
         linha["promovido"] = validador_estados.promovida(

@@ -982,11 +982,18 @@ def test_toda_rota_de_leitura_esta_no_export_ou_na_lista_de_excecoes(
     from app.api.rotas.relatorio import exportar
 
     fonte = inspect.getsource(exportar)
-    # Digitos no padrao: a primeira parte nova depois desta guarda foi `b4`, e
-    # o regex sem `0-9` nao a via - a guarda passava dizendo que a rota nao
-    # estava coberta quando ela estava. Guarda estreita e guarda que mente na
-    # direcao de dar trabalho, mas mente.
-    cobertas = set(re.findall(r'\(\s*"[a-z_0-9]+",\s*"(/api/[a-z_0-9/]+)"', fonte))
+    # Digitos e HIFEN no padrao, e as duas correcoes vieram de defeitos reais
+    # da mesma forma:
+    #
+    #   - a primeira parte nova depois desta guarda foi `b4`, e o regex sem
+    #     `0-9` nao a via;
+    #   - a segunda foi `/api/relatorio/portao-a`, e o regex sem `-` nao a via.
+    #
+    # Nos dois casos a guarda acusou rota descoberta que ESTAVA coberta.
+    # Guarda estreita mente na direcao de dar trabalho, mas mente - e da
+    # segunda vez o comentario acima ja contava a licao sem que o padrao
+    # tivesse sido generalizado.
+    cobertas = set(re.findall(r'\(\s*"[a-z_0-9]+",\s*"(/api/[a-z_0-9/-]+)"', fonte))
     assert len(cobertas) > 10, f"so {len(cobertas)} partes? a extracao falhou"
 
     # Pelos MODULOS, e nao por `client.app.routes`: o FastAPI resolve router
