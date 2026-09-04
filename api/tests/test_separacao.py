@@ -31,6 +31,8 @@ from tests.test_dataset import (  # noqa: F401
     ingerir,
 )
 
+from ._prosa import sql_sem_prosa
+
 RAIZ = pathlib.Path(__file__).resolve().parents[1] / "app"
 
 
@@ -203,9 +205,18 @@ def test_so_o_loader_e_o_selado_consultam_as_views_de_barra() -> None:
     for arquivo in _modulos():
         if arquivo in permitidos:
             continue
-        texto = arquivo.read_text(encoding="utf-8")
+        # CODIGO, e nao texto cru. A primeira versao desta guarda buscava no
+        # arquivo inteiro, e no incremento 16 ela acusou a DOCSTRING de
+        # `app/aovivo/fluxo.py`, que cita `bar_por_finalidade` exatamente para
+        # explicar por que o fluxo nao esta la.
+        #
+        # E o defeito que o incremento 11 registrou em `app/estatistica` e o 12
+        # em `b4/braco.py`: uma guarda que proibe a explicacao de por que algo e
+        # proibido empurra para apagar a explicacao, que e a pior correcao
+        # possivel. O helper mantem literais de uma linha, onde o SQL vive.
+        codigo = sql_sem_prosa(arquivo)
         for alvo in ("bar_por_finalidade", "bar_experimento", "FROM bar "):
-            if alvo in texto:
+            if alvo in codigo:
                 infratores.append(f"{arquivo.relative_to(RAIZ)}: {alvo}")
     assert not infratores, (
         "consulta a barra fora da fronteira do dataset: " + "; ".join(infratores)

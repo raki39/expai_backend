@@ -2226,6 +2226,263 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        17,
+        "incremento 16: o fluxo aberto e os snapshots fechados (ADR 0029)",
+        """
+        -- ==================================================================
+        -- O FLUXO. Aberto, cresce, e NAO TEM COLUNA DE HASH.
+        --
+        -- A ausencia do hash e o desenho, nao economia: e o que impede alguem
+        -- citar o fluxo como se fosse reproduzivel. A condicao do ADR 0029 -
+        -- "o fluxo aberto nao finge ser um dataset fechado" - vira ESTRUTURA
+        -- em vez de disciplina, que e o principio de 8.5.1.
+        --
+        -- Ele tambem NAO esta em `dataset_split`, logo nao aparece em
+        -- `bar_por_finalidade`, que e a unica porta do caminho do agente. O
+        -- agente nao alcanca isto por construcao, e nao por permissao.
+        -- ==================================================================
+        CREATE TABLE stream_bar (
+            -- A chave idempotente. Quatro colunas, e nao um id sintetico:
+            -- retry do rele reenvia a MESMA barra, e a unicidade tem de
+            -- recusa-la pela identidade dela, nunca por um id que o remetente
+            -- escolhe.
+            venue        TEXT    NOT NULL,
+            symbol       TEXT    NOT NULL,
+            timeframe    TEXT    NOT NULL,
+            open_time_ms INTEGER NOT NULL,
+
+            -- Inteiros de precisao fixa (regra 5). As escalas ficam na linha
+            -- porque o fluxo nao tem tabela de metadados que as guarde - e sem
+            -- elas inteiro de precisao fixa e numero sem unidade.
+            open         INTEGER NOT NULL,
+            high         INTEGER NOT NULL,
+            low          INTEGER NOT NULL,
+            close        INTEGER NOT NULL,
+            volume       INTEGER NOT NULL,
+            quote_volume INTEGER NOT NULL,
+            trades       INTEGER NOT NULL,
+            interval_ms  INTEGER NOT NULL CHECK (interval_ms > 0),
+            price_scale_exp  INTEGER NOT NULL,
+            volume_scale_exp INTEGER NOT NULL,
+
+            -- Quando ESTA linha chegou aqui. Nao entra em hash nenhum e nao e
+            -- o horario da barra: serve para medir atraso do rele e para
+            -- distinguir barra recebida ao vivo de barra recuperada.
+            recebido_em TEXT NOT NULL,
+            origem      TEXT NOT NULL CHECK (origem IN ('ao_vivo', 'backfill')),
+
+            PRIMARY KEY (venue, symbol, timeframe, open_time_ms),
+
+            CHECK (high >= low),
+            CHECK (high >= open AND high >= close),
+            CHECK (low <= open AND low <= close),
+            CHECK (open_time_ms > 0),
+            CHECK (volume >= 0 AND quote_volume >= 0 AND trades >= 0)
+        );
+
+        CREATE INDEX idx_stream_bar_serie
+            ON stream_bar(venue, symbol, timeframe, open_time_ms);
+
+        -- APPEND-ONLY, imposto como no ledger e no agent_event.
+        --
+        -- E o que torna o hash de prefixo bem definido PARA SEMPRE: um
+        -- snapshot de [from, to) pode ser reconferido contra o fluxo meses
+        -- depois. Sem isto, "snapshot imutavel" seria copia de algo que muda,
+        -- e a verificacao nao provaria nada.
+        CREATE TRIGGER stream_bar_sem_update
+        BEFORE UPDATE ON stream_bar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'stream_bar e apenas por acrescimo: reescrever barra recebida invalidaria todo snapshot que a contem');
+        END;
+
+        CREATE TRIGGER stream_bar_sem_delete
+        BEFORE DELETE ON stream_bar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar barra do fluxo quebraria o hash de todo snapshot que a contem');
+        END;
+
+        -- ==================================================================
+        -- O SNAPSHOT. Fechado, com hash proprio, finalidade e dono.
+        -- ==================================================================
+        CREATE TABLE snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            venue     TEXT NOT NULL,
+            symbol    TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+
+            from_ms         INTEGER NOT NULL,
+            to_ms_exclusive INTEGER NOT NULL,
+
+            -- `barras_presentes` sozinho ENGANA: um snapshot de 30 dias com
+            -- metade das barras ausentes tem contagem plausivel e nao vale
+            -- nada. `barras_esperadas` sai do intervalo e do interval_ms, e a
+            -- diferenca e a lacuna - declarada, nunca interpolada.
+            barras_esperadas    INTEGER NOT NULL CHECK (barras_esperadas > 0),
+            barras_presentes    INTEGER NOT NULL CHECK (barras_presentes >= 0),
+            lacunas             INTEGER NOT NULL CHECK (lacunas >= 0),
+            maior_lacuna_barras INTEGER NOT NULL CHECK (maior_lacuna_barras >= 0),
+
+            -- Lacuna ACEITA por uma pessoa, com motivo. Mesmo padrao que a
+            -- ingestao historica: "lacuna aborta, a menos que alguem declare
+            -- que a aceita. A decisao e de uma pessoa, e fica registrada."
+            lacuna_aceita_por    TEXT,
+            lacuna_aceita_motivo TEXT,
+
+            -- Hash CANONICO: identidade completa da serie mais conteudo
+            -- ordenado. Nada nao deterministico entra - se `criado_em`
+            -- entrasse, re-snapshotar daria hash diferente e a IDEMPOTENCIA
+            -- morreria, que e a propriedade em que o resto se apoia.
+            sha256 TEXT NOT NULL,
+
+            finalidade TEXT NOT NULL
+                CHECK (finalidade IN ('piloto', 'calibracao',
+                                      'revalidacao', 'forward')),
+
+            -- O DONO do uso unico, e ele depende da finalidade. Calibracao e
+            -- revalidacao pertencem a uma `calibration_version`: a calibracao
+            -- do simulador NAO e de hipotese nenhuma, e do AMBIENTE, e vale
+            -- para todas as candidatas que rodarem sob ela. Forward pertence a
+            -- hipotese, pelo mesmo padrao do holdout.
+            calibration_version INTEGER,
+            hypothesis_id       INTEGER REFERENCES hypothesis(id),
+
+            -- Nunca 'agente'. O CHECK e a fronteira: nao existe valor que
+            -- torne um snapshot legivel pelo caminho do agente.
+            acesso TEXT NOT NULL DEFAULT 'executor_validador'
+                CHECK (acesso = 'executor_validador'),
+
+            criado_em TEXT NOT NULL,
+
+            CHECK (from_ms < to_ms_exclusive),
+            CHECK (barras_presentes <= barras_esperadas),
+
+            -- Cada finalidade tem UM dono, nao os dois nem nenhum.
+            CHECK (
+                (finalidade IN ('piloto', 'calibracao', 'revalidacao')
+                 AND calibration_version IS NOT NULL
+                 AND hypothesis_id IS NULL)
+                OR
+                (finalidade = 'forward'
+                 AND hypothesis_id IS NOT NULL
+                 AND calibration_version IS NULL)
+            ),
+
+            -- COMPLETUDE CONFERIDA NO FECHAMENTO. Snapshot incompleto so
+            -- existe se a lacuna foi ACEITA por alguem, com motivo.
+            CHECK (
+                barras_presentes = barras_esperadas
+                OR (lacuna_aceita_por IS NOT NULL
+                    AND lacuna_aceita_motivo IS NOT NULL)
+            )
+        );
+
+        -- USO UNICO, no dono certo. Uma calibracao tem UMA janela de ajuste e
+        -- UMA de confirmacao; repetir a confirmacao ate passar e o modo de
+        -- falha, e o indice e o que o torna impossivel.
+        CREATE UNIQUE INDEX idx_snapshot_calibracao_unica
+            ON snapshot(calibration_version, finalidade)
+            WHERE calibration_version IS NOT NULL;
+
+        CREATE INDEX idx_snapshot_hipotese
+            ON snapshot(hypothesis_id) WHERE hypothesis_id IS NOT NULL;
+
+        CREATE UNIQUE INDEX idx_snapshot_sem_repetir_intervalo
+            ON snapshot(venue, symbol, timeframe, from_ms, to_ms_exclusive,
+                        finalidade, COALESCE(calibration_version, -1),
+                        COALESCE(hypothesis_id, -1));
+
+        CREATE TRIGGER snapshot_sem_update
+        BEFORE UPDATE ON snapshot
+        BEGIN
+            SELECT RAISE(ABORT,
+                'snapshot e imutavel: mover a fronteira ou o hash depois seria escolher a regua olhando o resultado');
+        END;
+
+        CREATE TRIGGER snapshot_sem_delete
+        BEFORE DELETE ON snapshot
+        BEGIN
+            SELECT RAISE(ABORT,
+                'snapshot e apenas por acrescimo: apagar um invalidaria o resultado que o cita');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- As barras COPIADAS. Copiar e o desenho, nao desperdicio: a 15 min
+        -- sao 96 barras/dia, e 90 dias de forward sao 8.640. A alternativa -
+        -- snapshot como REFERENCIA ao fluxo - reintroduziria a dependencia de
+        -- o fluxo nunca mudar, que e o que o hash existe para verificar.
+        -- ------------------------------------------------------------------
+        CREATE TABLE snapshot_bar (
+            snapshot_id  INTEGER NOT NULL REFERENCES snapshot(id),
+            open_time_ms INTEGER NOT NULL,
+            open         INTEGER NOT NULL,
+            high         INTEGER NOT NULL,
+            low          INTEGER NOT NULL,
+            close        INTEGER NOT NULL,
+            volume       INTEGER NOT NULL,
+            quote_volume INTEGER NOT NULL,
+            trades       INTEGER NOT NULL,
+            PRIMARY KEY (snapshot_id, open_time_ms)
+        );
+
+        CREATE TRIGGER snapshot_bar_sem_update
+        BEFORE UPDATE ON snapshot_bar
+        BEGIN
+            SELECT RAISE(ABORT, 'barra de snapshot e imutavel');
+        END;
+
+        CREATE TRIGGER snapshot_bar_sem_delete
+        BEFORE DELETE ON snapshot_bar
+        BEGIN
+            SELECT RAISE(ABORT, 'barra de snapshot e apenas por acrescimo');
+        END;
+
+        -- ==================================================================
+        -- O RUN declara a FONTE, e snapshot passa a ser exigido - so quando a
+        -- fonte e ao vivo.
+        --
+        -- O default e `historico` porque e o que E VERDADE sobre todo run
+        -- existente: os da 0A, os da 0B, os de B4, de A1a e de A1b. NOT NULL
+        -- sem default forcaria inventar snapshot para eles, que e a mesma
+        -- falsificacao de dar requisito de regime retroativo as hipoteses 1
+        -- a 41.
+        -- ==================================================================
+        ALTER TABLE run ADD COLUMN fonte_de_dados TEXT NOT NULL
+            DEFAULT 'historico';
+
+        ALTER TABLE run ADD COLUMN snapshot_id INTEGER REFERENCES snapshot(id);
+
+        CREATE TRIGGER run_fonte_conhecida
+        BEFORE INSERT ON run
+        WHEN NEW.fonte_de_dados NOT IN ('historico', 'ao_vivo')
+        BEGIN
+            SELECT RAISE(ABORT,
+                'fonte_de_dados desconhecida: um run declara historico ou ao_vivo, e nada mais');
+        END;
+
+        CREATE TRIGGER run_ao_vivo_exige_snapshot
+        BEFORE INSERT ON run
+        WHEN NEW.fonte_de_dados = 'ao_vivo' AND NEW.snapshot_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT,
+                'run ao vivo sem snapshot nao pode existir: todo resultado do forward aponta para um intervalo fechado, reproduzivel e com hash proprio');
+        END;
+
+        -- A RECIPROCA tambem, e ela importa: um run que declara fonte
+        -- historica e aponta para snapshot de forward esta mentindo sobre uma
+        -- das duas coisas, e nada acusaria.
+        CREATE TRIGGER run_historico_sem_snapshot
+        BEFORE INSERT ON run
+        WHEN NEW.fonte_de_dados = 'historico' AND NEW.snapshot_id IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT,
+                'run historico nao aponta para snapshot de forward: uma das duas declaracoes esta errada');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

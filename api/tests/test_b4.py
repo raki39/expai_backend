@@ -23,6 +23,8 @@ import pytest
 from app.b4 import braco, busca
 from app.config.schema import ExperimentConfig
 from app.hipotese import registro as hipotese_registro
+
+from ._prosa import sql_sem_prosa
 from app.validador import contador, lote
 from tests.test_cerebro import settings  # noqa: F401
 from tests.test_maos_rapidas import criar_dataset, precos_passeio
@@ -32,33 +34,9 @@ APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 TRIPLAS = ('"""', "'''", 'r"""', "r'''", 'f"""', "f'''")
 
 
-def sql_sem_prosa(arquivo: pathlib.Path) -> str:
-    """O codigo sem comentarios e sem DOCSTRINGS, com o SQL intacto.
-
-    Nao e o `codigo_sem_prosa` do incremento 11: aquele remove todo literal de
-    texto, e o SQL deste projeto **vive** em literal. Removendo-os, a guarda
-    ficaria cega justamente para o que ela procura.
-
-    O que se isola aqui e a consulta, e nao a explicacao dela. A primeira
-    versao desta guarda acusou o comentario de `b4/braco.py`, que cita a
-    consulta exatamente para contar como o defeito nasceu - e uma guarda que
-    proibe a explicacao de por que algo e proibido empurra para apagar a
-    explicacao, que e a pior correcao possivel.
-
-    Docstring e reconhecida pelas aspas triplas: o SQL do projeto e escrito em
-    literais de uma linha, concatenados.
-    """
-    import tokenize
-
-    pedacos: list[str] = []
-    with arquivo.open("rb") as f:
-        for tok in tokenize.tokenize(f.readline):
-            if tok.type == tokenize.COMMENT:
-                continue
-            if tok.type == tokenize.STRING and tok.string.startswith(TRIPLAS):
-                continue
-            pedacos.append(tok.string)
-    return " ".join(pedacos)
+# `sql_sem_prosa` mudou para `tests/_prosa.py` no incremento 16, quando
+# passou a ter dois usuarios. Duas copias identicas divergem, e este
+# projeto conta essa historia mais de uma vez.
 
 
 @pytest.fixture
