@@ -392,3 +392,86 @@ def test_maior_buraco():
     assert deteccao._maior_buraco([True] * 10) == 0
     assert deteccao._maior_buraco([True, False, True, False, False, True]) == 2
     assert deteccao._maior_buraco([False] * 7) == 7
+
+
+# ------------------- criterio 5: o pre-registro carrega os regimes exigidos
+
+def test_a_taxonomia_e_VERSIONADA_na_config():
+    """Nao basta ser constante em `app/regime`.
+
+    Mesmo argumento que `execution_reference` carrega escrito em si mesmo:
+    dois runs com taxonomias diferentes reportariam o MESMO `config_hash` com
+    semanticas de regime diferentes, e a comparacao entre eles ficaria
+    invalida sem que nada acusasse (secao 10.2.3).
+    """
+    from app.config.schema import ExperimentConfig, campo_material
+
+    c = ExperimentConfig()
+    assert c.regime_corte_inferior_mili_bps == deteccao.CORTE_INFERIOR_MILI_BPS
+    assert c.regime_corte_superior_mili_bps == deteccao.CORTE_SUPERIOR_MILI_BPS
+    assert c.regime_janela_barras == deteccao.JANELA_BARRAS
+    assert c.regime_permanencia_barras == deteccao.PERMANENCIA_BARRAS
+    assert c.regime_minimos_para_cobertura == deteccao.REGIMES_MINIMOS
+
+    # E sao MATERIAIS: entram no hash, e mudar um invalida comparacao.
+    for campo in ("regime_corte_inferior_mili_bps", "regime_corte_superior_mili_bps",
+                  "regime_janela_barras", "regime_permanencia_barras",
+                  "regime_minimos_para_cobertura"):
+        assert campo_material(campo), f"{campo} tem de ser material"
+
+
+def test_mudar_a_taxonomia_muda_o_config_hash():
+    """Se nao mudasse, dois experimentos incomparaveis se pareceriam iguais."""
+    from app.config.schema import ExperimentConfig
+
+    a = ExperimentConfig()
+    b = ExperimentConfig(regime_permanencia_barras=480)
+    assert a.config_hash() != b.config_hash()
+
+
+def test_toda_condicao_construida_carrega_os_regimes():
+    """Criterio 5: e o pre-registro que guarda quais regimes contam (R70)."""
+    from app.config.schema import ExperimentConfig
+    from app.regra.schema import condicoes_da_config
+
+    cv = condicoes_da_config(ExperimentConfig())
+    assert cv.regimes_elegiveis == ("vol_baixa", "vol_media", "vol_alta")
+    assert cv.regimes_minimos == 2
+    assert cv.regime_permanencia_barras == 672
+
+
+def test_None_significa_pre_registrada_antes_da_taxonomia():
+    """E NAO "nenhum regime exigido". A distincao decide se ha falsificacao.
+
+    As hipoteses 1 a 41 foram registradas antes do ADR 0026. Dar-lhes um
+    requisito de regime retroativamente seria o "escolher a regua depois do
+    fato" que secao 8.5 proibe - e alteraria o pre-registro, que e imutavel
+    por gatilho desde o incremento 8.
+    """
+    from app.regra.schema import CondicoesValidade
+
+    # JSON gravado ANTES da mudanca continua parseavel.
+    antigo = CondicoesValidade.model_validate({
+        "venue": "binance", "symbol": "BTCUSDT",
+        "timeframe": "15m", "fidelity_level": 1,
+    })
+    assert antigo.regimes_elegiveis is None
+    assert antigo.regimes_minimos is None
+    assert antigo.regime_permanencia_barras is None
+
+
+def test_ha_UMA_definicao_de_condicoes_da_config():
+    """O campo novo entrou num lugar so - o retorno do conserto do incremento 12.
+
+    Havia duas construcoes identicas linha por linha, `baselines.condicoes` e
+    `contrato.condicoes_da_config`. Um campo novo em uma e nao na outra faria a
+    MESMA regra carregar escopos diferentes conforme o caminho que a criou.
+    """
+    from app.config.schema import ExperimentConfig
+    from app.cerebro.contrato import condicoes_da_config as pelo_cerebro
+    from app.maos_rapidas.baselines import condicoes as pelas_maos
+    from app.regra.schema import condicoes_da_config as canonica
+
+    c = ExperimentConfig()
+    assert canonica(c) == pelo_cerebro(c) == pelas_maos(c)
+    assert canonica(c).regimes_elegiveis is not None

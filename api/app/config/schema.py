@@ -106,6 +106,30 @@ class ExperimentConfig(BaseModel):
     latency_bars: int = Field(default=1, ge=1)
     penalty_bps: Decimal = Decimal("1")
 
+    # ------------------------------ taxonomia de regimes (ADR 0026, Fase 0C)
+    #
+    # CONGELADOS antes do forward. Vivem aqui, e nao so como constante em
+    # `app/regime`, pelo MESMO argumento que `execution_reference` carrega
+    # escrito em si mesmo: dois runs com taxonomias diferentes reportariam o
+    # mesmo `config_hash` com semanticas de regime diferentes, e a comparacao
+    # entre eles ficaria invalida sem que nada acusasse.
+    #
+    # A escolha destes numeros nao foi de gosto. A proposta original era uma
+    # grade direcao x volatilidade com permanencia de um dia, e a medicao
+    # sobre as 70.080 barras a derrubou: ela satisfazia ">= 2 regimes" em
+    # 97,3% das janelas de 30 dias, ou seja NAO FILTRAVA NADA - a "definicao
+    # frouxa" que secao 19.2 alerta. E o eixo de direcao destruia a
+    # persistencia do de volatilidade, porque a celula conjunta herda a
+    # persistencia da dimensao MENOS persistente.
+    #
+    # Procedencia completa em `.docs/adr/0026-taxonomia-de-regimes.md` e nos
+    # scripts de `.docs/medicoes/0026-regimes/`.
+    regime_corte_inferior_mili_bps: int = Field(default=19_300, gt=0)
+    regime_corte_superior_mili_bps: int = Field(default=25_300, gt=0)
+    regime_janela_barras: int = Field(default=672, gt=0)        # 7 dias a 15 min
+    regime_permanencia_barras: int = Field(default=672, gt=0)   # 7 dias CONSECUTIVOS
+    regime_minimos_para_cobertura: int = Field(default=2, ge=1)
+
     # ------------------------------------------- economia (ADR 0003/0006)
     seed_capital_usd_cents: int = Field(default=100_000, gt=0)  # US$ 1.000
 

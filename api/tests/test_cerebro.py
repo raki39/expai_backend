@@ -1056,11 +1056,23 @@ def test_a_procedencia_da_regra_vem_do_experimento_e_nao_do_modelo(
         (resultado.rule_id,),
     ).fetchone()
     condicoes = json.loads(regra["condicoes_validade_json"])
+    # A afirmacao e de PROCEDENCIA: todo campo aqui tem de sair da config, e
+    # nenhum do modelo. Por isso a comparacao e por igualdade exata - um campo
+    # novo que o modelo pudesse preencher quebraria este teste, que e o efeito
+    # desejado.
     assert condicoes == {
         "venue": cfg.market_venue,
         "symbol": cfg.market_symbol,
         "timeframe": cfg.timeframe,
         "fidelity_level": cfg.fidelity_level,
+        # Regimes exigidos (ADR 0026, R70). Os elegiveis sao a taxonomia
+        # congelada; o minimo e a permanencia vem da config versionada, pelo
+        # mesmo motivo que os outros quatro: "deixa-lo declarar sob que
+        # condicoes a propria hipotese vale seria deixa-lo carimbar a propria
+        # procedencia".
+        "regimes_elegiveis": ["vol_baixa", "vol_media", "vol_alta"],
+        "regimes_minimos": cfg.regime_minimos_para_cobertura,
+        "regime_permanencia_barras": cfg.regime_permanencia_barras,
     }
 
 

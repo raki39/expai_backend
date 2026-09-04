@@ -42,6 +42,27 @@ class CondicoesValidade(BaseModel):
     timeframe: str
     fidelity_level: int = Field(ge=1)
 
+    # -------------------------------- regimes exigidos (ADR 0026, R70, §8.5)
+    #
+    # "Quais regimes contam para uma hipotese e parte do pre-registro dela
+    # (secao 8.2, campo condicoes_validade), decidido antes de observar o
+    # forward. Escolher depois e selecionar o recorte que favorece o
+    # resultado." - secao 8.5, literal.
+    #
+    # **`None` NAO significa "nenhum regime exigido".** Significa
+    # "pre-registrada antes de a taxonomia existir", e e a verdade sobre as
+    # hipoteses 1 a 41: elas foram registradas antes do ADR 0026. Dar-lhes um
+    # requisito de regime retroativamente seria exatamente o "escolher a regua
+    # depois do fato" que a secao 8.5 proibe - e alteraria o pre-registro, que
+    # e imutavel por gatilho desde o incremento 8.
+    #
+    # Toda condicao construida por `condicoes_da_config` tem os campos
+    # preenchidos, e ha teste exigindo isso. `None` so aparece ao RELER JSON
+    # gravado antes da mudanca.
+    regimes_elegiveis: tuple[str, ...] | None = None
+    regimes_minimos: int | None = None
+    regime_permanencia_barras: int | None = None
+
 
 def condicoes_da_config(config) -> CondicoesValidade:
     """As condicoes de validade da config vigente. **Uma definicao.**
@@ -70,6 +91,17 @@ def condicoes_da_config(config) -> CondicoesValidade:
         symbol=config.market_symbol,
         timeframe=config.timeframe,
         fidelity_level=config.fidelity_level,
+        # Os tres regimes do ADR 0026 sao os ELEGIVEIS; a cobertura exige que
+        # ao menos `regimes_minimos` deles sejam efetivamente observados, cada
+        # um por `regime_permanencia_barras` CONSECUTIVAS.
+        #
+        # Vem da config, e nunca do modelo. O comentario da tabela `hypothesis`
+        # ja fixava isso: "vem da CONFIG, nunca do modelo - deixa-lo declarar
+        # sob que condicoes a propria hipotese vale seria deixa-lo carimbar a
+        # propria procedencia".
+        regimes_elegiveis=("vol_baixa", "vol_media", "vol_alta"),
+        regimes_minimos=config.regime_minimos_para_cobertura,
+        regime_permanencia_barras=config.regime_permanencia_barras,
     )
 
 
