@@ -403,3 +403,120 @@ def test_o_backoff_de_bloqueio_e_longo_e_nao_exponencial():
 
     assert fluxo.BACKOFF_BLOQUEIO_S >= 300.0
     assert fluxo.BACKOFF_BLOQUEIO_S > fluxo.BACKOFF_MAXIMO_S * 5
+
+
+# --------------------- keepalive: o ping do cliente era a causa das quedas
+
+def test_nao_mandamos_ping_do_cliente():
+    """`ping_interval=None`, e o motivo esta documentado.
+
+    A Binance diz que o SERVIDOR manda ping a cada 20 s e espera pong em 1
+    minuto - a biblioteca responde sozinha. Ela NAO diz que responde aos
+    nossos pings.
+
+    Com `ping_interval=20, ping_timeout=20` nos derrubavamos conexao saudavel
+    sempre que ela demorava a responder um ping que talvez nem responda. Era a
+    causa dos `coletor.queda` esporadicos no primeiro deploy em Singapura.
+    """
+    import inspect
+
+    from coletor import fluxo
+
+    fonte = inspect.getsource(fluxo.receber)
+    assert "ping_interval=None" in fonte
+    assert "ping_timeout" not in fonte, (
+        "timeout de ping do cliente derruba conexao saudavel"
+    )
+
+
+def test_a_vivacidade_vem_do_SILENCIO_do_dado():
+    """O sinal certo e o dado parar de chegar, nao o pong atrasar.
+
+    O bookTicker de BTC/USDT manda varias mensagens por segundo: 30 s de
+    silencio e socket morto, nao mercado calmo.
+    """
+    import inspect
+
+    from coletor import fluxo
+
+    assert fluxo.SILENCIO_MAXIMO_S == 30.0
+    fonte = inspect.getsource(fluxo.receber)
+    assert "wait_for" in fonte and "SILENCIO_MAXIMO_S" in fonte
+    assert "coletor.silencio" in fonte
+
+
+def test_fechamento_de_24h_e_rotina_e_nao_falha():
+    """A Binance desconecta em 24 h por contrato, e isso nao e erro.
+
+    "A single connection to the API is only valid for 24 hours; expect to be
+    disconnected after the 24-hour mark." Tratar como falha produziria um
+    WARNING por dia dizendo que algo esperado aconteceu - e reconectaria com
+    backoff, perdendo dado sem motivo.
+    """
+    import inspect
+
+    from coletor import fluxo
+
+    fonte = inspect.getsource(fluxo.receber)
+    assert "ConnectionClosedOK" in fonte
+    assert "coletor.reconectando" in fonte
+    # Fechamento limpo reconecta na hora, sem backoff.
+    i_ok = fonte.index("ConnectionClosedOK")
+    trecho = fonte[i_ok:i_ok + 900]
+    assert "espera = BACKOFF_INICIAL_S" in trecho
+
+
+# ------------------------------------- a taxa de amostragem era 1,98 Hz
+
+@pytest.mark.asyncio
+async def test_amostra_UMA_vez_por_segundo():
+    """Medido antes: 1,98 Hz. O ADR diz 1 Hz, e o codigo fazia 2.
+
+    A primeira versao calculava `1.0 - time.time() % 1.0` a cada volta. Depois
+    de gravar, o resto ficava logo abaixo de 1, a espera saia em milissegundos,
+    e quase todo segundo era amostrado DUAS vezes - dobrando o volume e
+    fazendo o ADR 0028 deixar de descrever o codigo.
+    """
+    import asyncio
+
+    from coletor import fluxo
+    from coletor.amostra import Cotacao, Estado
+
+    escritas: list[int] = []
+
+    class DiarioFalso:
+        def escrever(self, linha, *, ns):
+            escritas.append(ns)
+
+    estado = Estado(
+        ultima=Cotacao(u=1, bid="1", bid_qty="1", ask="2", ask_qty="1",
+                       received_at_ns=0),
+        conectado=True,
+    )
+    parar = asyncio.Event()
+    tarefa = asyncio.create_task(
+        fluxo.amostrar_em_1hz(estado, DiarioFalso(), parar)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(3.4)
+    parar.set()
+    tarefa.cancel()
+    await asyncio.gather(tarefa, return_exceptions=True)
+
+    # Em ~3,4 s cabem 3 ou 4 tiques, nunca 6 ou 7.
+    assert 3 <= len(escritas) <= 4, f"{len(escritas)} amostras em 3,4 s"
+
+    # E nenhum par de amostras no mesmo segundo.
+    segundos = [ns // 1_000_000_000 for ns in escritas]
+    assert len(segundos) == len(set(segundos)), f"segundo repetido: {segundos}"
+
+
+def test_atraso_longo_PULA_em_vez_de_correr_atras():
+    """Recuperar tiques perdidos gravaria dado falso com cara de dado."""
+    import inspect
+
+    from coletor import fluxo
+
+    fonte = inspect.getsource(fluxo.amostrar_em_1hz)
+    assert "math.ceil" in fonte
+    assert "proximo += 1.0" in fonte
+    assert "proximo <= time.time()" in fonte, "sem realinhamento, o laco corre atras"

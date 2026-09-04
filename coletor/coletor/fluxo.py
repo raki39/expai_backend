@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any
 
@@ -43,6 +44,20 @@ BACKOFF_MAXIMO_S = 30.0
 # modo. Ele espera longo e diz UMA VEZ o que esta acontecendo.
 BACKOFF_BLOQUEIO_S = 300.0
 
+# Silencio maximo antes de considerar a conexao morta e reconectar.
+#
+# O bookTicker de BTC/USDT manda varias mensagens por SEGUNDO, entao 30 s de
+# silencio nao e mercado calmo - e socket morto que nao fechou (half-open).
+#
+# Este e o sinal de vivacidade CERTO, e substitui o ping do cliente. A
+# documentacao da Binance diz que o SERVIDOR manda ping a cada 20 s e espera
+# pong em 1 minuto (a biblioteca responde sozinha), mas NAO diz que ele
+# responde aos nossos. Com `ping_interval=20, ping_timeout=20` nos derrubavamos
+# conexao saudavel sempre que ela demorava a responder um ping que talvez ela
+# nem responda - e era essa a causa dos `coletor.queda` esporadicos no primeiro
+# deploy em Singapura.
+SILENCIO_MAXIMO_S = 30.0
+
 
 def _status_http(e: BaseException) -> int | None:
     """Codigo HTTP de uma falha de handshake do websocket, se houver."""
@@ -62,16 +77,27 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
     bloqueado = False
     while not parar.is_set():
         try:
-            # ping_interval do cliente: o servidor da Binance manda ping e
-            # espera pong. A biblioteca responde sozinha; o nosso ping serve
-            # para detectar conexao morta que nao fechou (half-open).
-            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+            # `ping_interval=None`: NAO mandamos ping. A biblioteca continua
+            # respondendo aos pings do servidor sozinha, que e o que a Binance
+            # exige. A vivacidade e detectada pelo SILENCIO do dado, abaixo.
+            async with websockets.connect(url, ping_interval=None) as ws:
                 estado.conectado = True
                 espera = BACKOFF_INICIAL_S
                 bloqueado = False
                 log.info("coletor.conectado", extra={"url": url})
-                async for bruto in ws:
-                    if parar.is_set():
+                while not parar.is_set():
+                    try:
+                        bruto = await asyncio.wait_for(
+                            ws.recv(), timeout=SILENCIO_MAXIMO_S
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("coletor.silencio", extra={
+                            "segundos": SILENCIO_MAXIMO_S,
+                            "diagnostico": "nenhuma mensagem no periodo. O "
+                                           "bookTicker manda varias por "
+                                           "segundo, entao isto e socket morto "
+                                           "e nao mercado calmo.",
+                        })
                         break
                     recebido_ns = time.time_ns()
                     try:
@@ -79,11 +105,22 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
                         estado.ultima = da_mensagem(payload, recebido_ns)
                     except (ValueError, KeyError, TypeError):
                         # Mensagem que nao e uma cotacao (resposta de
-                        # assinatura, por exemplo). Nao derruba o laco, e
-                        # tambem nao vira cotacao.
+                        # assinatura, ou o `serverShutdown` que a Binance manda
+                        # antes de manutencao). Nao derruba o laco, e tambem
+                        # nao vira cotacao.
                         log.debug("coletor.mensagem_ignorada", extra={"bruto": str(bruto)[:200]})
         except asyncio.CancelledError:
             raise
+        except websockets.exceptions.ConnectionClosedOK:
+            # Fechamento LIMPO. A documentacao da Binance e explicita: "a single
+            # connection to the API is only valid for 24 hours; expect to be
+            # disconnected after the 24-hour mark". Isso e rotina, nao falha:
+            # sai como INFO e reconecta na hora, sem backoff. Tratar como erro
+            # produziria um WARNING por dia dizendo que algo esperado ocorreu.
+            log.info("coletor.reconectando", extra={
+                "motivo": "fechamento limpo do servidor (24 h ou manutencao)",
+            })
+            espera = BACKOFF_INICIAL_S
         except Exception as e:  # noqa: BLE001 - qualquer falha de rede reconecta
             if _status_http(e) == 451:
                 # Diz UMA vez, com a acao junto, e depois cala.
@@ -115,20 +152,38 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
 
 
 async def amostrar_em_1hz(estado: Estado, diario: Diario, parar: asyncio.Event) -> None:
-    """Um tique por segundo, alinhado ao relogio de parede.
+    """UM tique por segundo, num alvo que avanca de exatamente 1 s.
 
-    O alinhamento existe para que `sampled_at` caia perto do segundo cheio, e
-    nao derive com o tempo de execucao do laco. Sem ele, mil tiques acumulariam
-    o custo de mil escritas e a amostragem deixaria de ser 1 Hz sem avisar.
+    A primeira versao calculava `1.0 - time.time() % 1.0` a cada volta, e
+    amostrava a **1,98 Hz** - medido, nao suspeitado. O motivo: depois de
+    gravar, o resto da divisao fica logo ABAIXO de 1 (0,984, digamos), a espera
+    sai 16 ms, e o laco amostra outra vez no MESMO segundo. Quase todo segundo
+    saia duas vezes.
+
+    Isso e o defeito de sempre num lugar novo: o ADR 0028 diz "amostrado a
+    1 Hz" e o codigo fazia 2 Hz - o documento parou de descrever o codigo, e
+    nada acusava. De quebra dobrava o volume, contra os 21,5 MB/mes medidos.
+
+    O alvo monotonico resolve: ele avanca de 1,0 s e nao depende de quando o
+    laco acordou.
+
+    **Atraso longo PULA em vez de correr atras.** Se o processo travar (GC,
+    disco, agendador), recuperar os tiques perdidos gravaria um punhado de
+    amostras com `sampled_at` colado - dado falso, com cara de dado. Pular
+    deixa um buraco visivel na sequencia de `sampled_at`, que e a verdade.
     """
+    proximo = math.ceil(time.time())
     while not parar.is_set():
-        agora = time.time()
-        await asyncio.sleep(max(0.0, (1.0 - agora % 1.0)))
+        await asyncio.sleep(max(0.0, proximo - time.time()))
         if parar.is_set():
             break
         ns = time.time_ns()
         a = amostrar(estado, ns)
         diario.escrever(a.como_linha(), ns=ns)
+        proximo += 1.0
+        if proximo <= time.time():
+            # Ficamos para tras. Realinha ao proximo segundo FUTURO.
+            proximo = math.ceil(time.time())
 
 
 async def sondar_relogio(diario: Diario, parar: asyncio.Event,
