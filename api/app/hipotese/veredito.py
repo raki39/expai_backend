@@ -82,6 +82,7 @@ def observar(
     patrimonio_cents: int,
     idas_e_voltas: int,
     b1_casado: dict | None,
+    baselines_do_recorte: dict[str, int] | None = None,
 ) -> Realizado:
     """Monta o observado deste run, dizendo o que faltou e por que.
 
@@ -90,6 +91,15 @@ def observar(
     run. Comparar contra um baseline de outra config e comparar atravessando
     uma mudanca material, que a secao 10.2.3 invalida - e faze-lo em silencio
     seria pior que nao comparar.
+
+    `baselines_do_recorte` existe para o **walk-forward** (§14.4, criterio
+    B5), onde "o B2 e o B3 deste periodo" nao sao os da comparacao: cada
+    janela de teste tem os seus, rodados sobre o mesmo recorte. Passa-los aqui
+    mantem UMA definicao do observado - a alternativa era um segundo `observar`
+    dentro do validador, e duas construcoes do mesmo objeto divergem.
+
+    Quando ele vem, a busca global nao acontece: o chamador ja disse quais
+    runs valem, e procurar por cima seria ignorar o recorte em silencio.
     """
     valores: dict[str, int] = {
         "patrimonio_final_cents": patrimonio_cents,
@@ -116,6 +126,21 @@ def observar(
         ("excesso_sobre_b2_cents", "baseline-B2", "B2"),
         ("excesso_sobre_b3_cents", "baseline-B3", "B3"),
     ):
+        if baselines_do_recorte is not None:
+            do_recorte = baselines_do_recorte.get(nome)
+            if do_recorte is None:
+                indisponiveis[metrica] = (
+                    f"{nome} nao foi rodado sobre este recorte; o baseline da"
+                    " comparacao e de outro periodo, e usa-lo aqui compararia"
+                    " a janela de teste contra o desempenho de outra janela"
+                )
+                continue
+            from ..simulador import execucao as simulador
+
+            valores[metrica] = patrimonio_cents - simulador.caixa_cents(
+                conn, int(do_recorte)
+            )
+            continue
         linha = conn.execute(
             "SELECT id, config_version_id FROM run"
             " WHERE agent_id = ? ORDER BY id DESC LIMIT 1",

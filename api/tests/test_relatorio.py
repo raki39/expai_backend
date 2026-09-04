@@ -959,6 +959,11 @@ FORA_DO_EXPORT = {
     "/api/relatorio/vinculo/execucao/{execution_id}": "por id",
     "/api/relatorio/vinculo/evento/{event_id}": "por id",
     "/api/validador/hipotese/{hypothesis_id}": "por id",
+    # Por id, como as de vinculo. E ha um motivo a mais: o roteiro de
+    # §14.4.1 so faz sentido para uma candidata APROVADA no Portao B, e
+    # exportar a auditoria de toda hipotese do lote produziria o roteiro
+    # de coisas que nao passaram - o que sugere que passaram.
+    "/api/relatorio/auditoria/{hypothesis_id}": "por id, e so para candidata aprovada",
 }
 
 

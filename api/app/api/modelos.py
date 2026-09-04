@@ -103,3 +103,27 @@ class PedidoA1a(BaseModel):
     """
 
     author: str = Field(min_length=1, max_length=120)
+
+
+class PedidoPortaoB(BaseModel):
+    """Roda o walk-forward das candidatas. Não gasta dinheiro, só CPU e runs.
+
+    Sem parâmetro de candidata: o Portão B avalia **todas** as hipóteses do
+    agente na família corrente. Escolher qual auditar seria escolher qual
+    resultado olhar, e §14.4 não deixa essa porta aberta.
+    """
+
+    author: str = Field(min_length=1, max_length=120)
+
+
+class PedidoAuditoria(BaseModel):
+    """O roteiro de §14.4.1 para uma hipótese aprovada no Portão B.
+
+    `semente_alternativa` existe porque §14.4.1 pede "reexecutar com a semente
+    de aleatoriedade alterada". O padrão é `default_seed + 1`; qualquer valor
+    serve, e o registro guarda qual foi usado.
+    """
+
+    author: str = Field(min_length=1, max_length=120)
+    hypothesis_id: int = Field(ge=1)
+    semente_alternativa: int | None = None

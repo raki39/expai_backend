@@ -146,6 +146,10 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 |---|---|---|
 | GET | `/api/relatorio` | relatório de fechamento da 0A, em JSON |
 | GET | `/api/relatorio/portao-a` | **o Portão A (§14.4): o protocolo rejeita defeito?** — passa / reprova / pendente |
+| GET | `/api/relatorio/portao-b` | **o Portão B (§14.4): existe candidata digna de auditoria?** — só avaliado se o A passar |
+| POST | `/api/relatorio/portao-b` | roda o walk-forward das candidatas (§14.4 B5) — CPU e runs, sem dinheiro |
+| GET | `/api/relatorio/auditoria/{hypothesis_id}` | o roteiro de §14.4.1 na parte que só lê |
+| POST | `/api/relatorio/auditoria` | executa §14.4.1: semente trocada e custo dobrado — abre runs |
 | GET | `/api/relatorio/markdown` | o mesmo relatório, para humano |
 | GET | `/api/relatorio/exportar` | baixa um JSON com o estado inteiro, para anexar |
 | POST | `/api/relatorio/reprodutibilidade` | prova de R12: três digests, sem LLM |

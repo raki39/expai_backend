@@ -11,7 +11,9 @@ from ... import fase as fase_mod
 from ...config import service as config_service
 from ...dataset import loader as dataset_loader
 from ...relatorio import montar as relatorio_montar
+from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
+from ...relatorio import portao_b as relatorio_portao_b
 from ...relatorio import reprodutibilidade as relatorio_reprodutibilidade
 from ...relatorio import texto as relatorio_texto
 from ...relatorio import vinculo as relatorio_vinculo
@@ -27,7 +29,7 @@ from fastapi import Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import PlainTextResponse
 from typing import Any
-from ..modelos import PedidoProva
+from ..modelos import PedidoAuditoria, PedidoPortaoB, PedidoProva
 from ..comum import _conn
 
 # O export REUNE todas as telas, entao ele depende de um handler de cada
@@ -84,6 +86,135 @@ def portao_a(request: Request) -> dict[str, Any]:
             dataset_id=meta.id if meta else None,
         ),
     }
+
+
+def _config_e_dataset(conn):
+    """A config vigente e o dataset. `None` quando falta um dos dois."""
+    atual = config_service.versao_atual(conn)
+    meta = dataset_loader.dataset_vigente(conn)
+    return atual, (meta.id if meta else None)
+
+
+@router.get("/portao-b")
+def portao_b(request: Request) -> dict[str, Any]:
+    """O Portão B: **existe candidata digna de auditoria?** (§14.4).
+
+    Leitura: **não roda o walk-forward**. Ele executa a regra sobre as três
+    janelas e abre runs, e uma rota de leitura que escrevesse a cada
+    carregamento do painel encheria um registro append-only de runs que
+    ninguém pediu. Para executá-lo, `POST`.
+    """
+    conn = _conn(request)
+    atual, dataset_id = _config_e_dataset(conn)
+    if atual is None:
+        return {"existe": False, "motivo": "configuracao nao inicializada"}
+    return {
+        "existe": True,
+        **relatorio_portao_b.montar(
+            conn,
+            config_version_id=atual.id,
+            config=atual.config,
+            dataset_id=dataset_id,
+            rodar_forward=False,
+        ),
+    }
+
+
+@router.post("/portao-b", status_code=status.HTTP_201_CREATED)
+def portao_b_executar(
+    request: Request, pedido: PedidoPortaoB = Body(...)
+) -> dict[str, Any]:
+    """Roda o walk-forward das candidatas e devolve o Portão B completo.
+
+    **Não gasta dinheiro:** o walk-forward é execução determinística sobre
+    barras que já existem, e nenhuma reflexão acontece aqui. O que ele gasta é
+    CPU e runs.
+    """
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="encerre o run ativo antes de rodar o walk-forward",
+        )
+    atual, dataset_id = _config_e_dataset(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    if dataset_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ingira o dataset antes de rodar o walk-forward",
+        )
+    log.info("portao_b.pedido", extra={"author": pedido.author})
+    return relatorio_portao_b.montar(
+        conn,
+        config_version_id=atual.id,
+        config=atual.config,
+        dataset_id=dataset_id,
+        rodar_forward=True,
+    )
+
+
+@router.get("/auditoria/{hypothesis_id}")
+def auditoria_ler(request: Request, hypothesis_id: int) -> dict[str, Any]:
+    """O roteiro de §14.4.1, na parte que só **lê**.
+
+    A revisão das cinco operações mais lucrativas e a conferência de que nada
+    vive fora do modo pessimista não escrevem nada. Reexecutar com semente
+    trocada e com custo dobrado escreve, e por isso é `POST`.
+    """
+    conn = _conn(request)
+    atual, dataset_id = _config_e_dataset(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    try:
+        return relatorio_auditoria.montar(
+            conn,
+            hypothesis_id=hypothesis_id,
+            dataset_id=dataset_id,
+            config=atual.config,
+            config_version_id=atual.id,
+            executar=False,
+        )
+    except relatorio_auditoria.SemRun as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/auditoria", status_code=status.HTTP_201_CREATED)
+def auditoria_executar(
+    request: Request, pedido: PedidoAuditoria = Body(...)
+) -> dict[str, Any]:
+    """Executa o roteiro inteiro de §14.4.1. Abre runs, não gasta dinheiro.
+
+    §14.4.1 é explícito sobre a postura: **passar no Portão B é tratado como
+    suspeita de defeito até prova em contrário**, e esta rota é o que produz a
+    prova — ou a falta dela.
+    """
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="encerre o run ativo antes da auditoria",
+        )
+    atual, dataset_id = _config_e_dataset(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    if dataset_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ingira o dataset antes da auditoria",
+        )
+    try:
+        return relatorio_auditoria.montar(
+            conn,
+            hypothesis_id=pedido.hypothesis_id,
+            dataset_id=dataset_id,
+            config=atual.config,
+            config_version_id=atual.id,
+            executar=True,
+            semente_alternativa=pedido.semente_alternativa,
+        )
+    except relatorio_auditoria.SemRun as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/markdown", response_class=PlainTextResponse)
@@ -157,6 +288,10 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # O PRODUTO da fase corrente. O `relatorio` acima e o fechamento
         # da 0A e responde a pergunta DELA; este responde a da 0B.
         ("portao_a", "/api/relatorio/portao-a", lambda: portao_a(request)),
+        # O Portao B em LEITURA: ele nao roda o walk-forward, e por isso
+        # entra no pacote sem escrever nada. Sem ele o export mostraria o
+        # portao que autoriza e nao o que ele autorizou.
+        ("portao_b", "/api/relatorio/portao-b", lambda: portao_b(request)),
         ("sentinelas", "/api/diagnostico/sentinela",
          lambda: sentinela_listar(request)),
     ):

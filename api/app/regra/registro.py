@@ -112,6 +112,41 @@ def _gravar(
     return rule_id
 
 
+def reconstruir(
+    conn: sqlite3.Connection, rule_id: int, condicoes: CondicoesValidade
+) -> Regra:
+    """A `Regra` de volta, a partir do que ficou gravado.
+
+    Mora aqui porque **este módulo é o dono da tabela**. `params_json` não
+    guarda só os parâmetros: `_gravar` funde `position_fraction_bps` e
+    `stop_loss_bps` dentro dele, e quem reconstruísse a regra de fora
+    precisaria conhecer essa fusão — e conhecê-la errado dá uma regra com
+    dimensionamento default e um resultado plausível.
+
+    `condicoes` vem de fora de propósito. As gravadas descrevem o período em
+    que a regra foi criada, e o walk-forward é **outro período**: carregar as
+    antigas faria o resultado declarar validade sobre um intervalo que ele não
+    cobre — e este é o campo cuja única função é declarar sob que condições um
+    resultado vale.
+    """
+    linha = conn.execute(
+        "SELECT params_json FROM rule WHERE id = ?", (rule_id,)
+    ).fetchone()
+    if linha is None:
+        raise ValueError(f"regra {rule_id} nao existe")
+    gravado = json.loads(linha["params_json"])
+    fracao = gravado.pop("position_fraction_bps", None)
+    stop = gravado.pop("stop_loss_bps", None)
+    return Regra.model_validate(
+        {
+            "params": gravado,
+            **({"position_fraction_bps": fracao} if fracao is not None else {}),
+            "stop_loss_bps": stop,
+            "condicoes_validade": condicoes.model_dump(mode="json"),
+        }
+    )
+
+
 def congelar(conn: sqlite3.Connection, rule_id: int) -> str:
     """Marca a regra como congelada. Idempotente na data ja gravada."""
     linha = conn.execute(
