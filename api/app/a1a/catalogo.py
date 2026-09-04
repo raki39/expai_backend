@@ -98,6 +98,28 @@ FAMILIAS: tuple[Familia, ...] = (
         ),
         tipo=ESTATISTICO,
     ),
+    # ------------------------------------------------------------------
+    # LIMITE DECLARADO desta família, encontrado ao escrever o controle.
+    #
+    # Uma terceira forma do mesmo defeito NÃO é coberta aqui: `executor.rodar`
+    # recebe o objeto `config` de quem o chama, e nada o amarra à
+    # `config_version` do run. Em produção os dois vêm juntos de
+    # `config_service.versao_atual`, mas estruturalmente é possível executar
+    # com taxas zeradas sob um run cujo `config_version` diz que elas não são
+    # zero — e o resultado ficaria comparável a baselines que pagaram custo.
+    #
+    # Não foi fechado neste incremento, e a razão está escrita para não virar
+    # dívida invisível: a guarda natural é comparar o `config_hash` do objeto
+    # com o da versão do run, e ela recusaria toda a suíte que hoje passa uma
+    # config alterada em memória (`max_llm_calls_per_run=0`, por exemplo) sob a
+    # `config_version` 1. Fechá-la exige decidir **quais** campos amarram — os
+    # do modelo de custo, provavelmente — e isso é decisão sobre o experimento,
+    # não detalhe de implementação.
+    #
+    # O que o controle cobre hoje: não dá para DECLARAR um alvo sem custo, e o
+    # bruto e o líquido do run ficam medidos lado a lado, saindo da própria
+    # decomposição do ledger.
+    # ------------------------------------------------------------------
     Familia(
         chave="violacao_do_embargo",
         familia_de_defeito="violação conhecida do embargo",
