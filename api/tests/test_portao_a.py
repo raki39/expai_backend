@@ -834,6 +834,45 @@ def test_a1b_grava_em_pedacos_sem_contar_a_mesma_execucao_duas_vezes(
     ) == 0
 
 
+def test_a1b_acusa_quando_o_contador_global_muda_no_meio(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """O DSR de metade das execuções usaria um número que a outra não usou.
+
+    O contador global entra no DSR de cada execução, e ele **cresce** enquanto
+    o registro é preenchido em pedaços — basta injetar A1a ou rodar B4 entre
+    dois pedaços. A média sairia misturando duas deflações, e nada acusaria.
+
+    É a mesma forma do defeito que este projeto conta quatorze vezes: um
+    número que descrevia uma coisa e passou a descrever outra, em silêncio.
+    """
+    from app.a1a import braco as a1a_braco
+    from app.a1b import braco as a1b_braco, registro
+
+    dataset_id, cfg = cenario
+    a1b_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        quantas=1,
+    )
+    assert registro.divergencias(
+        conn, config_version_id=1, config=cfg
+    ) == []
+
+    # Seis hipóteses a mais no contador, entre um pedaço e o outro.
+    a1a_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    a1b_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        quantas=1,
+    )
+
+    problemas = registro.divergencias(conn, config_version_id=1, config=cfg)
+    assert any("contadores globais diferentes" in p for p in problemas), (
+        problemas
+    )
+
+
 def test_de_ponta_a_ponta_pelas_ROTAS(
     client, conn: sqlite3.Connection, cenario  # noqa: F811
 ) -> None:

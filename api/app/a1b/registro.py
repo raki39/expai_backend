@@ -165,6 +165,22 @@ def divergencias(
             "ha execucoes com horizontes diferentes; o poder medido mistura"
             " amostras de tamanhos diferentes"
         )
+    # O contador global entra no DSR de cada execucao. Ele CRESCE enquanto o
+    # registro e preenchido em pedacos - basta alguem injetar A1a ou rodar B4
+    # entre dois pedacos -, e ai metade das execucoes teria sido deflacionada
+    # por um numero e metade por outro.
+    #
+    # Nao e erro: e o registro dizendo que a proporcao mistura duas
+    # deflacoes. Sem esta linha, a mistura entraria na media sem nada acusar,
+    # que e a forma exata do defeito que este projeto conta quatorze vezes.
+    tentativas = {int(l["tentativas_globais"]) for l in linhas}
+    if len(tentativas) > 1:
+        problemas.append(
+            "ha execucoes deflacionadas por contadores globais diferentes"
+            f" ({sorted(tentativas)}): o contador cresceu enquanto o registro"
+            " era preenchido em pedacos, e o DSR de metade das execucoes usou"
+            " um numero que a outra metade nao usou"
+        )
     for l in linhas:
         if int(l["lote"]) != config.a1b_lote:
             problemas.append(
