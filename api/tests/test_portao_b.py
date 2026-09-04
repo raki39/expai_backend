@@ -421,3 +421,28 @@ def test_o_periodo_reservado_NAO_e_trocado_e_isso_esta_declarado(
     assert r["periodo_reservado_trocado"] is False
     assert "USO" in r["por_que_a_reserva_nao_e_trocada"]
     assert "8.5.1" in r["por_que_a_reserva_nao_e_trocada"]
+
+
+def test_empate_por_credito_nao_e_o_mesmo_que_perder(
+    conn: sqlite3.Connection, com_a_aprovado
+) -> None:
+    """O criterio 4 sai `false` nos dois casos, e eles levam a conclusoes opostas.
+
+    §14.3 escreve o que o empate significa: *"se B4 empatar com o agente, isso
+    nao mata o projeto - significa que o valor esta na infraestrutura de
+    validacao, e a conclusao correta e remover o LLM do laco de geracao e
+    reduzir o custo por agente em cerca de 85%"*.
+
+    E o caso `0 vs 0` e mais forte ainda: nenhum braco produziu sobrevivente,
+    entao a razao nao mediu qualidade de hipotese nenhuma. Dizer so "nao
+    supera" a partir disso e verdade que nao informa - foi exatamente o que a
+    tela mostrou no primeiro Portao B em producao.
+    """
+    dataset_id, cfg, _ = com_a_aprovado
+    b = _b(conn, dataset_id, cfg)
+    pc = b["por_credito"]
+    if pc["agente_supera_b4"] is False and pc["empate"]:
+        assert pc["o_que_o_empate_significa"]
+        assert "14.3" in pc["o_que_o_empate_significa"]
+        if pc["ambos_zerados"]:
+            assert "nada passou" in pc["o_que_o_empate_significa"]

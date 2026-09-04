@@ -149,6 +149,34 @@ def _por_credito(conn: sqlite3.Connection, config_version_id: int) -> dict:
             " config_version"
         )
     )
+
+    # EMPATE, e §14.3 diz o que ele significa. Sem esta distincao o criterio
+    # sai `false` do mesmo jeito quando o agente perde e quando os dois
+    # empatam - e as duas coisas levam a conclusoes opostas.
+    #
+    # O caso `0 vs 0` e mais forte ainda: nenhum braco produziu sobrevivente,
+    # entao a razao nao mediu qualidade nenhuma. Dizer so "nao supera" a
+    # partir disso e verdade que nao informa.
+    empate = a is not None and b is not None and a == b
+    saida["empate"] = empate
+    saida["ambos_zerados"] = empate and a == 0
+    saida["o_que_o_empate_significa"] = (
+        None
+        if not empate
+        else (
+            "§14.3: 'se B4 empatar com o agente, isso nao mata o projeto -"
+            " significa que o valor esta na infraestrutura de validacao, e a"
+            " conclusao correta e remover o LLM do laco de geracao e reduzir o"
+            " custo por agente em cerca de 85%'."
+            + (
+                " E aqui os DOIS deram zero: nenhum braco produziu"
+                " sobrevivente, entao a razao nao mediu qualidade de hipotese"
+                " - ela mediu que nada passou dos dois lados."
+                if a == 0
+                else ""
+            )
+        )
+    )
     return saida
 
 
