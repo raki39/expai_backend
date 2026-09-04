@@ -290,3 +290,79 @@ def resumo(conn: sqlite3.Connection, dataset_id: int) -> dict:
         "end_ms": meta.end_ms,
         "reserved_from_ms": meta.reserved_from_ms,
     }
+
+
+# Escala dos retornos causais: MILI-bps (bps x 1000).
+#
+# `retornos_bps_entre` devolve bps INTEIROS, e serve para o desconto de
+# autocorrelacao da secao 8.3, onde 1 bps de granularidade nao muda nada. O
+# detector de regimes precisa de mais: os cortes do ADR 0026 sao 19,3 e 25,3
+# bps por barra, e classificar perto da fronteira com granularidade de 1 bps
+# jogaria barras para o regime errado.
+#
+# Inteiro e nao float pelo mesmo motivo da regra 5: o valor entra em
+# comparacao com limiar congelado, e ponto flutuante faz duas maquinas
+# discordarem na ultima casa.
+ESCALA_MILI_BPS = 1_000
+
+
+def retornos_causais(
+    conn: sqlite3.Connection,
+    dataset_id: int,
+    *,
+    de_ms: int | None = None,
+    ate_ms: int | None = None,
+) -> list[tuple[int, int | None]]:
+    """`(open_time_ms, retorno em mili-bps)` por barra. `None` se atravessa lacuna.
+
+    Existe aqui, e nao em quem precisa, pela mesma razao que
+    `retornos_bps_entre`: **quem le barra e este modulo**. E acrescenta o que
+    aquela funcao nao faz - a regra da subsecao 3b do ADR 0026.
+
+    **Retorno que atravessa lacuna NAO e retorno de 15 minutos.** Se a barra
+    anterior nao e adjacente NO TEMPO, o retorno entre as duas cobre `d+1`
+    intervalos e tem variancia `(d+1)*sigma^2`, entrando na conta como se
+    tivesse `sigma^2`. Medido em `.docs/medicoes/0026-regimes/medir4.py`: o
+    vies e SEMPRE positivo, e volatilidade inflada FABRICA transicao de regime
+    - tornando a cobertura mais facil de satisfazer, que e a direcao de
+    aprovar.
+
+    Por isso esses retornos saem `None`, e nao interpolados nem omitidos em
+    silencio: quem consome precisa poder contar quantos faltaram.
+
+    A primeira barra da serie nao tem retorno, e tambem sai `None`.
+    """
+    # Importado aqui, e nao no topo, para manter o topo deste modulo livre de
+    # dependencia da fonte de dados - `binance` e um detalhe de ingestao, e
+    # este modulo serve leitura.
+    from .binance import intervalo_ms
+
+    passo = intervalo_ms(metadados(conn, dataset_id).timeframe)
+
+    sql = "SELECT open_time_ms, close FROM bar WHERE dataset_id = ?"
+    params: list[object] = [dataset_id]
+    if de_ms is not None:
+        sql += " AND open_time_ms >= ?"
+        params.append(de_ms)
+    if ate_ms is not None:
+        sql += " AND open_time_ms <= ?"
+        params.append(ate_ms)
+    sql += " ORDER BY open_time_ms"
+
+    linhas = [(int(l["open_time_ms"]), int(l["close"])) for l in conn.execute(sql, params)]
+
+    saida: list[tuple[int, int | None]] = []
+    anterior_ms: int | None = None
+    anterior_close: int | None = None
+    for ms, close in linhas:
+        if anterior_ms is None or anterior_close is None:
+            saida.append((ms, None))          # primeira barra: nao ha retorno
+        elif ms - anterior_ms != passo:
+            saida.append((ms, None))          # atravessa lacuna: subsecao 3b
+        elif anterior_close <= 0:
+            saida.append((ms, None))          # preco invalido nao vira retorno
+        else:
+            r = (close - anterior_close) * 10_000 * ESCALA_MILI_BPS // anterior_close
+            saida.append((ms, int(r)))
+        anterior_ms, anterior_close = ms, close
+    return saida
