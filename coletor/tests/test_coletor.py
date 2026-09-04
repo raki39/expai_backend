@@ -340,3 +340,66 @@ def test_flush_por_TEMPO_e_nao_por_contagem(tmp_path: Path):
     agora[0] = 11.0
     d.escrever({"x": 1}, ns=ns)
     assert d.flushes == 1, "onze segundos descarregam, com uma linha so"
+
+
+# ---------------------------------- 451 nao e transitorio (primeiro deploy)
+
+def test_451_e_bloqueio_por_jurisdicao_e_nao_falha_generica():
+    """O primeiro deploy na Railway devolveu 451 e o coletor tratou como queda.
+
+    Errado: jurisdicao nao muda por tentar de novo. E a mesma familia do 400
+    que o incremento 11b separou dos transitorios - "reenviar o mesmo corpo
+    devolve o mesmo 400".
+
+    O `app/dataset/binance.py` ja tinha esta excecao para a ingestao. Ela nao
+    foi conferida para api/stream.binance.com, que sao hosts DIFERENTES do
+    data.binance.vision medido no ADR 0012.
+    """
+    import urllib.error
+
+    def bloqueia(_u: str, _t: float) -> bytes:
+        raise urllib.error.HTTPError(_u, 451, "", {}, None)  # type: ignore[arg-type]
+
+    with pytest.raises(relogio.BloqueioPorJurisdicao) as e:
+        relogio.medir(agora_s=lambda: 1.0, agora_ns=lambda: 0, buscar=bloqueia)
+    assert "451" in str(e.value)
+    assert "regiao" in str(e.value), "a mensagem tem de dizer a ACAO"
+
+
+def test_bloqueio_e_um_tipo_de_falha_na_sonda():
+    """Quem so quer saber "nao mediu" continua pegando com FalhaNaSonda."""
+    assert issubclass(relogio.BloqueioPorJurisdicao, relogio.FalhaNaSonda)
+
+
+def test_outro_erro_http_continua_transitorio():
+    """503 e transitorio de verdade: repetir pode resolver."""
+    import urllib.error
+
+    def indisponivel(_u: str, _t: float) -> bytes:
+        raise urllib.error.HTTPError(_u, 503, "Service Unavailable", {}, None)  # type: ignore[arg-type]
+
+    with pytest.raises(relogio.FalhaNaSonda) as e:
+        relogio.medir(agora_s=lambda: 1.0, agora_ns=lambda: 0, buscar=indisponivel)
+    assert not isinstance(e.value, relogio.BloqueioPorJurisdicao)
+
+
+def test_status_http_de_falha_de_handshake():
+    """O `websockets` devolve o 451 dentro de InvalidStatus.response."""
+    from coletor.fluxo import _status_http
+
+    class Resp:
+        status_code = 451
+
+    class Falha(Exception):
+        response = Resp()
+
+    assert _status_http(Falha()) == 451
+    assert _status_http(OSError("rede fora")) is None
+
+
+def test_o_backoff_de_bloqueio_e_longo_e_nao_exponencial():
+    """Repetir a cada 30 s enche o log e esconde a causa."""
+    from coletor import fluxo
+
+    assert fluxo.BACKOFF_BLOQUEIO_S >= 300.0
+    assert fluxo.BACKOFF_BLOQUEIO_S > fluxo.BACKOFF_MAXIMO_S * 5

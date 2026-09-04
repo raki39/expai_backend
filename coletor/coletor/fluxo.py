@@ -34,6 +34,21 @@ INTERVALO_AMOSTRA_S = 1.0
 BACKOFF_INICIAL_S = 1.0
 BACKOFF_MAXIMO_S = 30.0
 
+# Bloqueio por jurisdicao (451) nao e transitorio: a mesma requisicao do mesmo
+# lugar devolve a mesma resposta. Repetir a cada 30 s so enche o log e esconde
+# a causa - o primeiro deploy na Railway produziu exatamente esse ruido.
+#
+# O servico NAO sai: com restartPolicyType ALWAYS isso viraria laco de
+# reinicio, e uma troca de regiao so tem efeito no redeploy seguinte de todo
+# modo. Ele espera longo e diz UMA VEZ o que esta acontecendo.
+BACKOFF_BLOQUEIO_S = 300.0
+
+
+def _status_http(e: BaseException) -> int | None:
+    """Codigo HTTP de uma falha de handshake do websocket, se houver."""
+    resposta = getattr(e, "response", None)
+    return getattr(resposta, "status_code", None)
+
 
 async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
     """Mantem a conexao viva e o slot atualizado. Reconecta sozinho.
@@ -44,6 +59,7 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
     de antes da queda.
     """
     espera = BACKOFF_INICIAL_S
+    bloqueado = False
     while not parar.is_set():
         try:
             # ping_interval do cliente: o servidor da Binance manda ping e
@@ -52,6 +68,7 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                 estado.conectado = True
                 espera = BACKOFF_INICIAL_S
+                bloqueado = False
                 log.info("coletor.conectado", extra={"url": url})
                 async for bruto in ws:
                     if parar.is_set():
@@ -68,13 +85,33 @@ async def receber(url: str, estado: Estado, parar: asyncio.Event) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - qualquer falha de rede reconecta
-            log.warning("coletor.queda", extra={"erro": repr(e), "espera_s": espera})
+            if _status_http(e) == 451:
+                # Diz UMA vez, com a acao junto, e depois cala.
+                if not bloqueado:
+                    bloqueado = True
+                    log.error("coletor.bloqueio_por_jurisdicao", extra={
+                        "url": url,
+                        "diagnostico": "a Binance recusa este ambiente por "
+                                       "jurisdicao (HTTP 451). Repetir nao "
+                                       "conserta.",
+                        "acao": "trocar a regiao do servico na Railway "
+                                "(Settings > Regions), ou hospedar o coletor "
+                                "fora dela. O volume vazio migra de graca; "
+                                "depois de semanas de coleta, nao.",
+                        "nota": "o ADR 0012 mediu data.binance.vision, que e "
+                                "outro host - o bloqueio e de api/stream.",
+                    })
+                espera = BACKOFF_BLOQUEIO_S
+            else:
+                bloqueado = False
+                log.warning("coletor.queda", extra={"erro": repr(e), "espera_s": espera})
         finally:
             estado.conectado = False
         if parar.is_set():
             break
         await asyncio.sleep(espera)
-        espera = min(espera * 2, BACKOFF_MAXIMO_S)
+        if espera != BACKOFF_BLOQUEIO_S:
+            espera = min(espera * 2, BACKOFF_MAXIMO_S)
 
 
 async def amostrar_em_1hz(estado: Estado, diario: Diario, parar: asyncio.Event) -> None:

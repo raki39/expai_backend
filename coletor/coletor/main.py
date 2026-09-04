@@ -18,7 +18,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import fluxo
+from . import fluxo, relogio
 from .amostra import Estado
 from .arquivo import Diario, conferir_destino, volume_montado
 
@@ -65,6 +65,33 @@ async def principal() -> int:
                     f"{DESTINO}",
         })
         return 1
+
+    # ------------------------------------------------- alcance, no arranque
+    # Uma linha, no primeiro segundo, dizendo se este ambiente alcanca a
+    # Binance. Existe porque a resposta a essa pergunta e a PRIMEIRA coisa que
+    # se quer saber ao trocar a regiao do servico - e sem ela seria preciso
+    # garimpar o log atras de um 451 no meio das reconexoes.
+    try:
+        m = await asyncio.to_thread(relogio.medir)
+        log.info("coletor.alcance", extra={
+            "alcancavel": True,
+            "offset_ms": round(m.offset_ms, 3),
+            "rtt_ms": round(m.rtt_ms, 3),
+            "incerteza_bruta_ms": round(m.incerteza_bruta_ms(), 3),
+            "incerteza_residual_ms": round(m.incerteza_residual_ms(), 3),
+        })
+    except relogio.BloqueioPorJurisdicao as e:
+        log.error("coletor.alcance", extra={
+            "alcancavel": False,
+            "motivo": "bloqueio_por_jurisdicao",
+            "erro": str(e),
+        })
+    except relogio.FalhaNaSonda as e:
+        # Nao alcancou, e nao foi jurisdicao. Pode ser rede, pode ser a
+        # Binance fora do ar - e as duas sao coisas diferentes de um 451.
+        log.warning("coletor.alcance", extra={
+            "alcancavel": False, "motivo": "falha_na_sonda", "erro": str(e),
+        })
 
     estado = Estado()
     parar = asyncio.Event()

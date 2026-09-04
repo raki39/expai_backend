@@ -34,6 +34,20 @@ class FalhaNaSonda(Exception):
     """Nao foi possivel medir. Vira telemetria, nunca um valor inventado."""
 
 
+class BloqueioPorJurisdicao(FalhaNaSonda):
+    """HTTP 451. NAO e transitorio, e por isso nao entra em backoff.
+
+    Mesma familia do 400 que o incremento 11b separou dos transitorios:
+    reenviar o mesmo pedido do mesmo lugar devolve a mesma resposta. Repetir
+    nao conserta jurisdicao - so enche o log e esconde a causa.
+
+    O `app/dataset/binance.py` ja tinha esta excecao para a ingestao historica.
+    Ela nao foi conferida para `api.binance.com` e `stream.binance.com`, que
+    sao hosts DIFERENTES do `data.binance.vision` medido no ADR 0012 - e a
+    diferenca apareceu no primeiro deploy.
+    """
+
+
 @dataclass(frozen=True)
 class Medida:
     """Uma estimativa de ida e volta.
@@ -104,6 +118,14 @@ def medir(
     t0 = agora_s()
     try:
         bruto = buscar(URL_TEMPO, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 451:
+            raise BloqueioPorJurisdicao(
+                f"HTTP 451 em {URL_TEMPO}: a Binance recusa este ambiente por "
+                f"jurisdicao. NAO adianta repetir. Acao: trocar a regiao do "
+                f"servico na Railway, ou hospedar o coletor fora dela."
+            ) from e
+        raise FalhaNaSonda(f"HTTP {e.code} em {URL_TEMPO}: {e.reason}") from e
     except (urllib.error.URLError, socket.timeout, OSError) as e:
         raise FalhaNaSonda(f"nao foi possivel alcancar {URL_TEMPO}: {e}") from e
     t1 = agora_s()
