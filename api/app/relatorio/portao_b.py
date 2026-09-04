@@ -56,6 +56,36 @@ PASSOU = "passou"
 REJEITADO = "rejeitado"
 INCONCLUSIVO = "inconclusivo"
 
+#: As duas partes do protocolo discordam sobre o que é "a amostra", e a
+#: discordância corre para o lado de **aprovar**. Fica declarado aqui porque um
+#: limite conhecido que não aparece no relatório é um limite que ninguém pesa.
+#:
+#: | quem | qual `n` | por quê |
+#: |---|---|---|
+#: | o veredito (`amostra_suficiente`) | `n_efetivo`, descontado por autocorrelação | §8.3: "aumentar a frequência não fabrica amostra" |
+#: | o DSR | `n` bruto da série | é o `n` da fórmula publicada |
+#:
+#: Medido, num Sharpe positivo na fronteira e com os momentos do run 78:
+#: `n = 20.609` dá DSR 0,424 onde `n = 10.976` daria 0,232. Quase o dobro.
+#:
+#: **Decidido registrar, e não corrigir.** §8.6 pede "o Deflated Sharpe Ratio",
+#: que é um procedimento **publicado**; trocar o `n` por `n_efetivo` faria a
+#: conta deixar de ser aquele procedimento, e aí ela não poderia mais ser
+#: chamada pelo nome dele. É o mesmo raciocínio da D26, que escolheu BY em vez
+#: de adaptar BH: escolher o procedimento certo, e não modificar um.
+#:
+#: Não mudou nenhum resultado da 0B — o Sharpe realizado foi negativo e o DSR
+#: deu zero de qualquer forma. Fica para a 0C decidir se a correção por
+#: autocorrelação entra também aqui.
+LIMITE_DO_DSR = (
+    "o DSR usa o `n` BRUTO da serie, e o veredito usa `n_efetivo` descontado"
+    " por autocorrelacao (§8.3). As duas partes discordam sobre o que e 'a"
+    " amostra', e a discordancia corre para o lado de APROVAR: com os momentos"
+    " do run 78 e Sharpe positivo na fronteira, n = 20.609 da DSR 0,424 onde"
+    " n = 10.976 daria 0,232. Registrado e nao corrigido: §8.6 pede o DSR, que"
+    " e procedimento publicado, e trocar o `n` faria a conta deixar de ser ele"
+)
+
 #: Fixo, e não derivado: é o que a Fase 0 **não** responde mesmo aprovando, e
 #: §14.4.1 escreve com todas as letras. Derivar dos dados permitiria que a
 #: lista encolhesse sozinha.
@@ -71,6 +101,28 @@ O_QUE_APROVAR_NAO_SIGNIFICA = [
     " (§8.4.1.1, §14.4.1). Continua nao existindo `place_order`.",
     "Uma candidata retrospectiva e o INSUMO da 0C, e nao um resultado: a"
     " conclusao sobre edge pertence a ela.",
+]
+
+#: O que a 0B **não** respondeu, aprovando ou não. Fixo pelo mesmo motivo que a
+#: lista da 0A é fixa: uma proibição que se calcula dos dados é uma proibição
+#: que pode desaparecer sozinha.
+A_0B_NAO_RESPONDE = [
+    "Nada sobre mercado ao vivo. Toda evidencia e RETROSPECTIVA, em fidelidade"
+    " 1, sobre uma janela fixa de um instrumento so. §8.5 reserva o forward"
+    " para a 0C, e sem ele nao ha `n_efetivo` ALCANCADO - so calculado.",
+    "Nada sobre cobertura de regimes. A taxonomia e o detector de regimes sao"
+    " anteriores a 0C (§19.2), e sem eles nao se sabe se a janela testada"
+    " continha os regimes que importam.",
+    "Nada sobre fidelidade de book: sem spread real, sem fila, sem"
+    " preenchimento maker (§8.4.1). O simulador e pessimista por construcao, e"
+    " isso nao e o mesmo que ser realista.",
+    "Nada sobre mais de um agente. Um agente, um perfil `neutro@1`, uma"
+    " familia fechada. FDR online (LORD, SAFFRON) e bloqueante para a Fase 1 e"
+    " nao foi construido (§19.1).",
+    "O poder medido em A1b e LIMITE SUPERIOR: o horizonte usado e o in-sample"
+    " inteiro, e uma hipotese real observa so as barras em que esteve com"
+    " posicao aberta.",
+    LIMITE_DO_DSR,
 ]
 
 
@@ -333,6 +385,52 @@ def _uma_candidata(
     }
 
 
+def _resposta(portao_a: dict, *, avaliado: bool, passaram: list) -> dict:
+    """A resposta da FASE, derivada dos dois portões.
+
+    O critério 8 do incremento 14 pede que o relatório da 0B declare o que a
+    fase **não** respondeu, como o da 0A fez. E a resposta em si é derivada,
+    nunca digitada: ela é a conjunção dos dois portões, e cada um deles já é a
+    conjunção de condições que saem de consulta.
+
+    §19.4 antecipa o desfecho e o chama pelo nome: *"passar no Portão A e
+    falhar no Portão B é o cenário mais provável, e perfeitamente aceitável"*.
+    Um relatório que tratasse isso como fracasso estaria contrariando o
+    documento no ponto em que ele é mais explícito.
+    """
+    a_passou = bool(portao_a["passa"])
+    return {
+        "pergunta_da_fase": "o protocolo rejeita defeito?",
+        "portao_a_passou": a_passou,
+        "portao_b_avaliado": avaliado,
+        "ha_candidata": bool(passaram),
+        "o_que_a_fase_respondeu": (
+            "o protocolo rejeita defeito: os seis controles deterministicos"
+            " foram injetados pelo mesmo caminho das reais e NENHUM foi"
+            " promovido, e o calibre das nulas estocasticas ficou dentro do"
+            " FDR pre-registrado nos dois desenhos"
+            if a_passou
+            else "nada ainda: o Portao A e eliminatorio e nao passou"
+        ),
+        "e_o_que_isso_significa": (
+            None
+            if not a_passou
+            else (
+                "existe candidata digna de auditoria, e §14.4.1 manda trata-la"
+                " como SUSPEITA DE DEFEITO ate prova em contrario"
+                if passaram
+                else
+                "nenhuma candidata sobreviveu aos seis criterios. §19.4 chama"
+                " isso pelo nome: passar no Portao A e falhar no B e 'o"
+                " cenario mais provavel, e perfeitamente aceitavel' - o valor"
+                " da fase esta no protocolo que funciona, e nao numa"
+                " estrategia que nao apareceu"
+            )
+        ),
+        "nao_respondeu": A_0B_NAO_RESPONDE,
+    }
+
+
 def montar(
     conn: sqlite3.Connection,
     *,
@@ -375,6 +473,7 @@ def montar(
                 "reprovando": a["reprovando"],
                 "pendentes": a["pendentes"],
             },
+            "resposta_da_0b": _resposta(a, avaliado=False, passaram=[]),
             "o_que_aprovar_nao_significa": O_QUE_APROVAR_NAO_SIGNIFICA,
         }
 
@@ -421,5 +520,6 @@ def montar(
             if passaram
             else None
         ),
+        "resposta_da_0b": _resposta(a, avaliado=True, passaram=passaram),
         "o_que_aprovar_nao_significa": O_QUE_APROVAR_NAO_SIGNIFICA,
     }

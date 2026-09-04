@@ -446,3 +446,61 @@ def test_empate_por_credito_nao_e_o_mesmo_que_perder(
         assert "14.3" in pc["o_que_o_empate_significa"]
         if pc["ambos_zerados"]:
             assert "nada passou" in pc["o_que_o_empate_significa"]
+
+
+def test_a_resposta_da_fase_e_derivada_dos_dois_portoes(
+    conn: sqlite3.Connection, cenario_com_agente
+) -> None:
+    """Criterio 8 do incremento 14: o relatorio declara o que a fase NAO respondeu.
+
+    E a resposta em si e derivada, nunca digitada: ela e a conjuncao dos dois
+    portoes, e cada um ja e a conjuncao de condicoes que saem de consulta.
+
+    Com o A pendente, a fase nao respondeu nada - e o texto diz isso em vez de
+    ficar em silencio.
+    """
+    dataset_id, cfg, _ = cenario_com_agente
+    r = _b(conn, dataset_id, cfg)["resposta_da_0b"]
+    assert r["portao_a_passou"] is False
+    assert r["portao_b_avaliado"] is False
+    assert "eliminatorio" in r["o_que_a_fase_respondeu"]
+    assert r["e_o_que_isso_significa"] is None
+
+
+def test_falhar_no_B_depois_de_passar_no_A_e_chamado_pelo_nome(
+    conn: sqlite3.Connection, com_a_aprovado
+) -> None:
+    """§19.4: passar no A e falhar no B e "o cenario mais provavel, e
+    perfeitamente aceitavel".
+
+    Um relatorio que tratasse isso como fracasso estaria contrariando o
+    documento no ponto em que ele e mais explicito - e este e o desfecho que a
+    0B de fato teve.
+    """
+    dataset_id, cfg, _ = com_a_aprovado
+    r = _b(conn, dataset_id, cfg)["resposta_da_0b"]
+    assert r["portao_a_passou"] is True
+    assert r["portao_b_avaliado"] is True
+    if not r["ha_candidata"]:
+        assert "19.4" in r["e_o_que_isso_significa"]
+        assert "perfeitamente aceitavel" in r["e_o_que_isso_significa"]
+        assert "protocolo que funciona" in r["e_o_que_isso_significa"]
+
+
+def test_a_fase_declara_o_limite_do_DSR_em_vez_de_esconde_lo(
+    conn: sqlite3.Connection, cenario_com_agente
+) -> None:
+    """As duas partes discordam sobre o que e "a amostra", e isso fica escrito.
+
+    O veredito usa `n_efetivo` descontado por autocorrelacao (§8.3); o DSR usa
+    o `n` bruto, que e o da formula publicada. A discordancia corre para o lado
+    de APROVAR - o unico lugar deste projeto onde uma escolha erra nessa
+    direcao - e por isso ela e declarada em vez de corrigida em silencio.
+    """
+    from app.relatorio import portao_b
+
+    dataset_id, cfg, _ = cenario_com_agente
+    r = _b(conn, dataset_id, cfg)["resposta_da_0b"]
+    assert portao_b.LIMITE_DO_DSR in r["nao_respondeu"]
+    assert "APROVAR" in portao_b.LIMITE_DO_DSR
+    assert "publicado" in portao_b.LIMITE_DO_DSR
