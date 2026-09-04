@@ -210,6 +210,57 @@ def _a3(conn: sqlite3.Connection, dataset_id: int | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# O IC foi definido ANTES do teste? (critério 6 do incremento 13)
+# ---------------------------------------------------------------------------
+
+
+def _ic_antes_do_teste(
+    conn: sqlite3.Connection, config_version_id: int
+) -> dict:
+    """A data da config que fixou o IC é anterior à primeira execução de A1b?
+
+    §14.4 pede "IC definido **antes** do teste", e o critério 6 do plano é
+    explícito sobre a forma: *"verificável no histórico da config, não na nossa
+    palavra"*. Então isto é uma comparação de datas entre duas tabelas
+    append-only, e não uma afirmação nossa de que fomos honestos.
+
+    `None` quando ainda não há execução: não há ordem a conferir entre um
+    evento que aconteceu e outro que não aconteceu.
+    """
+    versao = conn.execute(
+        "SELECT created_at FROM config_version WHERE id = ?",
+        (config_version_id,),
+    ).fetchone()
+    primeira = conn.execute(
+        "SELECT MIN(created_at) AS quando FROM a1b_execucao"
+        " WHERE config_version_id = ?",
+        (config_version_id,),
+    ).fetchone()
+    quando_config = versao["created_at"] if versao else None
+    quando_a1b = primeira["quando"] if primeira else None
+    if quando_config is None or quando_a1b is None:
+        return {
+            "config_criada_em": quando_config,
+            "primeira_execucao_em": quando_a1b,
+            "antes": None,
+            "por_que": (
+                "ainda nao ha execucao de A1b sob esta config; nao ha ordem a"
+                " conferir entre um evento que aconteceu e outro que nao"
+            ),
+        }
+    return {
+        "config_criada_em": quando_config,
+        "primeira_execucao_em": quando_a1b,
+        "antes": quando_config < quando_a1b,
+        "por_que": (
+            "a config que fixou o IC e o numero de execucoes tem de ser"
+            " anterior a primeira execucao: um IC escolhido depois de ver a"
+            " proporcao e a regua trocada depois do resultado (§8.2)"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # A4 — integridade contábil como portão
 # ---------------------------------------------------------------------------
 
@@ -299,6 +350,7 @@ def montar(
     a2 = _a2(conn, config_version_id, config)
     a3 = _a3(conn, dataset_id)
     a4 = _a4(conn, config_version_id)
+    ic_antes = _ic_antes_do_teste(conn, config_version_id)
 
     def _do_desenho(nome: str, campo: str) -> bool | None:
         bloco = a1b["desenhos"].get(nome) or {}
@@ -336,6 +388,9 @@ def montar(
         "a1b_com_sinal_no_limite": _do_desenho(
             a1b_calibre.COM_SINAL, "limite_superior_ate_o_alvo"
         ),
+        # Criterio 6 do incremento 13. Comparacao de datas entre duas tabelas
+        # append-only, e nao uma afirmacao nossa de que fomos honestos.
+        "a1b_ic_definido_antes_do_teste": ic_antes["antes"],
         # A2 - o simulador e honesto.
         "a2_b1_negativo": a2["negativo"],
         "a2_b1_proporcional_ao_giro": a2["proporcional_ao_giro"],
@@ -384,6 +439,7 @@ def montar(
         },
         "a1a": a1a,
         "a1b": a1b,
+        "ic_antes_do_teste": ic_antes,
         "a2": a2,
         "a3": a3,
         "a4": a4,

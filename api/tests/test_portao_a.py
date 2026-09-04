@@ -550,8 +550,9 @@ def test_cada_condicao_do_portao_sai_de_uma_consulta(
     assert r["pergunta"] == "o protocolo rejeita defeito?"
     for nome, valor in r["condicoes"].items():
         assert valor is None or isinstance(valor, bool), (nome, valor)
-    # Dez condições, cobrindo A1a, A1b, A2, A3 e A4.
-    assert len(r["condicoes"]) == 10
+    # Onze condições, cobrindo A1a, A1b (dois desenhos e a data do IC), A2,
+    # A3 e A4.
+    assert len(r["condicoes"]) == 11
 
 
 def test_o_portao_tem_TRES_resultados_e_pendente_nao_e_passa(
@@ -752,6 +753,85 @@ def test_a4_confere_o_registro_nos_dois_sentidos(
     assert a4["hipoteses_na_tabela"] == a4["contador_global"]
     assert a4["conferencias"]["nenhuma_tentativa_some"] is True
     assert a4["conferencias"]["ledger_reconcilia"] is True
+
+
+def test_o_ic_definido_antes_do_teste_e_conferido_no_historico(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Critério 6 do incremento 13, e a forma dele é o ponto.
+
+    §14.4 pede "IC definido **antes** do teste", e o plano é explícito:
+    *"verificável no histórico da config, não na nossa palavra"*. Então isto é
+    uma comparação de datas entre duas tabelas append-only.
+
+    Sem execução gravada a resposta é `None` — não há ordem a conferir entre um
+    evento que aconteceu e outro que não aconteceu.
+    """
+    from app.a1b import braco as a1b_braco
+
+    dataset_id, cfg = cenario
+    r = _portao(conn, dataset_id, cfg)
+    assert r["ic_antes_do_teste"]["antes"] is None
+    assert r["condicoes"]["a1b_ic_definido_antes_do_teste"] is None
+
+    # Uma execução gravada, e a ordem passa a ser conferível.
+    a1b_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        quantas=1,
+    )
+    depois = _portao(conn, dataset_id, cfg)
+    bloco = depois["ic_antes_do_teste"]
+    assert bloco["config_criada_em"] is not None
+    assert bloco["primeira_execucao_em"] is not None
+    assert bloco["antes"] is True, (
+        "a config que fixou o IC nao e anterior a primeira execucao de A1b:"
+        " um IC escolhido depois de ver a proporcao e a regua trocada depois"
+        " do resultado"
+    )
+
+
+def test_a1b_grava_em_pedacos_sem_contar_a_mesma_execucao_duas_vezes(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """Rodar de novo não regrava: o UNIQUE recusa.
+
+    Contar a mesma execução duas vezes é o defeito mais fácil de produzir num
+    registro que cresce em pedaços — e ele inflaria ou desinflaria a proporção
+    sem que nada acusasse.
+    """
+    from app.a1b import braco as a1b_braco, registro
+
+    dataset_id, cfg = cenario
+    primeiro = a1b_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        quantas=2,
+    )
+    assert primeiro["gravadas_agora"] == 2
+    antes = len(registro.ler(conn, 1))
+
+    # O próximo pedaço pega índices NOVOS, e não repete os dois primeiros.
+    segundo = a1b_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        quantas=2,
+    )
+    assert segundo["gravadas_agora"] == 2
+    assert len(registro.ler(conn, 1)) == antes + 2
+
+    # E a mesma execução, pedida de novo pelo índice, é recusada.
+    from app.a1b import calibre
+
+    mags = calibre.magnitudes(
+        config=cfg, duracao_barra_ms=900_000, n_barras=900
+    )
+    repetida = calibre.uma(
+        indice=0, desenho=calibre.NULA_GLOBAL,
+        base_bps=_base_sintetica(), config=cfg, duracao_barra_ms=900_000,
+        n_barras=200, tentativas_globais=1, semente=42, mags=mags,
+    )
+    assert registro.gravar(
+        conn, [repetida], config_version_id=1, semente=42,
+        lote=cfg.a1b_lote, n_barras=200, tentativas_globais=1,
+    ) == 0
 
 
 def test_o_portao_b_nao_e_avaliado_enquanto_o_a_nao_passa(
