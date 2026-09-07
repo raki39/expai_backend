@@ -17,7 +17,7 @@ Essa é a **R83 reescrita**. A frase original da D32 — *"o único ganho é his
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                       # 53 testes
+python -m pytest                       # 62 testes
 
 COLETOR_DIR=./dados APP_ENV=local python -m coletor.main
 
@@ -142,3 +142,18 @@ APP_ENV=railway         sem volume montado, RECUSA subir
 `restartPolicyType = "ALWAYS"`, e não `ON_FAILURE`: se o coletor sair por qualquer motivo, o custo é dado perdido que não volta.
 
 **Não defina `DB_PATH` neste serviço.** Ele existe só para o pré-voo detectar colisão com o volume do experimento e recusar o boot.
+
+## O que procurar no log
+
+**Toda volta fala**, e a razão é concreta: com grade de 15 min e laço de 5, **duas em cada três voltas não têm o que enviar**. Enquanto só a volta produtiva falava, *funcionando e ocioso* ficava indistinguível de *quebrado e calado*.
+
+| evento | nível | o que significa |
+|---|---|---|
+| `coletor.entrega` | INFO | entregou. Olhe `validas` contra `enviadas` — é a cobertura |
+| `coletor.entrega_ociosa` | INFO | nada novo fechou. **Normal duas vezes em três** |
+| `coletor.entrega_sem_arquivo` | **WARNING** | nenhum arquivo cobre o período. Confira `COLETOR_DIR`, o prefixo e o volume |
+| `coletor.entrega_falhou` | WARNING | rede ou HTTP. Transitório, retoma sozinho |
+| `coletor.divergencia` | **ERROR** | mesma chave com conteúdo diferente. **Não se resolve reenviando** |
+| `coletor.entrega_quebrou` | ERROR | defeito nosso. A **coleta segue** |
+
+**`atraso_instantes` vai em toda volta**, inclusive nas ociosas — é ele que separa **atraso** de **lacuna** (ADR 0029). Zero significa que tudo que fechou já está na `api`.

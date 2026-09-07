@@ -475,4 +475,70 @@ def test_sem_arquivo_nenhum_a_volta_nao_inventa_periodo(tmp_path):
     finally:
         m.envio.ponto_de_retomada = orig
     assert r["enviadas"] == 0
-    assert "arquivo" in r["motivo"]
+    # `estado`, e nao `motivo`: o campo virou uma lista fechada quando a volta
+    # ociosa passou a falar, porque o log precisa distinguir "nada novo" de
+    # "nenhum arquivo" - e texto livre nao distingue nada.
+    assert r["estado"] == "sem_arquivo"
+
+
+# ===========================================================================
+# Toda volta fala: "ocioso" e "quebrado" nao podem ter a mesma cara
+# ===========================================================================
+
+
+def _volta(tmp_path, *, retomar, agora_ms, enviar=None):
+    import coletor.entrega as m
+
+    def falso_ponto(*_a, **_k):
+        return {"retomar_de_ms": retomar, "grade_ms": GRADE,
+                "tolerancia_ms": 2_000}
+
+    orig = m.envio.ponto_de_retomada, m.envio.enviar
+    m.envio.ponto_de_retomada = falso_ponto
+    m.envio.enviar = enviar or (lambda _d, **kw: {
+        "aceitas": len(kw["observacoes"]), "repetidas": 0})
+    try:
+        return m.uma_volta(
+            envio.Destino("http://x", "t", "s"), tmp_path, "bookticker-btcusdt",
+            venue="binance", symbol="BTCUSDT", agora_ms=agora_ms,
+        )
+    finally:
+        m.envio.ponto_de_retomada, m.envio.enviar = orig
+
+
+def test_volta_sem_nada_novo_diz_EM_DIA_e_nao_fica_calada(tmp_path):
+    """Com grade de 15 min e laco de 5, DUAS EM TRES voltas nao enviam nada.
+
+    Enquanto so a volta produtiva falava, "funcionando e ocioso" ficava
+    indistinguivel de "quebrado e calado" - e foi exatamente essa a duvida que
+    a primeira operacao real produziu.
+    """
+    dia = arquivo.dia_utc(T0 * 1_000_000)
+    escrever(tmp_path, [linha_relogio(), linha_amostra(T0 - 500 + 2_450)], dia=dia)
+    r = _volta(tmp_path, retomar=T0 + GRADE, agora_ms=T0 + GRADE + 60_000)
+    assert r["estado"] == "em_dia"
+    assert r["atraso_instantes"] == 0
+
+
+def test_sem_arquivo_e_ALERTA_e_nao_silencio(tmp_path):
+    """O coletor esta gravando agora. Se nenhum arquivo cobre o periodo, ou o
+    prefixo mudou, ou o volume sumiu - e nada disso pode sair pelo mesmo
+    silencio de uma volta ociosa.
+    """
+    r = _volta(tmp_path, retomar=T0, agora_ms=T0 + 4 * GRADE)
+    assert r["estado"] == "sem_arquivo"
+    assert r["atraso_instantes"] == 4, "o atraso e visivel mesmo sem arquivo"
+
+
+def test_o_ATRASO_vai_em_toda_volta(tmp_path):
+    """E o numero que separa atraso de lacuna, que e a distincao do ADR 0029."""
+    dia = arquivo.dia_utc(T0 * 1_000_000)
+    linhas = [linha_relogio()] + [
+        linha_amostra(T0 - 500 + 2_450 + i * GRADE) for i in range(4)
+    ]
+    escrever(tmp_path, linhas, dia=dia)
+    r = _volta(tmp_path, retomar=T0, agora_ms=T0 + 3 * GRADE + 60_000)
+    assert r["estado"] == "entregue"
+    assert r["enviadas"] == 3
+    assert r["atraso_instantes"] == 0, "entregou tudo o que fechou"
+    assert r["ultimo_entregue_ms"] == T0 + 2 * GRADE

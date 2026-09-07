@@ -132,20 +132,30 @@ def uma_volta(
 
     # A fronteira: o inicio da barra CORRENTE, exclusivo.
     ate_ms = agora // grade * grade
+
+    # ATRASO em instantes de grade: quantos ja fecharam e ainda nao foram
+    # entregues. E o numero operacional, e vai em TODA volta - inclusive nas
+    # que nao enviam nada.
+    atraso = max(0, (ate_ms - de_ms) // grade)
+    base = {"enviadas": 0, "atraso_instantes": atraso,
+            "ultimo_entregue_ms": de_ms - grade}
+
     if ate_ms <= de_ms:
-        return {"enviadas": 0, "motivo": "nenhum instante fechado novo"}
+        return {**base, "estado": "em_dia"}
 
     arquivos = arquivos_do_periodo(diretorio, prefixo, de_ms, ate_ms)
     if not arquivos:
-        return {"enviadas": 0, "motivo": "nenhum arquivo cobre o periodo",
-                "de_ms": de_ms, "ate_ms": ate_ms}
+        # NAO e silencio normal. O coletor esta gravando agora; se nenhum
+        # arquivo cobre o periodo, ou o prefixo mudou, ou o volume sumiu, ou o
+        # relogio esta em outro ano. Sai como alerta.
+        return {**base, "estado": "sem_arquivo", "de_ms": de_ms, "ate_ms": ate_ms}
 
     observacoes = extracao.extrair(
         arquivos, de_ms=de_ms, ate_ms_exclusive=ate_ms,
         grade_ms=grade, tolerancia_ms=tolerancia,
     )
     if not observacoes:
-        return {"enviadas": 0, "motivo": "nada a extrair",
+        return {**base, "estado": "nada_a_extrair",
                 "de_ms": de_ms, "ate_ms": ate_ms}
 
     lote = observacoes[:MAX_LOTE]
@@ -155,6 +165,7 @@ def uma_volta(
     )
     validas = sum(1 for o in lote if o.disponivel)
     return {
+        "estado": "entregue",
         "enviadas": len(lote),
         "validas": validas,
         "indisponiveis": len(lote) - validas,
@@ -163,6 +174,8 @@ def uma_volta(
         "de_ms": lote[0].t_grid_ms,
         "ate_ms": lote[-1].t_grid_ms,
         "restantes": len(observacoes) - len(lote),
+        "atraso_instantes": atraso - len(lote),
+        "ultimo_entregue_ms": lote[-1].t_grid_ms,
     }
 
 
@@ -198,8 +211,25 @@ async def entregar(
                 uma_volta, destino, diretorio, prefixo,
                 venue=venue, symbol=symbol,
             )
-            if r.get("enviadas"):
+            # TODA volta diz alguma coisa, e a razao e concreta: com grade de
+            # 15 min e laco de 5, DUAS EM TRES voltas nao tem o que enviar.
+            # Enquanto so a volta produtiva falava, "funcionando e ocioso"
+            # ficava indistinguivel de "quebrado e calado" - e `sem_arquivo`,
+            # que e problema de verdade, saia pelo mesmo silencio.
+            #
+            # E o que se procura no log passa a ser `atraso_instantes`: ele
+            # separa atraso de lacuna, que e a distincao do ADR 0029.
+            estado = r.get("estado")
+            if estado == "sem_arquivo":
+                log.warning("coletor.entrega_sem_arquivo", extra={
+                    **r,
+                    "acao": "conferir COLETOR_DIR, o prefixo do arquivo e o "
+                            "volume montado - o coletor esta gravando agora",
+                })
+            elif estado == "entregue":
                 log.info("coletor.entrega", extra=r)
+            else:
+                log.info("coletor.entrega_ociosa", extra=r)
         except envio.DivergenciaRecusada as e:
             # ERRO ALTO, e nao se resolve reenviando.
             log.error("coletor.divergencia", extra={"erro": str(e)})
