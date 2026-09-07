@@ -1190,9 +1190,27 @@ def test_GARANTIA_6_o_ajuste_NAO_altera_run_anterior(conn, cfg):
     assert depois.config_hash == hash_antes
     assert depois.config.spread_bps == spread_antes
 
-    # E a nova tem o spread ajustado.
+    # E a BASE também não muda na versão nova (ADR 0033): ela é a hipótese
+    # original. Este teste exigia o contrário até o usuário corrigir o
+    # desenho - o ajuste subia o campo global, e o valor medido em `vol_baixa`
+    # acabava aplicado em `vol_alta`, onde nada foi observado.
     nova = config_service.versao_por_id(conn, r["config_version_nova"])
-    assert nova.config.spread_bps > spread_antes
+    assert nova.config.spread_bps == spread_antes, (
+        "a base é hipótese, e a calibração não a reescreve"
+    )
+    assert nova.config_hash == hash_antes, (
+        "o payload é idêntico: o que muda é o perfil, e ele vive FORA do hash"
+    )
+
+    # O que mudou é o perfil, referenciado por hash na coluna da tabela.
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.da_config_version(conn, r["config_version_nova"])
+    assert p is not None
+    assert p.hash == r["calibracao_perfil_hash"]
+    assert perfil_mod.da_config_version(conn, cfg.id) is None, (
+        "a versão antiga não ganha perfil nenhum"
+    )
 
 
 def test_GARANTIA_8_o_B1_negativo_e_reexecutado_sob_a_versao_CALIBRADA(
@@ -1268,3 +1286,242 @@ def test_a_revalidacao_VAZIA_nao_consome_a_janela(conn, cfg, client):
     janela = ajuste.ler_revalidacao(
         conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
     assert janela["consumida"] is False
+
+
+# ===========================================================================
+# ADR 0033: o override é POR REGIME
+#
+# "Usar o maior valor observado não significa ser pessimista onde nada foi
+#  observado. A etiqueta de 'não calibrado' não corrigiria o preço usado."
+# ===========================================================================
+
+
+def ov(regime: str, spread_x1000: int):
+    from app.calibracao.perfil import Override
+
+    return Override(regime=regime, spread_bps_x1000=spread_x1000,
+                    n=500, p10_mili_bps=163)
+
+
+def test_regime_SEM_override_usa_a_BASE_e_nunca_o_de_outro(conn, cfg):
+    """O ponto inteiro do ADR 0033.
+
+    O máximo sobre uma amostra de regimes não é limite superior para os
+    regimes fora dela - e `vol_alta` é, por construção da taxonomia, o tercil
+    de MAIOR volatilidade, onde o custo tende a ser pior.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+    )
+
+    assert p.spread_bps_x1000("vol_baixa") == (1_674, True)
+    assert p.spread_bps_x1000("vol_media") == (1_000, False), (
+        "usou o override de vol_baixa num regime onde nada foi observado"
+    )
+    assert p.spread_bps_x1000("vol_alta") == (1_000, False)
+    assert p.spread_bps_x1000(None) == (1_000, False)
+
+
+def test_INDEFINIDO_nunca_herda_parametro_de_ninguem(conn, cfg):
+    """Ele não é um quarto regime: é a declaração de que faltam 672 barras."""
+    from app.calibracao import perfil as perfil_mod
+
+    with pytest.raises(perfil_mod.RegimeInvalido) as e:
+        perfil_mod.gravar(
+            conn, spread_bps_base_x1000=1_000,
+            overrides=[ov("indefinido", 1_674)],
+        )
+    assert "nunca pode herdar" in str(e.value)
+
+
+def test_o_BANCO_tambem_recusa_override_para_indefinido(conn, cfg):
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.gravar(conn, spread_bps_base_x1000=1_000, overrides=[])
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
+            " spread_bps_x1000, n, p10_mili_bps) VALUES (?, 'indefinido', 1, 1, 1)",
+            (p.hash,),
+        )
+
+
+def test_a_AUSENCIA_de_linha_e_a_informacao(conn, cfg):
+    """Gravar uma linha com valor "herdado" tornaria a herança invisível; a
+    ausência a torna impossível."""
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+    )
+    linhas = [
+        r["regime"] for r in conn.execute(
+            "SELECT regime FROM calibracao_perfil_regime WHERE perfil_hash = ?",
+            (p.hash,),
+        )
+    ]
+    assert linhas == ["vol_baixa"], "só o regime calibrado tem linha"
+
+
+def test_o_hash_do_perfil_inclui_a_TAXONOMIA(conn, cfg, monkeypatch):
+    """Se os cortes da D40 mudassem, `vol_alta` passaria a nomear outra coisa
+    e o override deixaria de descrever o que descrevia.
+
+    Sem a taxonomia no hash, o perfil sobreviveria a uma mudança que o
+    invalida - e sobreviveria calado.
+    """
+    from app.calibracao import perfil as perfil_mod
+    from app.regime import deteccao
+
+    antes = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+    )
+    monkeypatch.setattr(deteccao, "CORTE_SUPERIOR_MILI_BPS", 25_400)
+    depois = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+    )
+    assert antes != depois
+
+
+def test_o_hash_nao_depende_da_ORDEM_de_insercao(conn, cfg):
+    from app.calibracao import perfil as perfil_mod
+
+    a = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000,
+        overrides=[ov("vol_alta", 2_000), ov("vol_baixa", 1_674)],
+    )
+    b = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000,
+        overrides=[ov("vol_baixa", 1_674), ov("vol_alta", 2_000)],
+    )
+    assert a == b
+
+
+def test_gravar_e_IDEMPOTENTE_pelo_hash(conn, cfg):
+    from app.calibracao import perfil as perfil_mod
+
+    a = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+    b = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+    assert a.hash == b.hash
+    assert conn.execute(
+        "SELECT COUNT(*) FROM calibracao_perfil").fetchone()[0] == 1
+
+
+def test_o_perfil_e_IMUTAVEL(conn, cfg):
+    from app.calibracao import perfil as perfil_mod
+
+    perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE calibracao_perfil SET spread_bps_base_x1000 = 2")
+    assert "perfil NOVO" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE calibracao_perfil_regime SET spread_bps_x1000 = 2")
+    assert "recalibrar sem dizer" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("DELETE FROM calibracao_perfil_regime")
+    assert "voltar silenciosamente para a base" in str(e.value)
+
+
+def test_o_vinculo_e_feito_no_INSERT_e_a_linha_nao_muda(conn, cfg):
+    """Trocar o perfil de uma versão mudaria o preço de tudo que rodou sob ela.
+
+    E isso é impossível porque `config_version` é imutável por gatilho - não
+    porque alguém confere. Eu havia escrito uma função `vincular` que fazia
+    `UPDATE` com uma checagem por cima: ela **nunca poderia funcionar**, e uma
+    função sem caminho é a forma do `BLOCOS`.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    assert not hasattr(perfil_mod, "vincular"), (
+        "função que o banco impede de rodar não deve existir"
+    )
+    a = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute(
+            "UPDATE config_version SET calibracao_perfil_hash = ? WHERE id = ?",
+            (a.hash, cfg.id),
+        )
+    assert "imutavel" in str(e.value)
+
+
+# --------------------------------------------- o efeito no preço, de verdade
+
+
+def test_o_override_MUDA_o_preco_e_a_base_NAO(conn, cfg):
+    """Sem isto, "por regime" seria só uma etiqueta - e uma etiqueta não
+    corrige um preço."""
+    from decimal import Decimal
+
+    from app.calibracao import observacao as obs
+
+    base = obs.prever(ABERTURA, "compra", cfg.config)
+    com_override = obs.prever(
+        ABERTURA, "compra", cfg.config, spread_bps=Decimal("1.674")
+    )
+    assert com_override > base
+    # +0,337 bps = metade de (1,674 − 1,000), que é o déficit por lado.
+    assert (com_override - base) / ABERTURA * 10_000 == pytest.approx(
+        0.337, abs=0.001
+    )
+
+
+def test_SEM_override_o_preco_e_BYTE_A_BYTE_o_historico(conn, cfg):
+    """R12 vale sem asterisco: todo caminho que existia continua passando
+    `None` e lendo `config.spread_bps`."""
+    from app.simulador.execucao import preco_executado
+
+    for lado in ("compra", "venda"):
+        assert preco_executado(ABERTURA, lado, cfg.config) == preco_executado(
+            ABERTURA, lado, cfg.config, spread_bps=None
+        )
+        assert preco_executado(
+            ABERTURA, lado, cfg.config
+        ) == preco_executado(
+            ABERTURA, lado, cfg.config, spread_bps=cfg.config.spread_bps
+        )
+
+
+# ------------------------------------ a fidelidade fica INCONCLUSIVA, não falsa
+
+
+def test_regime_nao_calibrado_deixa_o_resultado_INCONCLUSIVO(conn, cfg):
+    """Não reprovado, não aprovado - a forma que §8.4.1.1 dá ao nível de
+    fidelidade."""
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+
+    f = perfil_mod.fidelidade(p, ["vol_baixa", "vol_baixa"])
+    assert f.conclusiva is True
+
+    f = perfil_mod.fidelidade(p, ["vol_baixa", "vol_alta"])
+    assert f.conclusiva is False
+    assert f.regimes_nao_calibrados == ["vol_alta"]
+    assert "INCONCLUSIVO" in f.motivo
+    assert "shadow segue rodando" in f.motivo
+
+
+def test_periodo_so_com_INDEFINIDO_tambem_e_inconclusivo(conn, cfg):
+    from app.calibracao import perfil as perfil_mod
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+    f = perfil_mod.fidelidade(p, [None, None])
+    assert f.conclusiva is False
+    assert f.regimes_nao_calibrados == ["indefinido"]
+
+
+def test_SEM_perfil_nenhum_regime_e_calibrado(conn, cfg):
+    """As versões antigas não têm perfil, e é assim de propósito."""
+    from app.calibracao import perfil as perfil_mod
+
+    f = perfil_mod.fidelidade(None, ["vol_baixa"])
+    assert f.conclusiva is False
+    assert f.regimes_nao_calibrados == ["vol_baixa"]

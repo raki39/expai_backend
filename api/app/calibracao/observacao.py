@@ -96,7 +96,8 @@ def _mili_bps(delta: int, base: int) -> int:
 
 
 def prever(
-    abertura: int, lado: str, config: ExperimentConfig
+    abertura: int, lado: str, config: ExperimentConfig,
+    *, spread_bps: Decimal | None = None,
 ) -> int:
     """O preco que o simulador preve para uma ordem neste instante.
 
@@ -115,7 +116,9 @@ def prever(
         volume=0, quote_volume=0, trades=0,
     )
     ref = preco_referencia(barra, lado, config)  # type: ignore[arg-type]
-    return preco_executado(ref, lado, config)  # type: ignore[arg-type]
+    return preco_executado(  # type: ignore[arg-type]
+        ref, lado, config, spread_bps=spread_bps
+    )
 
 
 def calcular(

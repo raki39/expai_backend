@@ -178,14 +178,27 @@ def preco_adverso(barra: loader.BarraCarregada, lado: Lado) -> int:
     return barra.high if lado == "compra" else barra.low
 
 
-def preco_executado(price_ref: int, lado: Lado, config: ExperimentConfig) -> int:
+def preco_executado(
+    price_ref: int, lado: Lado, config: ExperimentConfig,
+    *, spread_bps: Decimal | None = None,
+) -> int:
     """A referencia piorada por spread, slippage e penalidade.
 
     O spread entra pela metade porque o valor configurado e o spread CHEIO, e
     quem atravessa paga meia distancia ate o meio do book em cada ponta.
+
+    `spread_bps` sobrescreve o da config, e existe para o **override por
+    regime** do ADR 0033: o valor calibrado num regime nao pode ser aplicado
+    noutro, porque o maior valor OBSERVADO nao e limite superior para o que
+    nao foi observado.
+
+    **`None` reproduz o comportamento historico byte a byte.** Todo caminho
+    que existia antes continua passando `None` e lendo `config.spread_bps` -
+    R12 vale sem asterisco, e ha teste conferindo.
     """
+    efetivo = config.spread_bps if spread_bps is None else spread_bps
     ajuste = (
-        config.spread_bps / 2 + config.slippage_bps + config.penalty_bps
+        efetivo / 2 + config.slippage_bps + config.penalty_bps
     ) / BPS
     if lado == "compra":
         # Para CIMA: pagar mais.

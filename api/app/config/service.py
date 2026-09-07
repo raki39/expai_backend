@@ -221,16 +221,22 @@ def _inserir_versao(
     parent_id: int | None,
     mudancas: list[tuple[str, object, object]],
     note: str,
+    calibracao_perfil_hash: str | None = None,
 ) -> VersaoConfig:
-    material = any(campo_material(campo) for campo, _, _ in mudancas)
+    # Trocar de perfil e material por si so: ele muda o preco que o simulador
+    # usa, mesmo com o payload identico.
+    material = (
+        any(campo_material(campo) for campo, _, _ in mudancas)
+        or calibracao_perfil_hash is not None
+    )
 
     conn.execute("BEGIN")
     try:
         cur = conn.execute(
             "INSERT INTO config_version"
             " (created_at, author, parent_version_id, payload_json,"
-            "  config_hash, material, note)"
-            " VALUES (datetime('now'), ?, ?, ?, ?, ?, ?)",
+            "  config_hash, material, note, calibracao_perfil_hash)"
+            " VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?)",
             (
                 author,
                 parent_id,
@@ -238,6 +244,7 @@ def _inserir_versao(
                 config.config_hash(),
                 1 if material else 0,
                 note,
+                calibracao_perfil_hash,
             ),
         )
         version_id = int(cur.lastrowid)
@@ -455,10 +462,23 @@ def criar_versao(
     alteracoes: dict,
     author: str,
     note: str = "",
+    calibracao_perfil_hash: str | None = None,
 ) -> VersaoConfig:
     """Aplica `alteracoes` sobre a versao vigente e grava uma nova.
 
     Levanta `ConfigCongelada`, `TetoExcedido` ou `SemMudanca`.
+
+    ## O perfil de calibracao entra FORA do payload (ADR 0033)
+
+    `config_hash` serializa o modelo inteiro, entao um campo novo em
+    `ExperimentConfig` mudaria o hash recomputado de **toda versao ja
+    gravada**. O perfil e uma COLUNA da tabela, `NULL` nas antigas.
+
+    E trocar de perfil E mudanca material, mesmo com o payload identico: ele
+    muda o preco que o simulador usa. Por isso ele conta como mudanca para
+    efeito de `SemMudanca` - sem isso, calibrar sem mexer no `spread_bps` base
+    seria recusado por "nao muda nenhum campo", que seria verdade sobre o
+    payload e falso sobre o experimento.
     """
     atual = versao_atual(conn)
     if atual is None:
@@ -480,9 +500,21 @@ def criar_versao(
     _checar_teto(nova, settings)
 
     mudancas = atual.config.diff(nova)
-    if not mudancas:
+    perfil_mudou = calibracao_perfil_hash is not None and (
+        calibracao_perfil_hash != _perfil_da_versao(conn, atual.id)
+    )
+    if not mudancas and not perfil_mudou:
         raise SemMudanca("a alteracao nao muda nenhum campo")
 
     return _inserir_versao(
-        conn, nova, author=author, parent_id=atual.id, mudancas=mudancas, note=note
+        conn, nova, author=author, parent_id=atual.id, mudancas=mudancas,
+        note=note, calibracao_perfil_hash=calibracao_perfil_hash,
     )
+
+
+def _perfil_da_versao(conn: sqlite3.Connection, version_id: int) -> str | None:
+    linha = conn.execute(
+        "SELECT calibracao_perfil_hash FROM config_version WHERE id = ?",
+        (version_id,),
+    ).fetchone()
+    return None if linha is None else linha["calibracao_perfil_hash"]

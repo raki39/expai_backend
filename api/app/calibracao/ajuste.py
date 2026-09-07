@@ -48,7 +48,7 @@ from ..aovivo import bbo
 from ..config.schema import ExperimentConfig
 from ..regime import deteccao
 from ..store import bloco_atomico
-from . import bootstrap, observacao, piloto
+from . import bootstrap, observacao, perfil as perfil_mod, piloto
 
 log = logging.getLogger(__name__)
 
@@ -317,53 +317,83 @@ class Ajuste:
     spread_bps_x1000_depois: int
     aplicavel: bool
     motivo: str
+    overrides: list = None  # type: ignore[assignment]
 
 
 def derivar(estimativa: Estimativa, config: ExperimentConfig) -> Ajuste:
-    """O novo `spread_bps`. **Nunca mais otimista.** Garantia 5.
+    """Os overrides POR REGIME. **Nunca mais otimista.** Garantias 4 e 5.
 
-    Entre os regimes CALIBRADOS toma-se o mais pessimista, e o resultado ainda
-    e comparado com a config vigente por `max`. As duas coisas juntas tornam
-    impossivel que este caminho reduza custo - e nao por disciplina: nao ha
-    ramo que devolva valor menor.
+    ## O que esta funcao deixou de fazer, e por que
+
+    A primeira versao tomava o **maximo entre os regimes calibrados** e o
+    aplicava num campo unico. O usuario a corrigiu, e o argumento e aritmetico
+    antes de ser filosofico:
+
+        "Usar o maior valor observado nao significa ser pessimista onde nada
+         foi observado."
+
+    O maximo sobre uma amostra de regimes nao e limite superior para os
+    regimes fora dela - e `vol_alta` e, por construcao da taxonomia, o tercil
+    de MAIOR volatilidade, onde o custo tende a ser pior. Aplicar ali um numero
+    medido no tercil mais calmo e otimismo com cara de conservadorismo.
+
+    Hoje cada regime calibrado ganha o **seu** override, e regime sem amostra
+    fica **sem linha** - usando a base, que e hipotese declarada e nao medicao
+    emprestada.
+
+    A garantia 5 continua valendo, agora POR REGIME: cada override e comparado
+    com a base por `max`, entao nenhum deles pode reduzir custo.
     """
-    vigente = int(Decimal(str(config.spread_bps)) * 1000)
-    calibrados = estimativa.calibrados
+    base = int(Decimal(str(config.spread_bps)) * 1000)
+    overrides: list[perfil_mod.Override] = []
+    for r in estimativa.calibrados:
+        pedido = r.spread_bps_x1000 or base
+        overrides.append(perfil_mod.Override(
+            regime=r.regime,
+            spread_bps_x1000=max(base, pedido),
+            n=r.n,
+            p10_mili_bps=int(round(r.p10_mili_bps or 0)),
+        ))
 
-    if not calibrados:
+    sem_override = [
+        r.regime for r in estimativa.por_regime
+        if r.regime != "indefinido" and r.estado != "calibrado"
+    ]
+
+    if not overrides:
         return Ajuste(
-            spread_bps_x1000_antes=vigente,
-            spread_bps_x1000_depois=vigente,
-            aplicavel=False,
+            spread_bps_x1000_antes=base, spread_bps_x1000_depois=base,
+            aplicavel=False, overrides=[],
             motivo="nenhum regime alcancou a amostra necessaria para δ = 0,5 "
                    "bps. Nada e aplicado, e cada regime fica registrado como "
                    "nao_calibrado - que vira condicao de validade",
         )
 
-    pedido = max(r.spread_bps_x1000 or vigente for r in calibrados)
-    novo = max(vigente, pedido)
-
-    if novo == vigente:
+    subiram = [o for o in overrides if o.spread_bps_x1000 > base]
+    if not subiram:
         return Ajuste(
-            spread_bps_x1000_antes=vigente,
-            spread_bps_x1000_depois=vigente,
-            aplicavel=False,
-            motivo=f"a config vigente ({vigente / 1000:.3f} bps) ja e ao menos "
-                   f"tao pessimista quanto o alvo ({pedido / 1000:.3f} bps). "
+            spread_bps_x1000_antes=base, spread_bps_x1000_depois=base,
+            aplicavel=False, overrides=overrides,
+            motivo=f"a base ({base / 1000:.3f} bps) ja e ao menos tao "
+                   f"pessimista quanto o alvo em todo regime calibrado. "
                    f"MANTIDA - reduzir custo tornaria o simulador mais "
                    f"otimista, e esse e o unico erro que nao se pode cometer",
         )
 
-    nomes = ", ".join(r.regime for r in calibrados)
+    detalhe = ", ".join(
+        f"{o.regime} -> {o.spread_bps_x1000 / 1000:.3f}" for o in overrides
+    )
+    resto = (
+        f" Sem override, na base de {base / 1000:.3f}: "
+        f"{', '.join(sem_override)}." if sem_override else ""
+    )
     return Ajuste(
-        spread_bps_x1000_antes=vigente,
-        spread_bps_x1000_depois=novo,
-        aplicavel=True,
-        motivo=f"spread_bps sobe de {vigente / 1000:.3f} para "
-               f"{novo / 1000:.3f} bps, pelo regime mais pessimista entre os "
-               f"calibrados ({nomes}). `slippage_bps` e `penalty_bps` ficam "
-               f"INTACTOS: eles modelam impacto e atraso, e o topo de livro "
-               f"nao os observa",
+        spread_bps_x1000_antes=base,
+        spread_bps_x1000_depois=max(o.spread_bps_x1000 for o in overrides),
+        aplicavel=True, overrides=overrides,
+        motivo=f"override POR REGIME: {detalhe}.{resto} A base nao muda, e "
+               f"`slippage_bps` e `penalty_bps` ficam INTACTOS: eles modelam "
+               f"impacto e atraso, e o topo de livro nao os observa",
     )
 
 
@@ -475,18 +505,25 @@ def aplicar(
     ajuste = derivar(estimativa, config)
 
     nova_versao_id: int | None = None
+    perfil_hash: str | None = None
     if ajuste.aplicavel:
-        # UMA alteracao, e so ela. `criar_versao` aplica o delta sobre a
-        # vigente, entao nenhum outro campo e tocado por engano - e a
-        # `config_version` nova e imutavel como todas, o que faz a garantia 6
-        # sair de graca: cada run anterior continua apontando para a config
-        # sob a qual foi aberto, e nenhum resultado ja publicado muda.
-        versao = config_service.criar_versao(
+        # O PERFIL, e nao o `spread_bps` da config (ADR 0033).
+        #
+        # A base fica INTOCADA: ela e a hipotese original, e continua
+        # descrevendo o que descrevia. O que nasce e um perfil imutavel com
+        # override por regime, e a `config_version` nova o referencia POR
+        # HASH - numa coluna, fora do payload, para que o `config_hash` das
+        # versoes ja gravadas fique exatamente como sempre foi.
+        p = perfil_mod.gravar(
             conn,
-            settings,
-            {"spread_bps": str(Decimal(ajuste.spread_bps_x1000_depois) / 1000)},
-            author=autor,
-            note=f"calibracao do simulador (ADR 0027): {ajuste.motivo}",
+            spread_bps_base_x1000=ajuste.spread_bps_x1000_antes,
+            overrides=list(ajuste.overrides or []),
+        )
+        perfil_hash = p.hash
+        versao = config_service.criar_versao(
+            conn, settings, {}, author=autor,
+            note=f"calibracao por regime (ADR 0033): {ajuste.motivo}",
+            calibracao_perfil_hash=perfil_hash,
         )
         nova_versao_id = versao.id
 
@@ -531,6 +568,8 @@ def aplicar(
         "aplicado": ajuste.aplicavel,
         "config_version_origem": config_version_id,
         "config_version_nova": nova_versao_id,
+        "calibracao_perfil_hash": perfil_hash,
+        "spread_bps_base": ajuste.spread_bps_x1000_antes / 1000,
         "motivo": ajuste.motivo,
         "delta_mili_bps": DELTA_MILI_BPS,
         "estimativa": {

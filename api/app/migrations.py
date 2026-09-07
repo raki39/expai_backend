@@ -3108,6 +3108,131 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        24,
+        "incremento 18: perfil de calibracao com override por regime",
+        """
+        -- ==================================================================
+        -- PERFIL DE CALIBRACAO. ADR 0033.
+        --
+        -- O `spread_bps` da config permanece como HIPOTESE-BASE e nao e
+        -- tocado. O que a calibracao produz e um perfil com override POR
+        -- REGIME - porque o maior valor observado nao e limite superior para
+        -- o regime que nao foi observado, e `vol_alta` e por construcao o
+        -- tercil onde o custo tende a ser pior.
+        --
+        -- IMUTAVEL E ENDERECADO POR CONTEUDO: `hash` e sha256 sobre a
+        -- taxonomia declarada mais os overrides ordenados. Recalibrar produz
+        -- um perfil NOVO, e o antigo continua descrevendo os resultados
+        -- obtidos sob ele.
+        --
+        -- E ele CITA A TAXONOMIA por cortes e permanencia. Se a D40 mudasse,
+        -- "vol_alta" passaria a nomear outra coisa e o override deixaria de
+        -- descrever o que descrevia - o vinculo torna isso impossivel de
+        -- acontecer calado.
+        -- ==================================================================
+        CREATE TABLE calibracao_perfil (
+            hash TEXT PRIMARY KEY,
+
+            -- A taxonomia sob a qual os overrides foram medidos (ADR 0026).
+            taxonomia_corte_inferior_mili_bps INTEGER NOT NULL,
+            taxonomia_corte_superior_mili_bps INTEGER NOT NULL,
+            taxonomia_janela_barras           INTEGER NOT NULL,
+            taxonomia_permanencia_barras      INTEGER NOT NULL,
+
+            -- A base sobre a qual os overrides sao desvios. Guardada para que
+            -- ler o perfil nao exija ir buscar a config de origem.
+            spread_bps_base_x1000 INTEGER NOT NULL,
+
+            criado_em TEXT NOT NULL
+        );
+
+        -- NAO ha ponteiro de volta para `calibracao_versao`, e a ausencia foi
+        -- descoberta implementando: o perfil e gravado ANTES de a versao de
+        -- calibracao existir, entao preenche-lo depois exigiria um `UPDATE` -
+        -- que o proprio gatilho de imutabilidade recusa, e com razao.
+        --
+        -- E o vinculo ja existe pelo outro lado:
+        --
+        --   calibracao_versao.config_version_nova
+        --     -> config_version.calibracao_perfil_hash
+        --       -> calibracao_perfil.hash
+        --
+        -- Guardar o caminho de volta seria uma segunda fonte sobre o mesmo
+        -- fato, e a regra 16 diz o que acontece com essas.
+
+        CREATE TRIGGER calibracao_perfil_sem_update
+        BEFORE UPDATE ON calibracao_perfil
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_perfil e enderecado por conteudo: mudar um campo mudaria o hash, e o hash e a identidade - recalibrar cria um perfil NOVO');
+        END;
+
+        CREATE TRIGGER calibracao_perfil_sem_delete
+        BEFORE DELETE ON calibracao_perfil
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_perfil e imutavel: apagar deixaria orfaos os resultados que o citam');
+        END;
+
+        -- ==================================================================
+        -- O OVERRIDE, um por regime CALIBRADO.
+        --
+        -- A AUSENCIA DE LINHA E A INFORMACAO: regime sem linha usa o
+        -- valor-BASE, e nao o override de outro regime. Uma linha com valor
+        -- "herdado" tornaria a heranca invisivel; a ausencia a torna
+        -- impossivel.
+        --
+        -- `indefinido` NAO pode ter linha, e o CHECK impoe: ele nao e regime
+        -- da taxonomia, e sim a declaracao de que faltam 672 barras
+        -- anteriores para classificar.
+        -- ==================================================================
+        CREATE TABLE calibracao_perfil_regime (
+            perfil_hash TEXT NOT NULL REFERENCES calibracao_perfil(hash),
+            regime      TEXT NOT NULL CHECK (
+                regime IN ('vol_baixa', 'vol_media', 'vol_alta')
+            ),
+
+            spread_bps_x1000 INTEGER NOT NULL CHECK (spread_bps_x1000 > 0),
+
+            -- A procedencia do numero, para que ele nunca seja so um numero.
+            n            INTEGER NOT NULL,
+            p10_mili_bps INTEGER NOT NULL,
+
+            PRIMARY KEY (perfil_hash, regime)
+        );
+
+        CREATE TRIGGER calibracao_perfil_regime_sem_update
+        BEFORE UPDATE ON calibracao_perfil_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o override e imutavel: mudar o valor de um regime depois e recalibrar sem dizer que recalibrou');
+        END;
+
+        CREATE TRIGGER calibracao_perfil_regime_sem_delete
+        BEFORE DELETE ON calibracao_perfil_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o override e imutavel: apagar a linha faria o regime voltar silenciosamente para a base');
+        END;
+
+        -- ==================================================================
+        -- O VINCULO, e ele fica FORA do `config_hash`.
+        --
+        -- `config_hash` serializa o modelo INTEIRO: um campo novo em
+        -- `ExperimentConfig` mudaria o hash recomputado de toda versao ja
+        -- gravada, e o painel passaria a exigir reancoragem.
+        --
+        -- O usuario foi literal - "nao altere nem recalcule os hashes das
+        -- configuracoes antigas" -, entao o vinculo e uma COLUNA da tabela, e
+        -- nao um campo do payload. NULL nas antigas, e o hash delas fica
+        -- exatamente como sempre foi.
+        -- ==================================================================
+        ALTER TABLE config_version
+            ADD COLUMN calibracao_perfil_hash TEXT
+            REFERENCES calibracao_perfil(hash);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
