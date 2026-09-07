@@ -2756,6 +2756,98 @@ MIGRACOES: list[tuple[int, str, str]] = [
         ALTER TABLE bbo_amostra ADD COLUMN relogio_medido_em_ms INTEGER;
         """,
     ),
+    (
+        21,
+        "incremento 18: a observacao de calibracao, previsto contra observado",
+        """
+        -- ==================================================================
+        -- OBSERVACAO DE CALIBRACAO. Incremento 18, ADR 0027 e ADR 0032.
+        --
+        -- Uma linha por instante de execucao hipotetica: o que o simulador
+        -- PREVIU, e o que o mercado MOSTROU no mesmo instante.
+        --
+        -- POR QUE PERSISTIR EM VEZ DE RECALCULAR. `p_exec_previsto` e funcao
+        -- de `spread_bps`, `slippage_bps` e `penalty_bps` - e sao exatamente
+        -- esses tres que a calibracao AJUSTA. Recalcular depois produziria a
+        -- previsao de uma config que nao existia no instante medido, e a
+        -- comparacao passaria a medir o ajuste em vez do erro.
+        --
+        -- Por isso `config_version_id` entra na CHAVE: as observacoes de antes
+        -- e de depois do ajuste coexistem, e cada estimativa diz sob qual
+        -- config foi feita. E a mesma razao pela qual o contrato entra na
+        -- chave de `bbo_amostra`.
+        --
+        -- OS DOIS ERROS SAO SEPARADOS, e o ADR 0027 e explicito sobre por que:
+        --
+        --   E1 = ask - abertura         DIAGNOSTICO
+        --   E2 = p_exec_previsto - ask  ALVO da calibracao
+        --
+        -- E1 ja contem meio spread. Calibrar `spread_bps` a partir dele e
+        -- continuar somando `spread_bps` no simulador contaria o spread DUAS
+        -- VEZES, e nada acusaria.
+        --
+        -- A direcao do pessimismo e p10(E2) >= 0: na compra pagamos o ask,
+        -- entao prever MENOS que o ask e otimismo.
+        -- ==================================================================
+        CREATE TABLE calibracao_observacao (
+            contrato          TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue             TEXT    NOT NULL,
+            symbol            TEXT    NOT NULL,
+            t_grid_ms         INTEGER NOT NULL,
+            lado              TEXT    NOT NULL CHECK (lado IN ('compra', 'venda')),
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+
+            -- Do `stream_bar`: a abertura da barra que abre em `t_grid_ms`.
+            -- E o preco de referencia sob `execution_reference = abertura`, que
+            -- o contrato `bbo@1` exige.
+            abertura INTEGER NOT NULL CHECK (abertura > 0),
+
+            -- Da `bbo_amostra`, no MESMO instante e ja alinhada causalmente.
+            bbo_bid     INTEGER NOT NULL CHECK (bbo_bid > 0),
+            bbo_bid_qty INTEGER NOT NULL CHECK (bbo_bid_qty > 0),
+            bbo_ask     INTEGER NOT NULL CHECK (bbo_ask > 0),
+            bbo_ask_qty INTEGER NOT NULL CHECK (bbo_ask_qty > 0),
+
+            -- O que o simulador previu, pelo NUCLEO COMPARTILHADO de
+            -- precificacao - nunca por uma copia da formula.
+            p_exec_previsto INTEGER NOT NULL CHECK (p_exec_previsto > 0),
+
+            e1_mili_bps INTEGER NOT NULL,
+            e2_mili_bps INTEGER NOT NULL,
+
+            -- CONDICAO DE VALIDADE POR TAMANHO (ADR 0027): o preco do BBO so
+            -- vale para nocional <= o tamanho cotado naquele nivel. Conferido
+            -- observacao a observacao, NUNCA assumido - e quem nao cabe sai da
+            -- estatistica como `fora do escopo do L1`, sem sumir do registro.
+            nocional_cents INTEGER NOT NULL CHECK (nocional_cents > 0),
+            dentro_do_l1   INTEGER NOT NULL CHECK (dentro_do_l1 IN (0, 1)),
+
+            criado_em TEXT NOT NULL,
+
+            PRIMARY KEY (contrato, venue, symbol, t_grid_ms, lado,
+                         config_version_id),
+            CHECK (bbo_bid <= bbo_ask)
+        );
+
+        CREATE TRIGGER calibracao_observacao_sem_update
+        BEFORE UPDATE ON calibracao_observacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_observacao e apenas por acrescimo: reescrever uma previsao depois de ver o mercado e a definicao de ajustar a regua olhando o resultado');
+        END;
+
+        CREATE TRIGGER calibracao_observacao_sem_delete
+        BEFORE DELETE ON calibracao_observacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_observacao e apenas por acrescimo: descartar a observacao inconveniente e o mecanismo exato que produz falsa calibracao');
+        END;
+
+        CREATE INDEX idx_calibracao_observacao_serie
+            ON calibracao_observacao(contrato, venue, symbol, lado,
+                                     config_version_id, t_grid_ms);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
