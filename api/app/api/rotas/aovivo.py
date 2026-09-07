@@ -326,6 +326,7 @@ class AmostraEntrada(BaseModel):
     offset_us: int | None = None
     rtt_us: int | None = None
     incerteza_residual_us: int | None = None
+    relogio_medido_em_ms: int | None = None
 
 
 class LoteBBO(BaseModel):
@@ -439,6 +440,7 @@ async def receber_bbo(
             sampled_at_ms=a.sampled_at_ms, defasagem_ms=a.defasagem_ms,
             offset_us=a.offset_us, rtt_us=a.rtt_us,
             incerteza_residual_us=a.incerteza_residual_us,
+            relogio_medido_em_ms=a.relogio_medido_em_ms,
         )
         for a in lote.amostras
     ]

@@ -108,6 +108,10 @@ class Amostra:
     offset_us: int | None = None
     rtt_us: int | None = None
     incerteza_residual_us: int | None = None
+    # De QUANDO e o offset que corrigiu esta observacao. `incerteza_residual`
+    # cobre a assimetria da viagem; a idade cobre o envelhecimento, e sem ela
+    # seis horas e trinta segundos ficam indistinguiveis.
+    relogio_medido_em_ms: int | None = None
 
 
 def _agora() -> str:
@@ -221,6 +225,7 @@ def validar(a: Amostra, serie: Serie, c: Contrato) -> None:
             ("ask_qty", a.ask_qty), ("received_at_ms", a.received_at_ms),
             ("received_at_corrigido_ms", a.received_at_corrigido_ms),
             ("offset_us", a.offset_us),
+            ("relogio_medido_em_ms", a.relogio_medido_em_ms),
         ) if v is None
     ]
     if faltando:
@@ -271,6 +276,7 @@ _CONTEUDO = (
     "disponivel", "motivo", "bid", "bid_qty", "ask", "ask_qty", "u",
     "received_at_ms", "received_at_corrigido_ms", "sampled_at_ms",
     "defasagem_ms", "offset_us", "rtt_us", "incerteza_residual_us",
+    "relogio_medido_em_ms",
     "grade_ms", "price_scale_exp", "volume_scale_exp",
 )
 
@@ -320,6 +326,7 @@ def receber(
                 "defasagem_ms": a.defasagem_ms,
                 "offset_us": a.offset_us, "rtt_us": a.rtt_us,
                 "incerteza_residual_us": a.incerteza_residual_us,
+                "relogio_medido_em_ms": a.relogio_medido_em_ms,
                 "grade_ms": c.grade_ms,
                 "price_scale_exp": serie.price_scale_exp,
                 "volume_scale_exp": serie.volume_scale_exp,
@@ -355,8 +362,9 @@ def receber(
                 " disponivel, motivo, bid, bid_qty, ask, ask_qty, u,"
                 " received_at_ms, received_at_corrigido_ms, sampled_at_ms,"
                 " defasagem_ms, offset_us, rtt_us, incerteza_residual_us,"
+                " relogio_medido_em_ms,"
                 " price_scale_exp, volume_scale_exp, recebido_em)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     serie.venue, serie.symbol, a.t_grid_ms, contrato,
                     c.grade_ms, chegando["disponivel"], a.motivo,
@@ -364,6 +372,7 @@ def receber(
                     a.received_at_ms, a.received_at_corrigido_ms,
                     a.sampled_at_ms, a.defasagem_ms,
                     a.offset_us, a.rtt_us, a.incerteza_residual_us,
+                    a.relogio_medido_em_ms,
                     serie.price_scale_exp, serie.volume_scale_exp, agora,
                 ),
             )

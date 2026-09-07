@@ -2730,6 +2730,32 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        20,
+        "incremento 18: a IDADE da medida de relogio de cada observacao",
+        """
+        -- Sem isto, um offset medido seis horas antes e indistinguivel de um
+        -- medido trinta segundos antes - e a observacao ficaria afirmando uma
+        -- precisao que nao tem.
+        --
+        -- O requisito 2 do ADR 0032 pede "incerteza do relogio", e a IDADE faz
+        -- parte dela: `incerteza_residual_us` cobre a assimetria da viagem,
+        -- nao o envelhecimento.
+        --
+        -- NENHUM limiar e escolhido aqui. A taxa de deriva do relogio ainda
+        -- nao foi medida, e fixar "vale por N minutos" sem medir seria
+        -- arbitrio com uma casa decimal a mais - o mesmo que a D45 recusou ao
+        -- nao fixar `sigma_e`. Grava-se o numero; o criterio vem depois, com
+        -- medicao.
+        --
+        -- A coluna nasceu de um defeito em producao: a extracao quebrou com
+        -- `KeyError: offset_ms` na primeira volta, porque toda linha
+        -- `tipo: relogio` foi suposta trazer medicao - e a sonda FALHADA grava
+        -- uma linha sem ela, de proposito. Ao consertar, ficou visivel que a
+        -- observacao nao dizia de QUANDO era o offset que a corrigiu.
+        ALTER TABLE bbo_amostra ADD COLUMN relogio_medido_em_ms INTEGER;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

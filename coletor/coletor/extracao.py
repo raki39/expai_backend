@@ -16,10 +16,15 @@ Tres palavras carregam o desenho inteiro:
 
 **CORRIGIDO.** Comparar relogio local com hora de exchange sem corrigir o
 offset erra por mais que a tolerancia inteira - o coletor mediu **-2.450 ms**
-numa maquina real, contra 2.000 ms de tolerancia. E a correcao usa a ultima
-medida de relogio **anterior** a amostra: se nao houver nenhuma, a observacao
-sai `sem_relogio`, e nao corrigida por zero. Assumir deriva zero e exatamente
+numa maquina real, contra 2.000 ms de tolerancia. A correcao usa a ultima
+medida **anterior** a amostra; sem nenhuma, a linha e pulada e o instante cai
+em `sem_amostra_na_janela`. Corrigir por zero seria assumir deriva zero, que e
 o que o usuario recusou ao fechar o ADR 0028.
+
+E a IDADE dessa medida vai gravada em cada observacao. Sem ela, um offset de
+seis horas atras seria indistinguivel de um de trinta segundos - e nenhum
+limiar de validade e escolhido aqui, porque a taxa de deriva ainda nao foi
+medida. Grava-se o numero; o criterio e declarado quando houver medicao.
 
 **`<=`.** Uma cotacao posterior ao instante e o futuro dele. A `api` recusa
 defasagem negativa por CHECK, entao um erro aqui vira 422 e nao dado ruim.
@@ -87,6 +92,10 @@ class Observacao:
     offset_us: int | None = None
     rtt_us: int | None = None
     incerteza_residual_us: int | None = None
+    # QUANDO o relogio foi medido. Sem isto, um offset de 6 horas atras e
+    # indistinguivel de um de 30 segundos - e o requisito 2 do ADR 0032
+    # pede a incerteza do relogio, da qual a idade faz parte.
+    relogio_medido_em_ms: int | None = None
 
     def como_corpo(self) -> dict[str, Any]:
         return {
@@ -100,6 +109,7 @@ class Observacao:
             "defasagem_ms": self.defasagem_ms,
             "offset_us": self.offset_us, "rtt_us": self.rtt_us,
             "incerteza_residual_us": self.incerteza_residual_us,
+            "relogio_medido_em_ms": self.relogio_medido_em_ms,
         }
 
 
@@ -124,6 +134,7 @@ class _Relogio:
     offset_us: int
     rtt_us: int
     incerteza_residual_us: int
+    medido_em_ms: int
 
 
 def _linhas_ordenadas(arquivos: Iterable[Path]) -> Iterator[dict[str, Any]]:
@@ -183,16 +194,35 @@ def extrair(
             defasagem_ms=defasagem,
             offset_us=rel.offset_us, rtt_us=rel.rtt_us,
             incerteza_residual_us=rel.incerteza_residual_us,
+            relogio_medido_em_ms=rel.medido_em_ms,
         )
 
     for linha in _linhas_ordenadas(arquivos):
         if linha.get("tipo") == "relogio":
+            # SONDA FALHADA nao traz medicao, e a linha existe assim de
+            # proposito: `fluxo.sondar_relogio` grava
+            # `{tipo, medido_em_ns, falha}` porque "um relogio nao medido e um
+            # relogio nao medido" - ela nao inventa valor.
+            #
+            # Esta versao supunha que toda linha `tipo: relogio` trouxesse
+            # medicao, e quebrou com `KeyError: 'offset_ms'` na PRIMEIRA volta
+            # em producao. A extracao nao decide nada sobre o relogio: quem ja
+            # tinha medida boa continua com ela.
+            #
+            # E manter a anterior e o certo, e nao so o conveniente: a sonda
+            # falhar informa sobre a REDE ate a Binance, e nao sobre o relogio
+            # local. O offset e propriedade que varia devagar; a falha da sonda
+            # nao o torna desconhecido, so o deixa mais VELHO - e a idade dele
+            # vai gravada em cada observacao, para que ninguem precise supor.
+            if "offset_ms" not in linha:
+                continue
             relogio = _Relogio(
                 offset_us=round(float(linha["offset_ms"]) * 1000),
                 rtt_us=round(float(linha["rtt_ms"]) * 1000),
                 incerteza_residual_us=round(
                     float(linha["incerteza_residual_ms"]) * 1000
                 ),
+                medido_em_ms=int(linha["medido_em_ns"]) // 1_000_000,
             )
             continue
 

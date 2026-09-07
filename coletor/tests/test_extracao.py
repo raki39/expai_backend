@@ -349,3 +349,74 @@ def test_so_le_os_arquivos_dos_dias_que_o_periodo_toca(tmp_path):
         f"bookticker-btcusdt-{dias[0]}.jsonl.gz",
         f"bookticker-btcusdt-{dias[1]}.jsonl.gz",
     ], "o terceiro dia nao e tocado pelo periodo"
+
+
+# ===========================================================================
+# O defeito que a producao pegou, em 2026-09-07
+# ===========================================================================
+
+
+def linha_relogio_FALHADA(ns: int = 1) -> dict:
+    """A linha EXATA que `fluxo.sondar_relogio` grava quando a sonda falha.
+
+    Copiada do codigo, e nao imaginada: `{tipo, medido_em_ns, falha}`. Ela nao
+    tem `offset_ms`, e isso e deliberado - "nao inventa valor, e um relogio nao
+    medido e um relogio nao medido".
+    """
+    return {"tipo": "relogio", "medido_em_ns": ns, "falha": "451 bloqueio"}
+
+
+def test_sonda_FALHADA_nao_quebra_a_extracao(tmp_path):
+    """`KeyError: 'offset_ms'` na PRIMEIRA volta em producao.
+
+    Eu supus que toda linha `tipo: relogio` trouxesse medicao. A linha de
+    falha existe de proposito e nao traz - e o defeito so apareceu quando a
+    entrega foi ligada, porque ate entao ninguem lia essas linhas.
+    """
+    linhas = [
+        linha_relogio(),
+        linha_relogio_FALHADA(),
+        linha_amostra(T0 - 500 + 2_450),
+    ]
+    obs = extracao.extrair(escrever(tmp_path, linhas),
+                           de_ms=T0, ate_ms_exclusive=T0 + GRADE)
+    assert obs[0].disponivel is True
+
+
+def test_sonda_falhada_MANTEM_a_ultima_medida_boa(tmp_path):
+    """E o certo, e nao so o conveniente.
+
+    A sonda falhar informa sobre a REDE ate a Binance, e nao sobre o relogio
+    local. O offset varia devagar; a falha nao o torna desconhecido, so o
+    deixa mais VELHO - e a idade vai gravada, para que ninguem precise supor.
+    """
+    linhas = [
+        linha_relogio(offset_ms=-2_450.0, ns=1_000_000),
+        linha_relogio_FALHADA(ns=2_000_000),
+        linha_amostra(T0 - 500 + 2_450),
+    ]
+    obs = extracao.extrair(escrever(tmp_path, linhas),
+                           de_ms=T0, ate_ms_exclusive=T0 + GRADE)
+    assert obs[0].offset_us == -2_450_000, "perdeu a medida boa"
+    assert obs[0].relogio_medido_em_ms == 1, (
+        "a idade tem de ser a da medida BOA, e nao a da falha"
+    )
+
+
+def test_SO_falhas_deixa_o_instante_sem_cotacao(tmp_path):
+    """Sem nenhuma medida boa, corrigir por zero seria assumir deriva zero."""
+    linhas = [linha_relogio_FALHADA(), linha_amostra(T0 - 500)]
+    obs = extracao.extrair(escrever(tmp_path, linhas),
+                           de_ms=T0, ate_ms_exclusive=T0 + GRADE)
+    assert obs[0].disponivel is False
+    assert obs[0].ask is None
+
+
+def test_a_IDADE_do_relogio_atravessa(tmp_path):
+    """Sem ela, seis horas e trinta segundos ficam indistinguiveis."""
+    linhas = [linha_relogio(ns=(T0 - 60_000) * 1_000_000),
+              linha_amostra(T0 - 500 + 2_450)]
+    obs = extracao.extrair(escrever(tmp_path, linhas),
+                           de_ms=T0, ate_ms_exclusive=T0 + GRADE)
+    assert obs[0].relogio_medido_em_ms == T0 - 60_000
+    assert "relogio_medido_em_ms" in obs[0].como_corpo()

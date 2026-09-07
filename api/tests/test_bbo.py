@@ -43,6 +43,7 @@ def amostra(i: int, *, defasagem_ms: int = 500, ask: int = 60_001_00000000,
         sampled_at_ms=received + 3,
         defasagem_ms=defasagem_ms,
         offset_us=OFFSET_US, rtt_us=12_000, incerteza_residual_us=6_000,
+        relogio_medido_em_ms=corrigido - 30_000,
     )
 
 
@@ -428,3 +429,53 @@ def test_derivar_NAO_grava(conn: sqlite3.Connection):
     piloto.derivar(conn, SERIE, CONTRATO)
     assert conn.execute("SELECT COUNT(*) FROM janela_piloto").fetchone()[0] == 0
     assert piloto.ler(conn, SERIE, CONTRATO) is None
+
+
+def test_disponivel_SEM_a_idade_do_relogio_e_recusada(conn: sqlite3.Connection):
+    """Nasceu de um defeito em producao, e a coluna veio junto.
+
+    A extracao quebrou com `KeyError: offset_ms` porque toda linha
+    `tipo: relogio` foi suposta trazer medicao - e a sonda FALHADA grava uma
+    linha sem ela, de proposito ("um relogio nao medido e um relogio nao
+    medido"). Ao consertar, ficou visivel que a observacao nao dizia de QUANDO
+    era o offset que a corrigiu: seis horas e trinta segundos ficavam
+    indistinguiveis.
+
+    `incerteza_residual_us` cobre a assimetria da viagem; a idade cobre o
+    envelhecimento. Sao coisas diferentes, e o requisito 2 pede as duas.
+    """
+    a = amostra(0)
+    sem_idade = bbo.Amostra(**{**a.__dict__, "relogio_medido_em_ms": None})
+    with pytest.raises(bbo.AmostraInvalida) as e:
+        bbo.receber(conn, SERIE, CONTRATO, [sem_idade])
+    assert "relogio_medido_em_ms" in str(e.value)
+
+
+def test_a_idade_do_relogio_e_GRAVADA_e_nao_so_aceita(conn: sqlite3.Connection):
+    bbo.receber(conn, SERIE, CONTRATO, [amostra(0)])
+    linha = conn.execute(
+        "SELECT relogio_medido_em_ms FROM bbo_amostra"
+    ).fetchone()
+    assert linha["relogio_medido_em_ms"] == T0 - 500 - 30_000
+
+
+def test_NENHUM_limiar_de_validade_do_relogio_e_escolhido(conn: sqlite3.Connection):
+    """A taxa de deriva ainda nao foi medida.
+
+    Fixar "o offset vale por N minutos" sem medir seria arbitrio com uma casa
+    decimal a mais - o mesmo que a D45 recusou ao nao fixar `sigma_e`. Grava-se
+    o numero; o criterio vem depois, com medicao.
+
+    Este teste existe para que, no dia em que alguem fixar o limiar, a decisao
+    seja deliberada - e nao um `if` que apareceu sem ADR.
+    """
+    velho = amostra(0)
+    antiga = bbo.Amostra(**{
+        **velho.__dict__,
+        "relogio_medido_em_ms": velho.received_at_corrigido_ms - 6 * 3_600_000,
+    })
+    r = bbo.receber(conn, SERIE, CONTRATO, [antiga])
+    assert r.aceitas == 1, (
+        "um offset de seis horas ainda e ACEITO, e de proposito: a idade fica "
+        "gravada e quem decide o que fazer com ela e a calibracao"
+    )
