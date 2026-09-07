@@ -470,34 +470,146 @@ def test_trocar_de_banco_troca_a_conexao(ambiente, tmp_path) -> None:
         fechar_conexao_do_thread()
 
 
-def test_o_painel_inteiro_em_paralelo_nao_derruba_rota_nenhuma(
-    client, ambiente
-) -> None:
+# Valores para as rotas que EXIGEM parametro. Tabela explicita, e nao palpite:
+# uma rota nova com parametro obrigatorio quebra o teste abaixo pedindo uma
+# decisao, em vez de sair calada da varredura.
+#
+# O objeto nao precisa existir - `404` e resposta legitima, e o que esta
+# guarda procura e `500`.
+PARAMETROS_DE_ROTA = {
+    "/api/aovivo/ponto": {
+        "venue": "binance", "symbol": "BTCUSDT",
+        "timeframe": "15m", "interval_ms": 900_000,
+    },
+    "/api/relatorio/auditoria/{hypothesis_id}": {"hypothesis_id": 1},
+    "/api/relatorio/vinculo/evento/{event_id}": {"event_id": 1},
+    "/api/relatorio/vinculo/execucao/{execution_id}": {"execution_id": 1},
+    "/api/validador/hipotese/{hypothesis_id}": {"hypothesis_id": 1},
+}
+
+
+def _todas_as_rotas_get(app) -> list[str]:
+    """Toda rota GET do app, com os parametros obrigatorios preenchidos.
+
+    **DERIVADA, e nao escrita.** A versao anterior era uma lista literal de
+    treze rotas, montada quando o projeto tinha treze - e o projeto chegou a
+    trinta e duas sem que ela se movesse. As tres rotas de `aovivo`, que
+    gravam e leem o fluxo ao vivo, nunca foram exercitadas em paralelo, e foi
+    ali que o defeito voltou.
+
+    E a mesma forma de `BLOCOS`, da tupla `partes` do export com treze chaves
+    e nenhuma nova, e da tabela do README com seis rotas de vinte e seis.
+    """
+    import inspect
+
+    spec = app.openapi()
+    faltando: list[str] = []
+    rotas: list[str] = []
+
+    for caminho, ops in sorted(spec["paths"].items()):
+        if "get" not in ops:
+            continue
+        obrig = [
+            p["name"] for p in ops["get"].get("parameters", []) if p.get("required")
+        ]
+        if not obrig:
+            rotas.append(caminho)
+            continue
+        valores = PARAMETROS_DE_ROTA.get(caminho)
+        if valores is None or any(n not in valores for n in obrig):
+            faltando.append(f"{caminho} exige {obrig}")
+            continue
+        url = caminho
+        query = {}
+        for nome, valor in valores.items():
+            marca = "{" + nome + "}"
+            if marca in url:
+                url = url.replace(marca, str(valor))
+            else:
+                query[nome] = valor
+        if query:
+            url += "?" + "&".join(f"{k}={v}" for k, v in query.items())
+        rotas.append(url)
+
+    assert not faltando, (
+        "rota GET com parametro obrigatorio e sem valor declarado em "
+        f"PARAMETROS_DE_ROTA: {faltando}. Declare um valor - ou decida "
+        "explicitamente que ela fica fora da varredura de concorrencia"
+    )
+    return rotas
+
+
+def test_toda_rota_get_e_varrida_em_paralelo(client, ambiente) -> None:
     """A forma exata do que o painel faz: todas as telas de uma vez.
 
-    E o teste que teria pego o defeito. Repetido, porque uma falha de
-    interleaving nao acontece na primeira tentativa.
+    E o teste que teria pego o defeito - e que pegou de novo quando a lista
+    virou derivada. Repetido, porque falha de interleaving nao acontece na
+    primeira tentativa: medido, o defeito das rotas `aovivo` apareceu 2 vezes
+    em 1.280 requisicoes (0,16%), e ZERO em 192.
+
+    O que se procura e `5xx`. `404` e resposta legitima de uma rota que pede
+    um objeto que este banco nao tem; `sqlite3.InterfaceError` nao e resposta
+    de nada.
     """
     import concurrent.futures as cf
 
-    rotas = [
-        "/api/substrato/health", "/api/config", "/api/dataset", "/api/ledger",
-        "/api/ledger/transacoes", "/api/diagnostico/sentinela", "/api/simulador",
-        "/api/simulador/execucoes", "/api/baselines", "/api/agente", "/api/baselines/curva",
-        "/api/relatorio", "/api/relatorio/exportar",
-    ]
+    rotas = _todas_as_rotas_get(client.app)
+    assert len(rotas) >= 30, f"so {len(rotas)} rotas GET varridas - a app tem mais"
 
-    def bater(rota: str) -> tuple[str, int]:
-        return rota, client.get(rota).status_code
+    def bater(rota: str) -> tuple[str, int, str]:
+        try:
+            return rota, client.get(rota).status_code, ""
+        except Exception as e:  # noqa: BLE001
+            return rota, -1, f"{type(e).__name__}: {e}"
 
-    ruins: list[tuple[str, int]] = []
-    with cf.ThreadPoolExecutor(max_workers=len(rotas)) as ex:
-        for _ in range(6):
-            for rota, status in ex.map(bater, rotas):
-                if status != 200:
-                    ruins.append((rota, status))
+    ruins: list[tuple[str, int, str]] = []
+    with cf.ThreadPoolExecutor(max_workers=min(16, len(rotas))) as ex:
+        for _ in range(20):
+            for rota, status, erro in ex.map(bater, rotas):
+                if status < 0 or status >= 500:
+                    ruins.append((rota, status, erro))
 
     assert not ruins, ruins
+
+
+def test_nenhuma_rota_usa_a_conexao_DE_PROCESSO() -> None:
+    """`app.state.conn` e do boot: migracao e bootstrap. Rota nao.
+
+    O `comum.py` diz "o que toda rota precisa e **nenhuma deveria
+    redefinir**", e nada impunha isso - entao as quatro rotas de `aovivo` do
+    incremento 16 leram `request.app.state.conn` e voltaram a compartilhar UM
+    `sqlite3.Connection` entre threads, que e exatamente o defeito que o
+    `conexao_do_thread` existe para nao ter.
+
+    Consertar as quatro sem varrer a forma e o erro que o incremento 12
+    registrou: o mesmo `SELECT MAX(run_id)` estava em dois lugares, eu
+    consertei um, e ele reapareceu na tela seguinte.
+    """
+    import re
+
+    from ._prosa import sql_sem_prosa
+
+    # `sql_sem_prosa` junta TOKENS com espaco, entao `app.state.conn` sai como
+    # `app . state . conn`. A primeira versao desta guarda procurava a
+    # substring `state.conn` e por isso NUNCA acusava nada - verificada no
+    # modo de falha, ela passou com o defeito reintroduzido. Guarda vazia e
+    # pior que guarda ausente: ela afirma uma protecao que nao existe.
+    padrao = re.compile(r"state\s*\.\s*conn")
+    assert padrao.search("request . app . state . conn"), (
+        "a guarda deixou de casar a forma que ela procura - nao vacuidade"
+    )
+
+    raiz = Path(__file__).resolve().parents[1] / "app" / "api"
+    culpadas = [
+        str(f.relative_to(raiz.parent))
+        for f in sorted(raiz.rglob("*.py"))
+        if padrao.search(sql_sem_prosa(f))
+    ]
+    assert not culpadas, (
+        f"{culpadas} le a conexao de processo. Use `_conn(request)` de "
+        f"`app/api/comum.py`, que da uma conexao POR THREAD - o painel "
+        f"dispara as telas em paralelo e o threadpool as espalha"
+    )
 
 
 # ===========================================================================

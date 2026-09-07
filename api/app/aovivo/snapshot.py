@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
+from ..store import bloco_atomico
 from .fluxo import Barra, Serie, barras_em
 
 log = logging.getLogger(__name__)
@@ -300,31 +301,38 @@ def materializar(
                            calibration_version, hypothesis_id)
 
     # ------------------------------------------------------------ atomico
-    # As barras vao primeiro, mas ficam INALCANCAVEIS: `ler` exige o JOIN com
-    # o manifesto. Reservamos o id inserindo o manifesto no fim, e para isso as
-    # barras precisam de um id - resolvido pedindo o proximo ao SQLite.
-    cur = conn.execute(
+    # E atomico DE VERDADE agora. Este comentario dizia "atomico" sobre dois
+    # INSERTs em autocommit: uma falha entre eles deixava manifesto com hash e
+    # ZERO barras - um snapshot afirmando conteudo que nao esta la. A garantia
+    # 3 da D50 ("materializacao e fechamento atomicos") era texto.
+    #
+    # A ORDEM continua sendo manifesto primeiro, porque a chave estrangeira de
+    # `snapshot_bar` exige o id - foi o que corrigiu o ADR 0029 na
+    # implementacao. Dentro do SAVEPOINT a ordem deixa de importar para quem le.
+    with bloco_atomico(conn, "snapshot_materializar"):
+        cur = conn.execute(
         "INSERT INTO snapshot ("
         " venue, symbol, timeframe, from_ms, to_ms_exclusive,"
         " barras_esperadas, barras_presentes, lacunas, maior_lacuna_barras,"
         " lacuna_aceita_por, lacuna_aceita_motivo, sha256, finalidade,"
         " calibration_version, hypothesis_id, criado_em) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (serie.venue, serie.symbol, serie.timeframe, de_ms, ate_ms_exclusive,
-         contagem.barras_esperadas, contagem.barras_presentes,
-         contagem.lacunas, contagem.maior_lacuna_barras,
-         lacuna_aceita_por, lacuna_aceita_motivo, digest, finalidade,
-         calibration_version, hypothesis_id, _agora()),
-    )
-    snapshot_id = int(cur.lastrowid)
+            (serie.venue, serie.symbol, serie.timeframe, de_ms,
+             ate_ms_exclusive, contagem.barras_esperadas,
+             contagem.barras_presentes, contagem.lacunas,
+             contagem.maior_lacuna_barras, lacuna_aceita_por,
+             lacuna_aceita_motivo, digest, finalidade, calibration_version,
+             hypothesis_id, _agora()),
+        )
+        snapshot_id = int(cur.lastrowid)
 
-    conn.executemany(
-        "INSERT INTO snapshot_bar ("
-        " snapshot_id, open_time_ms, open, high, low, close,"
-        " volume, quote_volume, trades) VALUES (?,?,?,?,?,?,?,?,?)",
-        [(snapshot_id, b.open_time_ms, b.open, b.high, b.low, b.close,
-          b.volume, b.quote_volume, b.trades) for b in barras],
-    )
+        conn.executemany(
+            "INSERT INTO snapshot_bar ("
+            " snapshot_id, open_time_ms, open, high, low, close,"
+            " volume, quote_volume, trades) VALUES (?,?,?,?,?,?,?,?,?)",
+            [(snapshot_id, b.open_time_ms, b.open, b.high, b.low, b.close,
+              b.volume, b.quote_volume, b.trades) for b in barras],
+        )
 
     log.info("snapshot.fechado", extra={
         "snapshot_id": snapshot_id, "finalidade": finalidade,

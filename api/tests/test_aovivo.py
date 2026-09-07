@@ -503,3 +503,78 @@ def test_o_acesso_do_snapshot_nunca_e_do_agente(conn: sqlite3.Connection):
             " acesso,criado_em)"
             " VALUES ('b','B','15m',1,2,1,1,0,0,'h','calibracao',1,'agente','x')"
         )
+
+
+# ===========================================================================
+# A transacao existe DE VERDADE
+#
+# O `with conn:` da rota era NO-OP: com `isolation_level=None` nao ha
+# transacao aberta, entao o commit do `__exit__` nao confirma nada e o
+# rollback nao desfaz nada. Medido em Python puro: a linha inserida SOBREVIVE
+# a excecao. Enquanto isso o docstring de `receber` afirmava "um lote e
+# atomico, e um lote com divergencia nao entra pela metade", e o bloco de
+# `materializar` tinha um comentario escrito `atomico` em cima de dois
+# INSERTs em autocommit.
+#
+# A garantia 3 da D50 - "materializacao e fechamento atomicos" - era texto.
+# ===========================================================================
+
+
+def test_lote_com_divergencia_nao_entra_PELA_METADE(conn: sqlite3.Connection):
+    """A barra nova antes da divergente tem de desaparecer com ela.
+
+    A ordem do lote e o que torna o teste capaz de ver a diferenca: se a
+    divergente viesse primeiro, nada teria sido inserido ainda e o teste
+    passaria sem transacao nenhuma.
+    """
+    fluxo.receber(conn, SERIE, [barra(0)], origem="ao_vivo")
+
+    # VALIDA, e so o conteudo difere. Uma barra invalida seria recusada por
+    # `validar` antes de a divergencia ser detectada, e o teste mediria outra
+    # coisa - foi o defeito que o incremento 16 registrou em si mesmo.
+    divergente = barra(0, close=61_000_00000000)
+    with pytest.raises(fluxo.DivergenciaDeConteudo):
+        fluxo.receber(conn, SERIE, [barra(1), divergente], origem="ao_vivo")
+
+    presentes = [
+        int(r["open_time_ms"])
+        for r in conn.execute("SELECT open_time_ms FROM stream_bar ORDER BY 1")
+    ]
+    assert presentes == [T0], (
+        f"a barra em {T0 + PASSO} sobreviveu a um lote recusado: {presentes}"
+    )
+
+
+def test_snapshot_que_falha_copiando_nao_deixa_MANIFESTO_orfao(
+    conn: sqlite3.Connection,
+):
+    """Manifesto com hash e ZERO barras afirmaria conteudo que nao esta la.
+
+    A ordem e manifesto primeiro por causa da chave estrangeira de
+    `snapshot_bar` - foi o que corrigiu o ADR 0029 na implementacao. Sem
+    transacao, uma falha entre os dois INSERTs deixava exatamente isso.
+    """
+    fluxo.receber(conn, SERIE, lote(4), origem="ao_vivo")
+
+    class MorreCopiando:
+        """Delega tudo, menos a copia das barras."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+
+        def __getattr__(self, nome: str):
+            return getattr(self._real, nome)
+
+        def executemany(self, *_a, **_k):
+            raise RuntimeError("morreu no meio da copia")
+
+    with pytest.raises(RuntimeError):
+        snapshot.materializar(
+            MorreCopiando(conn),  # type: ignore[arg-type]
+            SERIE, de_ms=T0, ate_ms_exclusive=T0 + 4 * PASSO,
+            finalidade="calibracao", calibration_version="v-teste",
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0] == 0, (
+        "sobrou manifesto sem as barras que o hash dele descreve"
+    )

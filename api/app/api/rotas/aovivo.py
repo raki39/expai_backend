@@ -27,6 +27,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ...aovivo import assinatura, fluxo, snapshot
+from ..comum import _conn
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def ponto_de_retomada(
     lado**, em vez de reenviar tudo ou de o rele supor onde paramos. Queda do
     rele passa a ser atraso recuperavel, e nao lacuna.
     """
-    conn = request.app.state.conn
+    conn = _conn(request)
     serie = fluxo.Serie(
         venue=venue, symbol=symbol, timeframe=timeframe,
         interval_ms=interval_ms, price_scale_exp=0, volume_scale_exp=0,
@@ -133,7 +134,7 @@ async def receber_barras(
     """
     from ...settings import get_settings
 
-    conn = request.app.state.conn
+    conn = _conn(request)
     bruto = await request.body()
 
     # ------------------------------------------------------------- HMAC
@@ -183,11 +184,10 @@ async def receber_barras(
 
     # -------------------------------------------------------- a gravacao
     try:
-        with conn:
-            recebimento = fluxo.receber(
-                conn, lote.serie(), barras, origem=lote.origem  # type: ignore[arg-type]
-            )
-            assinatura.podar(conn)
+        recebimento = fluxo.receber(
+            conn, lote.serie(), barras, origem=lote.origem  # type: ignore[arg-type]
+        )
+        assinatura.podar(conn)
     except fluxo.DivergenciaDeConteudo as e:
         # 409, e ERRO ALTO. Nao e "aceito com aviso": ou a origem revisou o
         # passado, ou algo corrompeu o dado, ou dois remetentes discordam - e
@@ -231,7 +231,7 @@ def estado(
     """
     import time
 
-    conn = request.app.state.conn
+    conn = _conn(request)
     serie = fluxo.Serie(
         venue=venue, symbol=symbol, timeframe=timeframe,
         interval_ms=interval_ms, price_scale_exp=0, volume_scale_exp=0,
@@ -274,7 +274,7 @@ def listar_snapshots(request: Request) -> dict[str, Any]:
     Todo resultado do forward cita um destes. O fluxo, nunca - ele nao tem
     hash, e nao ter e o desenho.
     """
-    conn = request.app.state.conn
+    conn = _conn(request)
     linhas = [
         dict(r)
         for r in conn.execute(

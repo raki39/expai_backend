@@ -359,11 +359,24 @@ def test_o_segredo_do_hmac_nunca_aparece(cliente):
 
 
 def test_sem_segredo_configurado_a_rota_falha_FECHADO(ambiente, monkeypatch):
-    """Como `exigir_token_de_servico` já faz: ausência não abre a porta."""
+    """Como `exigir_token_de_servico` já faz: ausência não abre a porta.
+
+    **`delenv` não bastava, e o defeito só aparecia em quem CONFIGUROU o
+    serviço.** `Settings` tem `env_file=".env"`, e o `.env` é ignorado pelo
+    git — então numa máquina onde o relé foi configurado de verdade o segredo
+    continuava chegando pelo arquivo depois de a variável ser removida, a rota
+    respondia `assinatura nao bate` em vez de `nao configurado`, e o teste
+    ficava vermelho por motivo nenhum do código.
+
+    Variável de ambiente tem precedência sobre o `.env`, então declarar o
+    vazio EXPLICITAMENTE é o que torna o teste independente da máquina. Um
+    teste cujo resultado depende do `.env` de quem roda não está testando o
+    código.
+    """
     from app.main import criar_app
     from app.settings import get_settings
 
-    monkeypatch.delenv("RELE_HMAC_SECRET", raising=False)
+    monkeypatch.setenv("RELE_HMAC_SECRET", "")
     get_settings.cache_clear()
     with TestClient(criar_app()) as c:
         r = enviar(c, corpo(), segredo="qualquer")

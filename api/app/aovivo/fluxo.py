@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Literal
 
+from ..store import bloco_atomico
+
 log = logging.getLogger(__name__)
 
 Origem = Literal["ao_vivo", "backfill"]
@@ -155,58 +157,66 @@ def receber(
       IDENTICA     nao grava, e conta como repetida. Retry normal do rele
       DIFERENTE    `DivergenciaDeConteudo`. Erro alto, e nada e gravado
 
-    A transacao e do chamador: um lote e atomico, e um lote com divergencia
-    nao entra pela metade.
+    **A transacao e DESTE modulo, e nao do chamador.** Ela morava na rota, num
+    `with conn:` - que e NO-OP sob `isolation_level=None`: sem transacao
+    aberta, o commit do `__exit__` nao tem o que confirmar e o rollback nao tem
+    o que desfazer. Medido: a linha inserida SOBREVIVE a excecao. O docstring
+    aqui afirmava "um lote e atomico" enquanto nada o impunha.
+
+    `bloco_atomico` e aninhavel (SAVEPOINT), entao um chamador que abra a
+    propria transacao continua funcionando - e o executor do incremento 18
+    sera um segundo chamador.
     """
     aceitas = repetidas = 0
     marcos: list[int] = []
     agora = _agora()
 
-    for b in barras:
-        validar(b, serie)
-        existente = conn.execute(
-            "SELECT open, high, low, close, volume, quote_volume, trades"
-            "  FROM stream_bar"
-            " WHERE venue = ? AND symbol = ? AND timeframe = ?"
-            "   AND open_time_ms = ?",
-            (serie.venue, serie.symbol, serie.timeframe, b.open_time_ms),
-        ).fetchone()
+    with bloco_atomico(conn, "fluxo_receber"):
+        for b in barras:
+            validar(b, serie)
+            existente = conn.execute(
+                "SELECT open, high, low, close, volume, quote_volume, trades"
+                "  FROM stream_bar"
+                " WHERE venue = ? AND symbol = ? AND timeframe = ?"
+                "   AND open_time_ms = ?",
+                (serie.venue, serie.symbol, serie.timeframe, b.open_time_ms),
+            ).fetchone()
 
-        if existente is not None:
-            atual = (
-                int(existente["open"]), int(existente["high"]),
-                int(existente["low"]), int(existente["close"]),
-                int(existente["volume"]), int(existente["quote_volume"]),
-                int(existente["trades"]),
-            )
-            chegando = (b.open, b.high, b.low, b.close,
-                        b.volume, b.quote_volume, b.trades)
-            if atual != chegando:
-                raise DivergenciaDeConteudo(
-                    f"{serie.symbol} {serie.timeframe} em {b.open_time_ms}: "
-                    f"gravado {atual}, chegando {chegando}. O fluxo e "
-                    f"append-only e a barra ja existe com outro conteudo - "
-                    f"escolher uma das versoes seria decidir qual passado vale"
+            if existente is not None:
+                atual = (
+                    int(existente["open"]), int(existente["high"]),
+                    int(existente["low"]), int(existente["close"]),
+                    int(existente["volume"]), int(existente["quote_volume"]),
+                    int(existente["trades"]),
                 )
-            repetidas += 1
-            continue
+                chegando = (b.open, b.high, b.low, b.close,
+                            b.volume, b.quote_volume, b.trades)
+                if atual != chegando:
+                    raise DivergenciaDeConteudo(
+                        f"{serie.symbol} {serie.timeframe} em {b.open_time_ms}: "
+                        f"gravado {atual}, chegando {chegando}. O fluxo e "
+                        f"append-only e a barra ja existe com outro conteudo - "
+                        f"escolher uma das versoes seria decidir qual passado vale"
+                    )
+                repetidas += 1
+                continue
 
-        conn.execute(
-            "INSERT INTO stream_bar ("
-            " venue, symbol, timeframe, open_time_ms,"
-            " open, high, low, close, volume, quote_volume, trades,"
-            " interval_ms, price_scale_exp, volume_scale_exp,"
-            " recebido_em, origem) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                serie.venue, serie.symbol, serie.timeframe, b.open_time_ms,
-                b.open, b.high, b.low, b.close, b.volume, b.quote_volume,
-                b.trades, serie.interval_ms, serie.price_scale_exp,
-                serie.volume_scale_exp, agora, origem,
-            ),
-        )
-        aceitas += 1
-        marcos.append(b.open_time_ms)
+            conn.execute(
+                "INSERT INTO stream_bar ("
+                " venue, symbol, timeframe, open_time_ms,"
+                " open, high, low, close, volume, quote_volume, trades,"
+                " interval_ms, price_scale_exp, volume_scale_exp,"
+                " recebido_em, origem) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    serie.venue, serie.symbol, serie.timeframe, b.open_time_ms,
+                    b.open, b.high, b.low, b.close, b.volume, b.quote_volume,
+                    b.trades, serie.interval_ms, serie.price_scale_exp,
+                    serie.volume_scale_exp, agora, origem,
+                ),
+            )
+            aceitas += 1
+            marcos.append(b.open_time_ms)
 
     return Recebimento(
         aceitas=aceitas,
