@@ -2918,6 +2918,196 @@ MIGRACOES: list[tuple[int, str, str]] = [
                             t_grid_ms);
         """,
     ),
+    (
+        23,
+        "incremento 18: revalidacao selada, versao de calibracao e regime",
+        """
+        -- ==================================================================
+        -- JANELA DE REVALIDACAO, SELADA. §8.4.1.2: "revalidar em periodo
+        -- posterior reservado, SEM NOVO AJUSTE".
+        --
+        -- Selada ANTES do ajuste, e nao depois - foi a garantia 7 que o
+        -- usuario fixou. A ordem importa porque a fronteira entre "dentro" e
+        -- "fora" do periodo de calibracao e uma data que alguem escolhe, e a
+        -- quinta pergunta do teste de escopo mira exatamente isso. Selar
+        -- depois de ver `p10` seria escolher o periodo que confirma.
+        --
+        -- DISJUNTA do piloto por CHECK: "as mesmas barras nunca servem as
+        -- duas" (ADR 0027, secao 7).
+        -- ==================================================================
+        CREATE TABLE janela_revalidacao (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+
+            de_ms            INTEGER NOT NULL,
+            ate_ms_exclusive INTEGER NOT NULL,
+
+            -- De onde ela nasceu: o fim do piloto. Guardar torna a disjuncao
+            -- conferivel sem ir procurar a outra tabela.
+            piloto_ate_ms_exclusive INTEGER NOT NULL,
+
+            selada_em TEXT NOT NULL,
+
+            UNIQUE (contrato, venue, symbol),
+            CHECK (ate_ms_exclusive > de_ms),
+            CHECK (de_ms >= piloto_ate_ms_exclusive)
+        );
+
+        CREATE TRIGGER janela_revalidacao_sem_update
+        BEFORE UPDATE ON janela_revalidacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_revalidacao e selada: mover a fronteira depois de selar e escolher o periodo que confirma');
+        END;
+
+        CREATE TRIGGER janela_revalidacao_sem_delete
+        BEFORE DELETE ON janela_revalidacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_revalidacao e selada: apagar para reselar e a mesma coisa que mover a fronteira');
+        END;
+
+        -- ==================================================================
+        -- VERSAO DE CALIBRACAO. Imutavel, e ela NAO altera run anterior
+        -- nenhum: o ajuste nasce como `config_version` NOVA, e cada run
+        -- continua apontando para a config sob a qual foi aberto.
+        -- ==================================================================
+        CREATE TABLE calibracao_versao (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+
+            config_version_origem INTEGER NOT NULL REFERENCES config_version(id),
+            -- NULL quando NADA foi aplicado - e "nada aplicado" e um desfecho
+            -- legitimo, nao uma falha: se nenhum regime alcancou a amostra, a
+            -- resposta honesta e que nao houve calibracao.
+            config_version_nova   INTEGER REFERENCES config_version(id),
+
+            piloto_de_ms            INTEGER NOT NULL,
+            piloto_ate_ms_exclusive INTEGER NOT NULL,
+            janela_revalidacao_id   INTEGER NOT NULL
+                                    REFERENCES janela_revalidacao(id),
+
+            -- Tudo em inteiros. `delta` e FIXO em 500 mili-bps (0,5 bps) e
+            -- esta gravado em cada versao para que nenhuma leitura futura
+            -- precise supor qual regua valia.
+            delta_mili_bps   INTEGER NOT NULL CHECK (delta_mili_bps = 500),
+            n                INTEGER NOT NULL,
+            n_efetivo_x1000  INTEGER NOT NULL,
+            tau_x1000        INTEGER NOT NULL,
+            sigma_e_x1000    INTEGER NOT NULL,
+            p10_mili_bps     INTEGER NOT NULL,
+            n_necessario     INTEGER NOT NULL,
+
+            aplicado  INTEGER NOT NULL CHECK (aplicado IN (0, 1)),
+            motivo    TEXT    NOT NULL,
+            criado_em TEXT    NOT NULL,
+
+            -- Aplicado exige config nova; nao aplicado proibe.
+            CHECK (
+                (aplicado = 1 AND config_version_nova IS NOT NULL)
+                OR (aplicado = 0 AND config_version_nova IS NULL)
+            )
+        );
+
+        CREATE TRIGGER calibracao_versao_sem_update
+        BEFORE UPDATE ON calibracao_versao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_versao e imutavel: recalibrar produz uma versao NOVA, e a antiga continua descrevendo os resultados obtidos sob ela');
+        END;
+
+        CREATE TRIGGER calibracao_versao_sem_delete
+        BEFORE DELETE ON calibracao_versao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_versao e imutavel: apagar uma calibracao deixaria orfaos os resultados que a citam');
+        END;
+
+        -- ==================================================================
+        -- USO UNICO DA REVALIDACAO. Mesmo desenho do holdout: `UNIQUE` na
+        -- janela, e nao disciplina de quem chama.
+        -- ==================================================================
+        CREATE TABLE revalidacao_uso (
+            janela_id            INTEGER PRIMARY KEY
+                                 REFERENCES janela_revalidacao(id),
+            calibracao_versao_id INTEGER NOT NULL
+                                 REFERENCES calibracao_versao(id),
+            lb95_mili_bps        INTEGER NOT NULL,
+            p10_mili_bps         INTEGER NOT NULL,
+            n                    INTEGER NOT NULL,
+            passou               INTEGER NOT NULL CHECK (passou IN (0, 1)),
+            usada_em             TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER revalidacao_uso_sem_update
+        BEFORE UPDATE ON revalidacao_uso
+        BEGIN
+            SELECT RAISE(ABORT,
+                'revalidacao_uso e de uso UNICO: revalidar de novo na mesma janela e repetir o teste ate passar');
+        END;
+
+        CREATE TRIGGER revalidacao_uso_sem_delete
+        BEFORE DELETE ON revalidacao_uso
+        BEGIN
+            SELECT RAISE(ABORT,
+                'revalidacao_uso e de uso UNICO: apagar o uso devolveria uma janela ja consumida');
+        END;
+
+        -- ==================================================================
+        -- O RESULTADO POR REGIME. Um regime sem amostra permanece
+        -- NAO_CALIBRADO - sem herdar parametro de outro regime, sem
+        -- agrupamento, sem interpolacao (ADR 0027, secao 7).
+        --
+        -- E isso vira CONDICAO DE VALIDADE de todo resultado obtido nele, a
+        -- mesma disciplina que §8.4.1.1 aplica ao nivel de fidelidade.
+        -- ==================================================================
+        CREATE TABLE calibracao_regime (
+            calibracao_versao_id INTEGER NOT NULL
+                                 REFERENCES calibracao_versao(id),
+            regime TEXT NOT NULL CHECK (
+                regime IN ('vol_baixa', 'vol_media', 'vol_alta', 'indefinido')
+            ),
+
+            n               INTEGER NOT NULL,
+            n_efetivo_x1000 INTEGER NOT NULL,
+            p10_mili_bps    INTEGER,
+            n_necessario    INTEGER,
+
+            estado TEXT NOT NULL CHECK (estado IN ('calibrado', 'nao_calibrado')),
+            motivo TEXT,
+
+            -- O `spread_bps` que ESTE regime pediria, em bps x 1000. NULL
+            -- quando nao calibrado - e NULL aqui significa "nao se sabe", que
+            -- e diferente de zero.
+            spread_bps_x1000 INTEGER,
+
+            PRIMARY KEY (calibracao_versao_id, regime),
+            CHECK (
+                estado = 'nao_calibrado' OR
+                (p10_mili_bps IS NOT NULL AND spread_bps_x1000 IS NOT NULL)
+            ),
+            CHECK (estado = 'calibrado' OR motivo IS NOT NULL)
+        );
+
+        CREATE TRIGGER calibracao_regime_sem_update
+        BEFORE UPDATE ON calibracao_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_regime e imutavel: promover um regime de nao_calibrado a calibrado depois e afrouxar a regua olhando o resultado');
+        END;
+
+        CREATE TRIGGER calibracao_regime_sem_delete
+        BEFORE DELETE ON calibracao_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_regime e imutavel: apagar o regime nao calibrado esconderia a condicao de validade que ele impoe');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

@@ -19,7 +19,9 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ...aovivo import bbo
-from ...calibracao import bootstrap, observacao, piloto, shadow
+from ...calibracao import ajuste, bootstrap, observacao, piloto, shadow
+from ...dataset import loader as dataset_loader
+from ...maos_rapidas import baselines
 from ...config import service as config_service
 from ..comum import _conn
 
@@ -214,3 +216,175 @@ def estado(
         "delta_mili_bps": 500,
         "limite": LIMITE_DECLARADO,
     }
+
+
+# ===========================================================================
+# O ajuste. As tres acoes sao SEPARADAS de proposito.
+#
+# Selar, ajustar e revalidar sao irreversiveis e acontecem em momentos
+# diferentes do calendario. Junta-las num botao so faria a ordem virar detalhe
+# de implementacao - e a ORDEM e a garantia 7: a janela de revalidacao e selada
+# ANTES do ajuste, porque sela-la depois de ver `p10` e escolher o periodo que
+# confirma.
+# ===========================================================================
+
+
+class PedidoDeAjuste(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    author: str = Field(min_length=1, max_length=120)
+    venue: str = "binance"
+    symbol: str = "BTCUSDT"
+    contrato: str = CONTRATO_PADRAO
+    lado: str = Field(default="compra", pattern="^(compra|venda)$")
+
+
+@router.post("/selar-revalidacao", status_code=status.HTTP_201_CREATED)
+def selar_revalidacao(
+    request: Request, pedido: PedidoDeAjuste
+) -> dict[str, Any]:
+    """Sela o periodo posterior reservado. **Antes do ajuste.**
+
+    Idempotente: chamar de novo devolve a janela que ja existe, e nunca uma
+    nova. Uma segunda janela seria uma segunda chance de escolher a fronteira.
+    """
+    conn = _conn(request)
+    try:
+        janela = ajuste.selar_revalidacao(
+            conn, contrato=pedido.contrato, venue=pedido.venue,
+            symbol=pedido.symbol,
+        )
+    except ajuste.PilotoAberto as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    return {"janela_de_revalidacao": janela}
+
+
+@router.post("/ajustar", status_code=status.HTTP_201_CREATED)
+def ajustar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
+    """Estima sobre o piloto, deriva o ajuste e reexecuta o B1 negativo.
+
+    **O B1 negativo vem junto, e nao numa rota a parte** (criterio 7 do
+    incremento 18): §14.4 o torna portao, e o que ele responde e "operar ao
+    acaso continua perdendo depois do ajuste?". Se passasse a dar lucro, a
+    calibracao estaria errada e nenhum numero medido nela significaria coisa
+    alguma - entao a conferencia pertence ao mesmo ato que produz o ajuste.
+    """
+    conn = _conn(request)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status_code=503, detail="sem config_version")
+
+    try:
+        r = ajuste.aplicar(
+            conn, contrato=pedido.contrato, venue=pedido.venue,
+            symbol=pedido.symbol, config=versao.config,
+            config_version_id=versao.id, autor=pedido.author,
+            settings=request.app.state.settings, lado=pedido.lado,
+        )
+    except ajuste.PilotoAberto as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except ajuste.RevalidacaoNaoSelada as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except ajuste.NadaACalibrar as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+
+    r["b1_negativo"] = _b1_negativo(conn, r)
+    r["limite"] = LIMITE_DECLARADO
+    return r
+
+
+def _b1_negativo(conn, resultado: dict[str, Any]) -> dict[str, Any]:
+    """A2 do Portao A, reexecutado sob a versao CALIBRADA (R67).
+
+    Sem ajuste aplicado nao ha o que reexecutar, e dizer "passou" nesse caso
+    seria afirmar uma conferencia que nao aconteceu - `None` com o motivo
+    escrito, como o Portao A ja faz com criterio nao medido.
+    """
+    nova = resultado.get("config_version_nova")
+    if nova is None:
+        return {
+            "reexecutado": False,
+            "motivo": "nenhum ajuste foi aplicado, entao nao ha versao nova "
+                      "sob a qual reexecutar. O B1 sob a config vigente "
+                      "continua valendo, e e o do Portao A",
+        }
+
+    nova_config = config_service.versao_por_id(conn, int(nova))
+    meta = dataset_loader.dataset_vigente(conn)
+    if nova_config is None or meta is None:
+        return {
+            "reexecutado": False,
+            "motivo": "nao ha dataset ingerido: o B1 roda sobre a janela "
+                      "historica, e sem ela nao ha o que sortear",
+        }
+
+    baselines.rodar_comparacao(
+        conn, dataset_id=meta.id, config=nova_config.config,
+        config_version_id=int(nova), semente=42,
+    )
+    corridas = baselines.todos_os_b1(conn, int(nova))
+    semente_cents = nova_config.config.seed_capital_usd_cents
+    perdas = [
+        {
+            "operacoes_alvo": c["operacoes_alvo"],
+            "p50_cents": c["p50"],
+            "perda_cents": semente_cents - c["p50"],
+        }
+        for c in corridas
+    ]
+    negativo = bool(perdas) and all(p["perda_cents"] > 0 for p in perdas)
+    return {
+        "reexecutado": True,
+        "config_version": int(nova),
+        "corridas": perdas,
+        "negativo": negativo,
+        "criterio": "operar ao acaso perde, depois do ajuste (R67, A2)",
+        "consequencia_se_falhar": "se operar ao acaso passasse a dar lucro, a "
+                                  "calibracao estaria errada e nenhum numero "
+                                  "medido nela significaria coisa alguma",
+    }
+
+
+@router.post("/revalidar", status_code=status.HTTP_201_CREATED)
+def revalidar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
+    """Confirma na janela selada, **sem novo ajuste**, uma unica vez."""
+    conn = _conn(request)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status_code=503, detail="sem config_version")
+
+    ultima = conn.execute(
+        "SELECT id FROM calibracao_versao"
+        " WHERE contrato = ? AND venue = ? AND symbol = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (pedido.contrato, pedido.venue, pedido.symbol),
+    ).fetchone()
+    if ultima is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="nao ha calibracao para revalidar: ajuste antes",
+        )
+
+    try:
+        return ajuste.revalidar(
+            conn, contrato=pedido.contrato, venue=pedido.venue,
+            symbol=pedido.symbol, config=versao.config,
+            config_version_id=versao.id, calibracao_id=int(ultima["id"]),
+            lado=pedido.lado,
+        )
+    except ajuste.RevalidacaoJaConsumida as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except (ajuste.RevalidacaoNaoSelada, ajuste.NadaACalibrar) as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e

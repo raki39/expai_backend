@@ -119,6 +119,9 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 |---|---|---|
 | POST | `/api/calibracao/rodar` | shadow do B3 sobre o fluxo, e as observações do período. **Não aceita regra**: §11.2.1 manda rodar só o B3, e a recusa é por construção |
 | GET | `/api/calibracao` | previsto contra observado: `p10(E2)`, o limite inferior do IC, τ e o tamanho de amostra necessário. **Só sai com o piloto fechado** |
+| POST | `/api/calibracao/selar-revalidacao` | sela o período posterior reservado. **Antes do ajuste** — selá-lo depois de ver `p10` é escolher o período que confirma |
+| POST | `/api/calibracao/ajustar` | estima sobre o piloto, deriva o ajuste e **reexecuta o B1 negativo** sob a versão calibrada. Nunca torna o simulador mais otimista |
+| POST | `/api/calibracao/revalidar` | confirma na janela selada, **sem novo ajuste** e **uma única vez**. Exige `LB₉₅(p10(E2)) ≥ 0`, não o ponto |
 
 ### ledger — partidas dobradas, dois livros, ciclo do run
 

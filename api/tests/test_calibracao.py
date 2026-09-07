@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from app.calibracao import bootstrap, observacao
+from app.calibracao import bootstrap, observacao, piloto
 
 # ===========================================================================
 # Séries sintéticas, com dependência conhecida
@@ -727,3 +727,544 @@ def test_a_rota_recusa_corpo_com_campo_de_regra(client):
               "regra": {"familia": "cruzamento_medias"}},
     )
     assert r.status_code == 422
+
+
+# ===========================================================================
+# O AJUSTE. Uma garantia do usuário por teste, e os nomes dizem qual.
+# ===========================================================================
+
+ABERTURA = 60_000_00000000
+
+# Com `spread_bps=1`, `slippage_bps=2`, `penalty_bps=1`, o simulador soma
+# (0,5 + 2 + 1) = 3,5 bps sobre a abertura:
+#
+#     p_exec_previsto = ceil(60_000 × 1,00035) = 60_021
+#
+# Então o `ask` escolhido controla `E2 = previsto − ask` diretamente, e é assim
+# que estes testes põem `p10` de um lado ou do outro de δ.
+ASK_PESSIMISTA = 60_001_00000000    # E2 ≈ 3.333 mili-bps, muito acima de δ
+ASK_JUSTO = 60_020_00000000         # E2 ≈ 167 mili-bps, ABAIXO de δ = 500
+
+
+def semear_par(
+    conn: sqlite3.Connection, i: int, *, ask: int, disponivel: bool = True,
+) -> "object":
+    """Uma barra e a amostra de BBO do mesmo instante."""
+    from app.aovivo import bbo as m
+
+    t = T0 + i * GRADE
+    conn.execute(
+        "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+        " open, high, low, close, volume, quote_volume, trades,"
+        " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+        " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+        "?,8,8,'x','ao_vivo')",
+        (t, ABERTURA, ABERTURA, ABERTURA, ABERTURA, GRADE),
+    )
+    if not disponivel:
+        return m.Amostra(t_grid_ms=t, disponivel=False, motivo="desconectado")
+
+    corrigido = t - 500
+    # Variação de 1 unidade a cada 3 instantes: série constante tem
+    # desvio-padrão ZERO, e o incremento 17 já registrou um teste que passava
+    # pelo motivo errado por causa disso. Aqui a variação é mínima e
+    # determinística - o bastante para o bootstrap não degenerar.
+    return m.Amostra(
+        t_grid_ms=t, disponivel=True,
+        bid=ask - 200_00000, bid_qty=5_00000000,
+        ask=ask + (i % 3) * 1_000_000, ask_qty=99_00000000, u=i + 1,
+        received_at_ms=corrigido + 2_450,
+        received_at_corrigido_ms=corrigido,
+        sampled_at_ms=corrigido, defasagem_ms=500,
+        offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
+        relogio_medido_em_ms=corrigido - 30_000,
+    )
+
+
+def montar_piloto(
+    conn: sqlite3.Connection, cfg, *, ask: int, aquecimento: int = 0,
+    instantes: int = 1_400,
+) -> None:
+    """Fecha um piloto real, com `aquecimento` barras sem BBO antes dele.
+
+    O aquecimento existe porque classificar regime exige **672 barras
+    anteriores** (ADR 0026): sem ele, todo instante do piloto sai `indefinido`
+    e o teste não conseguiria alcançar o ramo `calibrado`.
+    """
+    from app.aovivo import bbo as m
+    from app.calibracao import observacao as obs
+
+    serie = m.Serie(venue="binance", symbol="BTCUSDT",
+                    price_scale_exp=8, volume_scale_exp=8)
+    amostras = [
+        semear_par(conn, i, ask=ask, disponivel=False)
+        for i in range(aquecimento)
+    ] + [
+        semear_par(conn, i, ask=ask)
+        for i in range(aquecimento, aquecimento + instantes)
+    ]
+    m.receber(conn, serie, CONTRATO, amostras)
+    obs.registrar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+        orcamento_cents=1_000, lados=("compra",),
+    )
+    piloto.fechar(
+        conn, m.Serie(venue="binance", symbol="BTCUSDT",
+                      price_scale_exp=0, volume_scale_exp=0),
+        CONTRATO,
+    )
+
+
+# --------------------------------------------------- garantia 1: piloto fechado
+
+
+def test_GARANTIA_1_nao_ha_estimativa_com_o_piloto_ABERTO(conn, cfg):
+    """Estimar antes de o período declarado terminar deixaria a janela crescer
+    até o número ficar agradável."""
+    from app.calibracao import ajuste
+
+    with pytest.raises(ajuste.PilotoAberto) as e:
+        ajuste.estimar(
+            conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+            config=cfg.config, config_version_id=cfg.id,
+        )
+    assert "nao foi fechada" in str(e.value)
+
+
+# ------------------------------------------------ garantia 2: só E2, nunca P&L
+
+
+def test_GARANTIA_2_o_ajuste_le_SO_E2_e_nunca_desempenho(conn, cfg):
+    """Calibrar olhando o P&L do B3 seria ajustar o simulador até a estratégia
+    parecer boa - a forma mais direta de fabricar um resultado."""
+    import re
+    from pathlib import Path
+
+    from tests._prosa import sql_sem_prosa
+
+    sql = sql_sem_prosa(Path("app/calibracao/ajuste.py"))
+    for tabela in ("execution", "baseline_result", "ledger_entry",
+                   "ledger_transaction", "hypothesis", "shadow_ordem", "run"):
+        assert not re.search(rf"\b(from|join)\s+{tabela}\b", sql, re.IGNORECASE), (
+            f"o ajuste lê {tabela!r}: ele só pode ler E2"
+        )
+    assert re.search(r"\bfrom\s+calibracao_observacao\b", sql, re.IGNORECASE)
+    assert "e2_mili_bps" in sql
+
+
+# --------------------------------------------------- garantia 3: δ não relaxa
+
+
+def test_GARANTIA_3_delta_e_FIXO_e_nao_ha_como_relaxar(conn, cfg):
+    """O usuário retirou essa saída ao fechar a D45.
+
+    Relaxar "porque não cabe na reserva" é ajustar a régua ao CALENDÁRIO, e a
+    resposta honesta é que aquele regime não foi calibrado - não que ele foi
+    calibrado com menos rigor.
+    """
+    import inspect
+
+    from app.calibracao import ajuste
+
+    assert ajuste.DELTA_MILI_BPS == 500
+
+    for fn in (ajuste.estimar, ajuste.derivar, ajuste.aplicar,
+               ajuste.estimar_por_regime):
+        nomes = set(inspect.signature(fn).parameters)
+        assert not (nomes & {"delta", "delta_mili_bps", "precisao", "tolerancia"}), (
+            f"{fn.__name__} aceita delta: ele é FIXO"
+        )
+
+    # E o banco grava δ em cada versão, com CHECK - nenhuma leitura futura
+    # precisa supor qual régua valia.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO calibracao_versao (contrato, venue, symbol,"
+            " config_version_origem, piloto_de_ms, piloto_ate_ms_exclusive,"
+            " janela_revalidacao_id, delta_mili_bps, n, n_efetivo_x1000,"
+            " tau_x1000, sigma_e_x1000, p10_mili_bps, n_necessario, aplicado,"
+            " motivo, criado_em)"
+            " VALUES ('bbo@1','b','s',1,1,2,1,900,1,1,1,1,1,1,0,'x','x')"
+        )
+
+
+# ------------------------------------------ garantia 4: regime não calibrado
+
+
+def test_GARANTIA_4_regime_sem_amostra_fica_NAO_CALIBRADO(conn, cfg):
+    """Sem herdar parâmetro de outro regime, sem agrupamento, sem interpolação.
+
+    E isso vira condição de validade de todo resultado obtido nele - a mesma
+    disciplina que §8.4.1.1 aplica ao nível de fidelidade.
+    """
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    por_regime = {r.regime: r for r in e.por_regime}
+    assert set(por_regime) == set(ajuste.REGIMES)
+
+    # `indefinido` NUNCA é calibrado: ele não é regime da taxonomia, e sim a
+    # declaração de que ainda não dá para dizer. Tratá-lo como quarto regime
+    # seria calibrar sobre uma classe que não existe.
+    assert por_regime["indefinido"].estado == "nao_calibrado"
+    assert "672 barras" in por_regime["indefinido"].motivo
+    assert por_regime["indefinido"].n > 0, (
+        "os primeiros 672 instantes do piloto não têm histórico anterior "
+        "suficiente, e caem aqui"
+    )
+
+    # Preço constante => volatilidade ZERO => só `vol_baixa` recebe amostra.
+    # Os outros dois ficam sem NENHUMA observação, e é exatamente esse o caso
+    # que a garantia 4 governa: sem herdar parâmetro, sem agrupamento, sem
+    # interpolação.
+    for nome in ("vol_media", "vol_alta"):
+        assert por_regime[nome].n == 0
+        assert por_regime[nome].estado == "nao_calibrado"
+        assert por_regime[nome].spread_bps_x1000 is None, (
+            "não calibrado não carrega parâmetro - nem herdado, nem próprio"
+        )
+        assert "herdar" in por_regime[nome].motivo
+
+
+def test_GARANTIA_4_o_regime_COM_amostra_e_calibrado(conn, cfg):
+    """O outro lado da mesma regra.
+
+    Sem ele, "tudo fica não calibrado" passaria como se fosse a garantia
+    funcionando - e um caminho que nunca calibra nada não é conservador, é
+    quebrado. É a mesma razão pela qual o Portão A precisa de um número que
+    prove que ele não passou por ser surdo.
+    """
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, aquecimento=680, instantes=1_400)
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    por_regime = {r.regime: r for r in e.por_regime}
+    # Preço constante no aquecimento => volatilidade ZERO => `vol_baixa`.
+    assert por_regime["vol_baixa"].n > 0, [
+        (r.regime, r.n) for r in e.por_regime
+    ]
+    assert por_regime["vol_baixa"].estado == "calibrado"
+    assert por_regime["vol_baixa"].spread_bps_x1000 is not None
+
+
+# ------------------------------------------- garantia 5: nunca mais otimista
+
+
+def test_GARANTIA_5_config_ja_pessimista_e_MANTIDA(conn, cfg):
+    """Reduzir custo tornaria o simulador mais otimista, e esse é o único erro
+    que este projeto não pode cometer."""
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, aquecimento=680,
+                  instantes=1_400)
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    a = ajuste.derivar(e, cfg.config)
+    assert e.p10_mili_bps > ajuste.DELTA_MILI_BPS, "o cenário é o de folga"
+    assert not a.aplicavel
+    assert a.spread_bps_x1000_depois == a.spread_bps_x1000_antes
+    assert "MANTIDA" in a.motivo
+
+
+def test_GARANTIA_5_o_ajuste_NUNCA_devolve_valor_menor(conn, cfg):
+    """A propriedade, e não um caso: não há ramo que reduza custo."""
+    from app.calibracao import ajuste
+
+    for p10 in (-5_000.0, -100.0, 0.0, 499.0, 500.0, 5_000.0):
+        pedido = ajuste._spread_necessario_x1000(p10, cfg.config)
+        vigente = int(float(cfg.config.spread_bps) * 1000)
+        assert pedido >= vigente, f"p10={p10} reduziu o custo"
+
+
+def test_GARANTIA_5_o_deficit_entra_DOBRADO_no_campo(conn, cfg):
+    """`spread_bps` é o spread CHEIO, aplicado pela metade em cada lado.
+
+    Somar o déficit sem dobrar deixaria metade dele fora - e o simulador
+    continuaria otimista com cara de calibrado.
+    """
+    from app.calibracao import ajuste
+
+    vigente = int(float(cfg.config.spread_bps) * 1000)
+    # Déficit de 333 mili-bps por lado => +666 no campo.
+    assert ajuste._spread_necessario_x1000(167.0, cfg.config) == vigente + 666
+
+
+# ------------------------------------ garantia 7: revalidação selada e única
+
+
+def test_GARANTIA_7_ajustar_SEM_revalidacao_selada_e_recusado(conn, cfg):
+    """Ajustar sem período reservado deixaria a confirmação para depois - e
+    "depois" é quando já se sabe o que se quer confirmar."""
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, aquecimento=680, instantes=1_400)
+    with pytest.raises(ajuste.RevalidacaoNaoSelada) as e:
+        ajuste.aplicar(
+            conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+            config=cfg.config, config_version_id=cfg.id, autor="teste",
+            settings=None,
+        )
+    assert "ANTES de ajustar" in str(e.value)
+
+
+def test_GARANTIA_7_a_revalidacao_e_DISJUNTA_do_piloto(conn, cfg):
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    j = ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT"
+    )
+    janela = piloto.ler(
+        conn,
+        __import__("app.aovivo.bbo", fromlist=["Serie"]).Serie(
+            venue="binance", symbol="BTCUSDT",
+            price_scale_exp=0, volume_scale_exp=0),
+        CONTRATO,
+    )
+    assert j["de_ms"] == janela.ate_ms_exclusive
+    assert j["ate_ms_exclusive"] > j["de_ms"]
+
+
+def test_GARANTIA_7_selar_de_novo_devolve_a_MESMA_janela(conn, cfg):
+    """Uma segunda janela seria uma segunda chance de escolher a fronteira."""
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    a = ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+    b = ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+    assert a["id"] == b["id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM janela_revalidacao"
+    ).fetchone()[0] == 1
+
+
+def test_GARANTIA_7_a_janela_selada_e_IMUTAVEL(conn, cfg):
+    from app.calibracao import ajuste
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE janela_revalidacao SET de_ms = 1")
+    assert "periodo que confirma" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM janela_revalidacao")
+
+
+@pytest.fixture
+def uso_real(conn: sqlite3.Connection, cfg):
+    """Uma janela selada e uma calibração DE VERDADE, com um uso gravado.
+
+    As duas primeiras versões destes testes eram VAZIAS e passavam pelo motivo
+    errado: `INSERT` com `janela_id = 1` inexistente falhava por CHAVE
+    ESTRANGEIRA, e um `UPDATE` numa tabela sem linhas nunca dispara um
+    `BEFORE UPDATE`. Uma trava conferida sobre tabela vazia não foi conferida.
+    """
+    conn.execute(
+        "INSERT INTO janela_revalidacao (contrato, venue, symbol, de_ms,"
+        " ate_ms_exclusive, piloto_ate_ms_exclusive, selada_em)"
+        " VALUES (?, 'binance', 'BTCUSDT', 100, 200, 100, 'x')",
+        (CONTRATO,),
+    )
+    janela_id = conn.execute(
+        "SELECT id FROM janela_revalidacao"
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO calibracao_versao (contrato, venue, symbol,"
+        " config_version_origem, piloto_de_ms, piloto_ate_ms_exclusive,"
+        " janela_revalidacao_id, delta_mili_bps, n, n_efetivo_x1000,"
+        " tau_x1000, sigma_e_x1000, p10_mili_bps, n_necessario, aplicado,"
+        " motivo, criado_em)"
+        " VALUES (?, 'binance', 'BTCUSDT', ?, 1, 100, ?, 500, 10, 10000,"
+        " 1000, 100, 600, 5, 0, 'teste', 'x')",
+        (CONTRATO, cfg.id, janela_id),
+    )
+    calibracao_id = conn.execute(
+        "SELECT id FROM calibracao_versao"
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO revalidacao_uso (janela_id, calibracao_versao_id,"
+        " lb95_mili_bps, p10_mili_bps, n, passou, usada_em)"
+        " VALUES (?, ?, 10, 600, 500, 1, 'x')",
+        (janela_id, calibracao_id),
+    )
+    return {"janela_id": janela_id, "calibracao_id": calibracao_id}
+
+
+def test_GARANTIA_7_a_revalidacao_e_de_USO_UNICO(conn, cfg, uso_real):
+    """O `PRIMARY KEY (janela_id)` é quem impõe - mesmo desenho do holdout.
+
+    E a janela e a calibração existem: sem elas, o `INSERT` falharia por chave
+    estrangeira e o teste passaria sem exercitar a trava.
+    """
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute(
+            "INSERT INTO revalidacao_uso (janela_id, calibracao_versao_id,"
+            " lb95_mili_bps, p10_mili_bps, n, passou, usada_em)"
+            " VALUES (?, ?, 0, 0, 1, 0, 'y')",
+            (uso_real["janela_id"], uso_real["calibracao_id"]),
+        )
+    assert "UNIQUE" in str(e.value) or "PRIMARY" in str(e.value), str(e.value)
+
+
+def test_GARANTIA_7_o_uso_e_imutavel(conn, cfg, uso_real):
+    """`UPDATE` em tabela vazia nunca dispara `BEFORE UPDATE` - a primeira
+    versão deste teste passava sem tocar o gatilho."""
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE revalidacao_uso SET passou = 0")
+    assert "ate passar" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("DELETE FROM revalidacao_uso")
+    assert "ja consumida" in str(e.value)
+
+
+def test_GARANTIA_6_a_versao_de_calibracao_e_IMUTAVEL(conn, cfg, uso_real):
+    """Recalibrar produz uma versão NOVA, e a antiga continua descrevendo os
+    resultados obtidos sob ela."""
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE calibracao_versao SET p10_mili_bps = 0")
+    assert "versao NOVA" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM calibracao_versao")
+
+
+# ------------------------------------------- o critério muda entre as janelas
+
+
+def test_a_revalidacao_exige_o_LIMITE_INFERIOR_e_nao_o_ponto():
+    """`p10 >= 0` diz que o melhor palpite é que o modelo é pessimista.
+    `LB95 >= 0` diz que há 95% de confiança de que ele é.
+
+    Confirmação que aceita estimativa pontual não confirma nada.
+    """
+    from pathlib import Path
+
+    fonte = Path("app/calibracao/ajuste.py").read_text(encoding="utf-8")
+    assert "ic.limite_inferior >= 0" in fonte
+    assert "LB95(p10(E2)) >= 0" in fonte
+
+
+# ------------------------------- garantias 6 e 8: versão nova, e o B1 depois
+
+
+def test_GARANTIA_6_o_ajuste_NAO_altera_run_anterior(conn, cfg):
+    """A calibração nasce como `config_version` NOVA.
+
+    Cada run continua apontando para a config sob a qual foi aberto, e nenhum
+    resultado já publicado muda de valor - a imutabilidade da `config_version`
+    é quem entrega isso, e ela já existia.
+    """
+    from app.calibracao import ajuste
+    from app.config import service as config_service
+    from app.settings import get_settings
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+
+    hash_antes = config_service.versao_por_id(conn, cfg.id).config_hash
+    spread_antes = config_service.versao_por_id(conn, cfg.id).config.spread_bps
+
+    r = ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="teste",
+        settings=get_settings(),
+    )
+    assert r["aplicado"] is True, r["motivo"]
+    assert r["config_version_nova"] != cfg.id
+
+    # A versão de ORIGEM não foi tocada.
+    depois = config_service.versao_por_id(conn, cfg.id)
+    assert depois.config_hash == hash_antes
+    assert depois.config.spread_bps == spread_antes
+
+    # E a nova tem o spread ajustado.
+    nova = config_service.versao_por_id(conn, r["config_version_nova"])
+    assert nova.config.spread_bps > spread_antes
+
+
+def test_GARANTIA_8_o_B1_negativo_e_reexecutado_sob_a_versao_CALIBRADA(
+    conn, cfg, client
+):
+    """R67 / A2 do Portão A: operar ao acaso continua perdendo depois do ajuste?
+
+    Se passasse a dar lucro, a calibração estaria errada e nenhum número
+    medido nela significaria coisa alguma - então a conferência pertence ao
+    mesmo ato que produz o ajuste, e não a uma rota que alguém lembra de
+    chamar.
+    """
+    import sys
+
+    from tests.test_maos_rapidas import precos_passeio
+    from tests.test_simulador import criar_dataset
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    assert dataset_id
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    r = client.post("/api/calibracao/selar-revalidacao", headers=CABECALHO,
+                    json={"author": "teste"})
+    assert r.status_code == 201, r.text
+
+    r = client.post("/api/calibracao/ajustar", headers=CABECALHO,
+                    json={"author": "teste"})
+    assert r.status_code == 201, r.text
+    corpo = r.json()
+
+    assert corpo["aplicado"] is True, corpo["motivo"]
+    b1 = corpo["b1_negativo"]
+    assert b1["reexecutado"] is True, b1.get("motivo")
+    assert b1["config_version"] == corpo["config_version_nova"]
+    assert b1["corridas"], "o B1 tem de ter rodado sob a versão nova"
+    assert b1["negativo"] is True, (
+        f"operar ao acaso passou a dar LUCRO depois do ajuste: {b1['corridas']}"
+    )
+
+
+def test_sem_ajuste_aplicado_o_B1_NAO_afirma_ter_rodado(conn, cfg, client):
+    """Dizer "passou" sem reexecutar seria afirmar uma conferência que não
+    aconteceu - `None` com o motivo escrito, como o Portão A já faz."""
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
+    client.post("/api/calibracao/selar-revalidacao", headers=CABECALHO,
+                json={"author": "teste"})
+    r = client.post("/api/calibracao/ajustar", headers=CABECALHO,
+                    json={"author": "teste"})
+    corpo = r.json()
+    assert corpo["aplicado"] is False
+    assert corpo["b1_negativo"]["reexecutado"] is False
+    assert "nenhum ajuste" in corpo["b1_negativo"]["motivo"]
+
+
+def test_a_revalidacao_VAZIA_nao_consome_a_janela(conn, cfg, client):
+    """Consumir a janela sem dado seria gastar a confirmação sem confirmar."""
+    from app.calibracao import ajuste
+    from app.settings import get_settings
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+    ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="t",
+        settings=get_settings(),
+    )
+    r = client.post("/api/calibracao/revalidar", headers=CABECALHO,
+                    json={"author": "teste"})
+    assert r.status_code == 409
+    assert "NAO e consumida" in r.json()["detail"]
+
+    janela = ajuste.ler_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT")
+    assert janela["consumida"] is False
