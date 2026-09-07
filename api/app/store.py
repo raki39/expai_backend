@@ -3,8 +3,9 @@
 Regras que valem para todo o projeto:
 
 - O `runner` e o unico dono de escrita durante um run. A API le.
-- WAL ligado, `busy_timeout` definido. Com um processo, um escritor e
-  replicas proibidas pela plataforma, nao ha escrita concorrente.
+- WAL ligado, `busy_timeout` definido. Um PROCESSO escritor, e replicas
+  proibidas pela plataforma. **Escrita concorrente entre THREADS existe na
+  0C** e e coberta por WAL + `busy_timeout` + conexao por thread (ADR 0031).
 - Migracao roda no boot, nunca no build.
 """
 
@@ -61,8 +62,20 @@ def conectar(db_path: Path) -> sqlite3.Connection:
 #
 # Conexao por thread e o modo normal de operar SQLite: com `journal_mode=WAL`,
 # varios leitores e um escritor convivem sem se bloquear, e `busy_timeout`
-# cobre a espera de escrita. Nada aqui vira concorrencia de ESCRITA: na 0A o
-# run e atomico (ADR 0018) e ha um agente so.
+# cobre a espera de escrita.
+#
+# A ULTIMA FRASE DESTE COMENTARIO DESCREVIA A 0A, e foi corrigida na 0C. Ela
+# dizia "nada aqui vira concorrencia de ESCRITA: na 0A o run e atomico (ADR
+# 0018) e ha um agente so". Na 0C ha escrita concorrente, e ela e ROTINA:
+#
+#   - as rotas POST do painel sao sincronas, e correm no threadpool;
+#   - `POST /api/aovivo/barras` e a unica rota `async`, e grava na thread do
+#     event loop -- a cada 5 minutos, para sempre, vinda do rele;
+#   - o executor do forward (incremento 18) sera mais uma.
+#
+# O que torna isso seguro NAO e haver um escritor so: e WAL, `busy_timeout` e
+# uma conexao por thread, os tres. "Escritor unico" e verdade de PROCESSO e
+# falso de THREAD, e o ADR 0031 corrige o criterio da D44 por isso.
 _local = threading.local()
 
 
