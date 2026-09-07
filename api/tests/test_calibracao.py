@@ -480,3 +480,250 @@ def test_config_incompativel_com_o_contrato_NAO_MEDE_NADA(conn, cfg):
     assert conn.execute(
         "SELECT COUNT(*) FROM calibracao_observacao"
     ).fetchone()[0] == 0
+
+
+# ===========================================================================
+# O shadow do B3: a recusa é ESTRUTURAL
+# ===========================================================================
+
+
+def semear_barras(conn: sqlite3.Connection, precos: list[int]) -> None:
+    """Só barras, sem BBO — o shadow lê `stream_bar`."""
+    for i, p in enumerate(precos):
+        t = T0 + i * GRADE
+        conn.execute(
+            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            " open, high, low, close, volume, quote_volume, trades,"
+            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+            "?,8,8,'x','ao_vivo')",
+            (t, p, p + 1000, p - 1000, p, GRADE),
+        )
+
+
+def rampa(n: int, base: int = 60_000_00000000) -> list[int]:
+    """Sobe e depois desce, para o cruzamento 20/50 gerar os dois sinais."""
+    meio = n // 2
+    subida = [base + i * 10_00000000 for i in range(meio)]
+    descida = [subida[-1] - i * 10_00000000 for i in range(n - meio)]
+    return subida + descida
+
+
+def test_o_shadow_NAO_RECEBE_REGRA(conn, cfg):
+    """A recusa de §11.2.1 é por CONSTRUÇÃO, e não por checagem.
+
+    Uma checagem protegeria enquanto ninguém a removesse, e §8.5.1 já disse
+    que garantia que depende de boa vontade já foi violada. Aqui não existe
+    argumento que faça outra coisa entrar - é o mesmo desenho do
+    `acesso = 'agente'` literal no SQL do incremento 9.
+    """
+    import inspect
+
+    from app.calibracao import shadow
+
+    for fn in (shadow.rodar, shadow.ordens_do_b3):
+        nomes = set(inspect.signature(fn).parameters)
+        assert not (nomes & {"regra", "rule", "rule_id", "regras", "hipotese"}), (
+            f"{fn.__name__} aceita regra: a 0C roda APENAS o B3"
+        )
+
+
+def test_a_rota_tambem_nao_tem_campo_de_regra(conn):
+    """Um campo `regra` no corpo, ainda que validado, tornaria "roda apenas o
+    B3" uma checagem em vez de uma propriedade."""
+    from app.api.rotas.calibracao import PedidoDeCalibracao
+
+    campos = set(PedidoDeCalibracao.model_fields)
+    assert not (campos & {"regra", "rule", "rule_id", "hipotese", "params"})
+    assert campos == {"venue", "symbol", "contrato", "de_ms", "ate_ms_exclusive"}
+
+
+def test_o_shadow_deriva_o_B3_da_config_e_CONGELA(conn, cfg):
+    """Tunar o B3 depois de ver o resultado destrói o grupo de controle - e a
+    partir do congelamento isso é impossível, não desaconselhado."""
+    from app.calibracao import shadow
+    from app.regra import registro
+
+    semear_barras(conn, rampa(120))
+    r = shadow.rodar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    assert registro.esta_congelada(conn, r["rule_id"])
+    assert f"{cfg.config.b3_fast}/{cfg.config.b3_slow}" in r["regra"]
+
+
+def test_a_ordem_entra_na_barra_SEGUINTE_ao_sinal(conn, cfg):
+    """`latency_bars = 1`: o sinal fecha na barra `i` e a ordem entra na
+    abertura da barra `i+1`. É o que o contrato `bbo@1` amarra."""
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    shadow.rodar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    linhas = conn.execute(
+        "SELECT t_grid_ms, sinal_em_ms FROM shadow_ordem ORDER BY t_grid_ms"
+    ).fetchall()
+    assert linhas, "a rampa deveria cruzar as médias"
+    for l in linhas:
+        assert int(l["t_grid_ms"]) - int(l["sinal_em_ms"]) == (
+            cfg.config.latency_bars * GRADE
+        )
+
+
+def test_o_preco_previsto_da_ordem_e_o_do_NUCLEO_do_simulador(conn, cfg):
+    from app.calibracao import observacao as obs
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    shadow.rodar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    l = conn.execute(
+        "SELECT lado, abertura, p_exec_previsto FROM shadow_ordem LIMIT 1"
+    ).fetchone()
+    assert int(l["p_exec_previsto"]) == obs.prever(
+        int(l["abertura"]), str(l["lado"]), cfg.config
+    )
+
+
+def test_perguntar_o_que_o_B3_FARIA_nao_grava_nada(conn, cfg):
+    """Efeito colateral numa pergunta é como a fronteira do período de
+    calibração se move sem ninguém decidir."""
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    barras = shadow.barras_do_fluxo(
+        conn, venue="binance", symbol="BTCUSDT", timeframe="15m"
+    )
+    ordens = shadow.ordens_do_b3(barras, cfg.config)
+    assert ordens
+    assert conn.execute("SELECT COUNT(*) FROM shadow_ordem").fetchone()[0] == 0
+
+
+def test_o_shadow_e_IDEMPOTENTE(conn, cfg):
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    kw = dict(contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+              config=cfg.config, config_version_id=cfg.id)
+    a = shadow.rodar(conn, **kw)
+    b = shadow.rodar(conn, **kw)
+    assert a["gravadas"] > 0 and b["gravadas"] == 0
+    assert b["repetidas"] == a["gravadas"]
+
+
+def test_a_ordem_hipotetica_e_apenas_por_ACRESCIMO(conn, cfg):
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    shadow.rodar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("UPDATE shadow_ordem SET p_exec_previsto = 1")
+    assert "sabendo o resultado" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute("DELETE FROM shadow_ordem")
+    assert "giro medido" in str(e.value)
+
+
+def test_barras_de_menos_e_RECUSA_e_nao_lista_vazia(conn, cfg):
+    """Lista vazia seria lida como "o B3 não operou", que é outra coisa."""
+    from app.calibracao import shadow
+
+    # Lista literal: `rampa(1)` estourava no próprio helper, e um helper que
+    # quebra antes do código sob teste mede o helper.
+    semear_barras(conn, [60_000_00000000])
+    with pytest.raises(shadow.SemBarras):
+        shadow.rodar(
+            conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+            config=cfg.config, config_version_id=cfg.id,
+        )
+
+
+def test_o_resumo_separa_ordem_de_ordem_COMPARAVEL(conn, cfg):
+    """O JOIN é quem responde. Uma coluna duplicaria estado que já existe, e
+    duas fontes sobre o mesmo fato divergem (regra 16)."""
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    shadow.rodar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    r = shadow.resumo(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config_version_id=cfg.id,
+    )
+    assert r["ordens"] > 0
+    assert r["comparaveis"] == 0, "não há BBO: nada é comparável ainda"
+    assert r["sem_mercado_observado"] == r["ordens"]
+
+
+def test_o_shadow_le_MERCADO_e_nunca_resultado_simulado(conn, cfg):
+    """R63, do lado do shadow."""
+    import re
+    from pathlib import Path
+
+    from tests._prosa import sql_sem_prosa
+
+    sql = sql_sem_prosa(Path("app/calibracao/shadow.py"))
+    for tabela in ("execution", "baseline_result", "hypothesis"):
+        assert not re.search(rf"\b(from|join)\s+{tabela}\b", sql, re.IGNORECASE)
+    assert re.search(r"\bfrom\s+stream_bar\b", sql, re.IGNORECASE)
+
+
+def test_config_incompativel_nao_roda_shadow(conn, cfg):
+    from app.calibracao import observacao as obs
+    from app.calibracao import shadow
+
+    semear_barras(conn, rampa(120))
+    outra = cfg.config.model_copy(update={"latency_bars": 3})
+    with pytest.raises(obs.ContratoIncompativel):
+        shadow.rodar(
+            conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+            config=outra, config_version_id=cfg.id,
+        )
+    assert conn.execute("SELECT COUNT(*) FROM shadow_ordem").fetchone()[0] == 0
+
+
+# ===========================================================================
+# A rota
+# ===========================================================================
+
+CABECALHO = {"Authorization": "Bearer token-de-teste-0a"}
+
+
+def test_a_rota_declara_o_LIMITE_no_proprio_resultado(client):
+    """R65. O limite vai no resultado, e não numa nota de rodapé do relatório."""
+    r = client.get("/api/calibracao", headers=CABECALHO)
+    assert r.status_code == 200
+    limite = r.json()["limite"]
+    assert "TAKER" in limite and "maker" in limite
+    assert "Fase 3" in limite
+
+
+def test_a_rota_NAO_publica_p10_com_o_piloto_ABERTO(client):
+    """Publicar o quantil de um piloto em andamento é olhar o resultado antes
+    de o período declarado terminar - a quinta pergunta do teste de escopo."""
+    r = client.get("/api/calibracao", headers=CABECALHO)
+    corpo = r.json()
+    assert corpo["piloto"]["estado"] == "acumulando"
+    assert corpo["erro_de_execucao"]["estado"] == "piloto_em_andamento"
+    assert "p10_mili_bps" not in corpo["erro_de_execucao"]
+
+
+def test_a_rota_recusa_corpo_com_campo_de_regra(client):
+    """`extra: forbid` transforma a tentativa em 422, e não em campo ignorado."""
+    r = client.post(
+        "/api/calibracao/rodar",
+        headers=CABECALHO,
+        json={"venue": "binance", "symbol": "BTCUSDT",
+              "regra": {"familia": "cruzamento_medias"}},
+    )
+    assert r.status_code == 422

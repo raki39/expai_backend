@@ -8,8 +8,14 @@ privada da Railway (ADR 0010). Por isso o `API_SERVICE_TOKEN` é **a única
 tranca** entre a internet e estes endpoints — não é opcional e não é
 defesa em profundidade.
 
-Estado: **incremento 0 — substrato**. Ainda não há dataset, ledger, simulador
-nem agente. O que existe é o que sustenta tudo isso.
+Estado: **Fase 0C, incremento 18**. A 0A e a 0B estão fechadas; o que roda
+aqui é o forward contínuo — fluxo ao vivo, snapshots fechados e a calibração do
+simulador contra o mercado observado.
+
+*(Este parágrafo dizia "incremento 0 — substrato. Ainda não há dataset, ledger,
+simulador nem agente" até 2026-09-07. Fica registrado porque é o padrão que
+este projeto conta dezoito vezes: um texto que descrevia, parou de descrever, e
+nada avisou.)*
 
 ## Rodar local
 
@@ -30,10 +36,9 @@ O bind é `0.0.0.0` (IPv4), que é o que o proxy público da Railway usa. Sobrep
 .venv/Scripts/python.exe -m pytest
 ```
 
-57 testes. Cobrem os critérios do incremento 0: autenticação em todas as
-rotas, versionamento de configuração com autor/data/antes/depois, precedência
-entre ambiente e banco, teto inviolável, imutabilidade por trigger,
-persistência, migração idempotente, e não vazamento de segredo.
+**807 testes**, 4 pulados (os que gastam dinheiro com LLM real, ligados por
+`RODAR_TESTES_DE_REDE=1`). O número não é enfeite: várias das guardas existem
+porque um defeito passou por elas antes, e o comentário de cada uma diz qual.
 
 ## Configuração — três camadas
 
@@ -92,14 +97,28 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 | GET | `/api/dataset` | dataset vigente: janela, sha256, barras, reserva |
 | POST | `/api/dataset/ingestao` | baixa e fixa o dataset (~35 s, 46 arquivos) |
 | GET | `/api/dataset/separacao` | os quatro conjuntos, janelas de walk-forward e uso do holdout — **não devolve barra nenhuma** |
-| POST | `/api/aovivo/barras` | **a única rota que RECEBE dado.** Lote de klines fechadas do relé, com HMAC, carimbo e nonce. `409` em divergência de conteúdo — erro alto, não aviso |
+| POST | `/api/dataset/separacao` | cria a divisão de um dataset já ingerido; idempotente |
+
+### aovivo — fluxo aberto e snapshots fechados (ADR 0029)
+
+Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida: `dataset` é corpo fechado com hash, `aovivo` é fluxo **aberto sem hash** mais snapshots fechados **com** hash.
+
+| Método | Rota | Função |
+|---|---|---|
+| POST | `/api/aovivo/barras` | **a primeira rota que RECEBE dado.** Lote de klines fechadas do relé, com HMAC, carimbo e nonce. `409` em divergência de conteúdo — erro alto, não aviso |
 | GET | `/api/aovivo/ponto` | de que barra o relé retoma o backfill. Coordenação, não estado do experimento |
 | GET | `/api/aovivo/estado` | atraso e contagem do fluxo. **Atraso não é lacuna**: kline é recuperável |
 | GET | `/api/aovivo/snapshots` | os intervalos **fechados**, com hash, completude e finalidade. Todo resultado do forward cita um deles |
-| POST | `/api/aovivo/bbo` | a **segunda** rota que recebe dado: amostras de topo de livro alinhadas à grade, vindas do coletor. Mesmo protocolo do relé, **segredo próprio** |
+| POST | `/api/aovivo/bbo` | a **segunda** rota que recebe dado: topo de livro alinhado à grade, vindo do coletor. Mesmo protocolo do relé, **segredo próprio** |
 | GET | `/api/aovivo/bbo/ponto` | de que instante da grade a extração retoma. Coordenação, não estado do experimento |
 | GET | `/api/aovivo/bbo/estado` | cobertura da calibração e em que pé está a janela do piloto. **Lê** a janela; nunca a fecha |
-| POST | `/api/dataset/separacao` | cria a divisão de um dataset já ingerido; idempotente |
+
+### calibracao — o simulador descreve o preço que a ordem encontraria? (§8.4.1.2)
+
+| Método | Rota | Função |
+|---|---|---|
+| POST | `/api/calibracao/rodar` | shadow do B3 sobre o fluxo, e as observações do período. **Não aceita regra**: §11.2.1 manda rodar só o B3, e a recusa é por construção |
+| GET | `/api/calibracao` | previsto contra observado: `p10(E2)`, o limite inferior do IC, τ e o tamanho de amostra necessário. **Só sai com o piloto fechado** |
 
 ### ledger — partidas dobradas, dois livros, ciclo do run
 

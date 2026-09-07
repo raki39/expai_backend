@@ -44,6 +44,7 @@ from .a1b import a1b_estado
 from .agente import agente_estado
 from .b4 import b4_estado
 from .baselines import comparacao_atual, curva
+from .calibracao import estado as calibracao_estado
 from .config import config_atual, config_historico
 from .aovivo import (
     estado as aovivo_estado,
@@ -277,6 +278,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # procedencia dele - e a cobertura e justamente o que distingue "o
         # mercado estava assim" de "nao conseguimos observar".
         ("bbo", "/api/aovivo/bbo/estado", lambda: aovivo_bbo_estado(request)),
+        # `calibracao` entra porque §8.4.1 manda o nivel de fidelidade ser
+        # PROPAGADO A TODO RESULTADO, e a partir do incremento 18 esse nivel
+        # deixa de ser uma constante declarada e passa a ser uma medicao. Um
+        # export com o resultado e sem a calibracao mostraria o numero sem a
+        # regua que o sustenta.
+        ("calibracao", "/api/calibracao", lambda: calibracao_estado(request)),
         ("ledger", "/api/ledger", lambda: ledger_estado(request)),
         ("ledger_transacoes", "/api/ledger/transacoes",
          lambda: ledger_transacoes(request, limite=200)),

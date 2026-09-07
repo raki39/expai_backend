@@ -24,6 +24,7 @@ from . import (
     aovivo,
     b4,
     baselines,
+    calibracao,
     config,
     dataset,
     diagnostico,
@@ -53,6 +54,10 @@ MODULOS = (
     # hash, `aovivo` e fluxo aberto sem hash mais snapshots fechados com hash.
     # Ler os dois em sequencia e o que torna a distincao visivel.
     aovivo,
+    # `calibracao` logo depois de `aovivo` pelo mesmo criterio: ela e a
+    # pergunta seguinte sobre o mesmo dado - o fluxo chega, e a calibracao
+    # pergunta se o simulador descreve o preco que ele encontraria.
+    calibracao,
     ledger,
     simulador,
     baselines,

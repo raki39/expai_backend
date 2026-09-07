@@ -2848,6 +2848,76 @@ MIGRACOES: list[tuple[int, str, str]] = [
                                      config_version_id, t_grid_ms);
         """,
     ),
+    (
+        22,
+        "incremento 18: as ordens hipoteticas do shadow do B3",
+        """
+        -- ==================================================================
+        -- ORDEM HIPOTETICA DO SHADOW. Incremento 18, §8.4.1.2 passo 2.
+        --
+        -- "Cada ordem hipotetica e registrada no instante real, com o preco
+        -- que o simulador previu." REGISTRADA, e nao recalculada depois: o
+        -- preco previsto depende dos parametros de custo, e sao eles que a
+        -- calibracao ajusta.
+        --
+        -- SO O B3 CHEGA AQUI. §11.2.1 e literal - na 0C o shadow "roda apenas
+        -- o baseline B3 para calibrar o simulador (...) e nao valida
+        -- estrategia nenhuma". A recusa nao e um `if`: a funcao que grava nao
+        -- RECEBE regra, ela deriva o B3 da config. Nao ha argumento que faca
+        -- outra coisa entrar, pelo mesmo desenho que impede o caminho do
+        -- agente de alcancar o holdout.
+        --
+        -- NAO HA FK para `calibracao_observacao`, e a ausencia e deliberada:
+        -- uma ordem num instante sem cotacao continua sendo uma ordem que o
+        -- B3 teria dado. Ela existe, e simplesmente nao e comparavel - e quem
+        -- diz isso e o JOIN na leitura, nao uma coluna que duplicaria estado.
+        -- ==================================================================
+        CREATE TABLE shadow_ordem (
+            contrato          TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue             TEXT    NOT NULL,
+            symbol            TEXT    NOT NULL,
+            t_grid_ms         INTEGER NOT NULL,
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+
+            lado TEXT NOT NULL CHECK (lado IN ('compra', 'venda')),
+
+            -- A regra CONGELADA que produziu o sinal. Procedencia: sem isto,
+            -- "foi o B3" seria uma afirmacao sem como conferir.
+            rule_id INTEGER NOT NULL REFERENCES rule(id),
+
+            -- A barra que gerou o SINAL. Ela e anterior a `t_grid_ms` por
+            -- `latency_bars` barras, e guardar as duas torna a defasagem
+            -- verificavel em vez de suposta.
+            sinal_em_ms INTEGER NOT NULL,
+
+            p_exec_previsto INTEGER NOT NULL CHECK (p_exec_previsto > 0),
+            abertura        INTEGER NOT NULL CHECK (abertura > 0),
+
+            criado_em TEXT NOT NULL,
+
+            PRIMARY KEY (contrato, venue, symbol, t_grid_ms, config_version_id),
+            CHECK (sinal_em_ms < t_grid_ms)
+        );
+
+        CREATE TRIGGER shadow_ordem_sem_update
+        BEFORE UPDATE ON shadow_ordem
+        BEGIN
+            SELECT RAISE(ABORT,
+                'shadow_ordem e apenas por acrescimo: mudar uma ordem hipotetica depois de ver o mercado e refazer a aposta sabendo o resultado');
+        END;
+
+        CREATE TRIGGER shadow_ordem_sem_delete
+        BEFORE DELETE ON shadow_ordem
+        BEGIN
+            SELECT RAISE(ABORT,
+                'shadow_ordem e apenas por acrescimo: apagar a ordem inconveniente muda o giro medido do B3');
+        END;
+
+        CREATE INDEX idx_shadow_ordem_serie
+            ON shadow_ordem(contrato, venue, symbol, config_version_id,
+                            t_grid_ms);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
