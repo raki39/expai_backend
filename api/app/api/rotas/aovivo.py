@@ -482,6 +482,9 @@ def estado_do_bbo(
 ) -> dict[str, Any]:
     """Cobertura, e em que pe esta a janela do piloto.
 
+    **Duas coberturas**, e a `observada` e a que vale: a `total` conta os
+    instantes que a primeira extracao varreu antes de existir coletor.
+
     A janela e **lida**, e so derivada quando ainda nao foi fechada - e nunca
     fechada por esta rota. Uma consulta de estado que congelasse a fronteira
     do periodo de calibracao como efeito colateral seria exatamente o que a
@@ -521,6 +524,31 @@ def estado_do_bbo(
             "fechada_por": janela.fechada_por,
         }
 
+    # DUAS coberturas, e a diferenca entre elas nao e detalhe.
+    #
+    # A global inclui os instantes que a primeira extracao varreu ANTES de o
+    # coletor existir: sem ponto de retomada ela olha 7 dias para tras, e o
+    # coletor liga em 2026-09-04. Medido na primeira entrega real: 301 dos 367
+    # indisponiveis eram desse periodo - "nao havia coletor" contado como se
+    # fosse "nao havia cotacao".
+    #
+    # A do PILOTO comeca na primeira observacao valida, e e a que descreve o
+    # que foi de fato observado. **E ela que acompanha qualquer estimativa de
+    # calibracao** - publicar a global ao lado de um numero de calibracao
+    # afirmaria uma qualidade de dado que nao e a daquele periodo.
+    de = ate = None
+    if janela is not None:
+        de, ate = janela.de_ms, janela.ate_ms_exclusive
+    else:
+        primeira = conn.execute(
+            "SELECT MIN(t_grid_ms) AS t FROM bbo_amostra"
+            " WHERE venue = ? AND symbol = ? AND contrato = ?"
+            "   AND disponivel = 1",
+            (venue, symbol, contrato),
+        ).fetchone()
+        if primeira is not None and primeira["t"] is not None:
+            de = int(primeira["t"])
+
     return {
         "contrato": {
             "nome": c.contrato, "timeframe": c.timeframe,
@@ -528,6 +556,11 @@ def estado_do_bbo(
             "latency_bars": c.latency_bars, "grade_ms": c.grade_ms,
             "tolerancia_ms": c.tolerancia_ms,
         },
-        "cobertura": bbo.cobertura(conn, serie, contrato),
+        "cobertura_total": bbo.cobertura(conn, serie, contrato),
+        "cobertura_observada": (
+            None if de is None
+            else bbo.cobertura(conn, serie, contrato, de_ms=de,
+                               ate_ms_exclusive=ate)
+        ),
         "piloto": piloto_json,
     }

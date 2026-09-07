@@ -479,3 +479,31 @@ def test_NENHUM_limiar_de_validade_do_relogio_e_escolhido(conn: sqlite3.Connecti
         "um offset de seis horas ainda e ACEITO, e de proposito: a idade fica "
         "gravada e quem decide o que fazer com ela e a calibracao"
     )
+
+
+def test_a_cobertura_OBSERVADA_exclui_o_que_veio_antes_do_coletor(
+    conn: sqlite3.Connection,
+):
+    """Medido na primeira entrega real: 301 dos 367 indisponiveis eram de
+    antes de existir coletor.
+
+    Sem ponto de retomada, a primeira extracao olha 7 dias para tras, e o
+    coletor liga em 2026-09-04. Aqueles instantes nao sao observacao de
+    "nao havia cotacao" - sao a ausencia de observador, e contar as duas
+    coisas juntas faz a cobertura descrever a nossa data de deploy em vez do
+    mercado.
+    """
+    # 4 instantes antes de existir dado, depois 4 observados (3 validos).
+    antes = [ausente(i, "sem_amostra_na_janela") for i in range(4)]
+    depois = [amostra(4), amostra(5), ausente(6, "defasada"), amostra(7)]
+    bbo.receber(conn, SERIE, CONTRATO, antes + depois)
+
+    total = bbo.cobertura(conn, SERIE, CONTRATO)
+    assert (total["total"], total["validas"]) == (8, 3)
+    assert total["fracao_valida_ppm"] == 375_000, "37,5% - e o numero enganoso"
+
+    primeiro_valido = T0 + 4 * GRADE
+    observada = bbo.cobertura(conn, SERIE, CONTRATO, de_ms=primeiro_valido)
+    assert (observada["total"], observada["validas"]) == (4, 3)
+    assert observada["fracao_valida_ppm"] == 750_000, "75% - e o numero real"
+    assert observada["por_motivo"] == {"defasada": 1}

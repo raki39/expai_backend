@@ -420,3 +420,59 @@ def test_a_IDADE_do_relogio_atravessa(tmp_path):
                            de_ms=T0, ate_ms_exclusive=T0 + GRADE)
     assert obs[0].relogio_medido_em_ms == T0 - 60_000
     assert "relogio_medido_em_ms" in obs[0].como_corpo()
+
+
+def test_a_primeira_extracao_nao_varre_ANTES_de_o_coletor_existir(tmp_path):
+    """Medido em producao: 301 dos 367 indisponiveis eram desse periodo.
+
+    A janela inicial de 7 dias alcancou 2026-08-31 e a coleta liga em
+    2026-09-04 - e "nao havia coletor" foi gravado com o mesmo motivo de "nao
+    havia cotacao". Ausencia de observacao e observacao de ausencia sao coisas
+    diferentes, e contar as duas juntas faz a cobertura descrever a nossa data
+    de deploy em vez do mercado.
+    """
+    dia = arquivo.dia_utc(T0 * 1_000_000)
+    escrever(tmp_path, [linha_relogio(), linha_amostra(T0 - 500 + 2_450)], dia=dia)
+
+    pedidos = {}
+
+    def falso_ponto(*_a, **_k):
+        return {"retomar_de_ms": None, "grade_ms": GRADE, "tolerancia_ms": 2_000}
+
+    def falso_enviar(_d, **kw):
+        pedidos["obs"] = kw["observacoes"]
+        return {"aceitas": len(kw["observacoes"]), "repetidas": 0}
+
+    import coletor.entrega as m
+    orig = m.envio.ponto_de_retomada, m.envio.enviar
+    m.envio.ponto_de_retomada, m.envio.enviar = falso_ponto, falso_enviar
+    try:
+        m.uma_volta(
+            envio.Destino("http://x", "t", "s"), tmp_path, "bookticker-btcusdt",
+            venue="binance", symbol="BTCUSDT", agora_ms=T0 + 4 * GRADE,
+        )
+    finally:
+        m.envio.ponto_de_retomada, m.envio.enviar = orig
+
+    meia_noite = T0 // 86_400_000 * 86_400_000
+    assert pedidos["obs"][0].t_grid_ms >= meia_noite, (
+        "varreu para tras do primeiro dia com arquivo"
+    )
+
+
+def test_sem_arquivo_nenhum_a_volta_nao_inventa_periodo(tmp_path):
+    def falso_ponto(*_a, **_k):
+        return {"retomar_de_ms": None, "grade_ms": GRADE, "tolerancia_ms": 2_000}
+
+    import coletor.entrega as m
+    orig = m.envio.ponto_de_retomada
+    m.envio.ponto_de_retomada = falso_ponto
+    try:
+        r = m.uma_volta(
+            envio.Destino("http://x", "t", "s"), tmp_path, "bookticker-btcusdt",
+            venue="binance", symbol="BTCUSDT", agora_ms=T0 + 4 * GRADE,
+        )
+    finally:
+        m.envio.ponto_de_retomada = orig
+    assert r["enviadas"] == 0
+    assert "arquivo" in r["motivo"]

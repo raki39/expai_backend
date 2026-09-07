@@ -71,6 +71,26 @@ def arquivos_do_periodo(
     return [c for c in caminhos if c.exists()]
 
 
+def _primeiro_dia_com_arquivo(diretorio: Path, prefixo: str) -> int | None:
+    """Meia-noite UTC do dia mais antigo com arquivo, em ms.
+
+    O dia, e nao a primeira linha: ler o arquivo inteiro so para descobrir o
+    primeiro carimbo custaria uma descompressao a cada volta. O dia ja tira
+    fora tudo o que e anterior ao coletor, e o que sobra e no maximo a rampa
+    de um dia - que e genuinamente ambigua e fica registrada como tal.
+    """
+    dias = sorted(
+        p.name[len(prefixo) + 1:-len(".jsonl.gz")]
+        for p in diretorio.glob(f"{prefixo}-*.jsonl.gz")
+    )
+    if not dias:
+        return None
+    return int(
+        datetime.strptime(dias[0], "%Y-%m-%d")
+        .replace(tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+
 def uma_volta(
     destino: envio.Destino,
     diretorio: Path,
@@ -94,6 +114,21 @@ def uma_volta(
     de_ms = int(retomar) if retomar is not None else (
         (agora - DIAS_INICIAIS * MS_POR_DIA) // grade * grade
     )
+
+    # NAO varrer para tras de onde o coletor comecou a existir.
+    #
+    # Medido na primeira entrega real: dos 367 instantes indisponiveis, **301
+    # eram anteriores ao coletor**. A janela inicial de 7 dias alcancou
+    # 2026-08-31 e a coleta liga em 2026-09-04 - e "nao havia coletor" foi
+    # gravado com o mesmo motivo de "nao havia cotacao".
+    #
+    # As duas coisas sao diferentes: uma e ausencia de observacao, a outra e
+    # observacao de ausencia. Contar as duas juntas faz a cobertura descrever
+    # a nossa data de deploy em vez do mercado.
+    if retomar is None:
+        primeiro = _primeiro_dia_com_arquivo(diretorio, prefixo)
+        if primeiro is not None:
+            de_ms = max(de_ms, primeiro // grade * grade)
 
     # A fronteira: o inicio da barra CORRENTE, exclusivo.
     ate_ms = agora // grade * grade
