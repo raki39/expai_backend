@@ -18,7 +18,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import fluxo, relogio
+from . import entrega, fluxo, relogio
 from .amostra import Estado
 from .arquivo import Diario, conferir_destino, volume_montado
 
@@ -105,11 +105,27 @@ async def principal() -> int:
             signal.signal(s, lambda *_: parar.set())
 
     url = f"{fluxo.URL_BASE}/{SIMBOLO}@bookTicker"
-    with Diario(DESTINO, f"bookticker-{SIMBOLO}") as diario:
+    prefixo = f"bookticker-{SIMBOLO}"
+
+    # ADR 0032, requisito 6: sela os dias que fecharam sem manifesto. Um
+    # processo morto antes da virada nao selou nada, e sem isto um reinicio a
+    # meia-noite deixaria um dia inteiro sem identidade.
+    selados = entrega.selar_no_boot(DESTINO, prefixo)
+    if selados:
+        log.info("coletor.selados_no_boot",
+                 extra={"arquivos": [p.name for p in selados]})
+
+    destino_da_entrega = entrega.destino_do_ambiente(dict(os.environ))
+
+    with Diario(DESTINO, prefixo) as diario:
         tarefas = [
             asyncio.create_task(fluxo.receber(url, estado, parar)),
             asyncio.create_task(fluxo.amostrar_em_1hz(estado, diario, parar)),
             asyncio.create_task(fluxo.sondar_relogio(diario, parar)),
+            asyncio.create_task(entrega.entregar(
+                destino_da_entrega, DESTINO, prefixo, parar,
+                venue="binance", symbol=SIMBOLO.upper(),
+            )),
         ]
         await parar.wait()
         log.info("coletor.encerrando", extra={

@@ -47,6 +47,7 @@ from .baselines import comparacao_atual, curva
 from .config import config_atual, config_historico
 from .aovivo import (
     estado as aovivo_estado,
+    estado_do_bbo as aovivo_bbo_estado,
     listar_snapshots as aovivo_snapshots,
 )
 from .dataset import dataset_atual, separacao_de_dados
@@ -270,6 +271,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         ("aovivo", "/api/aovivo/estado", lambda: aovivo_estado(request)),
         ("snapshots", "/api/aovivo/snapshots",
          lambda: aovivo_snapshots(request)),
+        # `bbo` entra pelo MESMO argumento (ADR 0032): toda estimativa de
+        # calibracao vale sob a cobertura em que foi medida e dentro da janela
+        # do piloto. Exportar a calibracao sem eles mostraria o numero e nao a
+        # procedencia dele - e a cobertura e justamente o que distingue "o
+        # mercado estava assim" de "nao conseguimos observar".
+        ("bbo", "/api/aovivo/bbo/estado", lambda: aovivo_bbo_estado(request)),
         ("ledger", "/api/ledger", lambda: ledger_estado(request)),
         ("ledger_transacoes", "/api/ledger/transacoes",
          lambda: ledger_transacoes(request, limite=200)),

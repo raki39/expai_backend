@@ -17,10 +17,37 @@ Essa é a **R83 reescrita**. A frase original da D32 — *"o único ganho é his
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                       # 23 testes
+python -m pytest                       # 53 testes
 
 COLETOR_DIR=./dados APP_ENV=local python -m coletor.main
+
+# Com entrega ligada (ADR 0032). SEM elas o coletor SEGUE COLETANDO:
+COLETOR_API_URL=https://... API_SERVICE_TOKEN=... COLETOR_HMAC_SECRET=... COLETOR_DIR=./dados APP_ENV=local python -m coletor.main
 ```
+
+## A entrega da amostra alinhada — ADR 0032
+
+O coletor grava **86.400** amostras por dia. A calibração usa **96** — uma por barra de 15 min —, e o número não é escolha de engenharia: o ADR 0027 conta em **barras**. O arquivo bruto **nunca sai de Singapura**; o que atravessa é 0,11% dele.
+
+A regra é uma só, e cada palavra dela carrega uma decisão:
+
+> a **última** amostra com `received_at_corrigido ≤ t_grid`, com defasagem ≤ 2 s
+
+| | por quê |
+|---|---|
+| **corrigido** | o relógio local medido derivou **−2.450 ms**, que é **mais que a tolerância inteira**. Sem correção, uma amostra 1 s antiga parece válida e é 3,45 s antiga |
+| **`≤`** | cotação posterior ao instante é o futuro dele. A `api` recusa defasagem negativa por `CHECK` |
+| **última** | a mais próxima por baixo. Média de duas cotações é uma cotação que nunca existiu |
+
+Sem medida de relógio **anterior** à amostra, a observação sai indisponível — corrigir por zero seria assumir deriva zero, que é o que a aprovação do ADR 0028 recusou.
+
+**Falta credencial de envio? O coletor continua coletando**, e reclama alto. É a diferença de postura em relação ao relé, que falha **fechado**: a entrega é derivada e refazível a partir do bruto; a **coleta** não é — um segundo de BBO não gravado está perdido para sempre.
+
+## Manifesto do arquivo bruto
+
+Quando o dia **fecha**, o coletor sela o arquivo com `sha256`, contagem de linhas e fronteiras — e o `mtime=0` do gzip é o que torna o hash reproduzível byte a byte. Um manifesto **nunca é sobrescrito**: se o bruto divergir do hash selado, isso tem de **aparecer** em `conferir_manifesto`, e não ser apagado por um manifesto novo.
+
+No boot, `selar_no_boot` varre os dias fechados sem manifesto — um processo morto antes da virada não selou nada.
 
 Ou pelo compose da raiz do repositório: `docker compose up coletor`.
 

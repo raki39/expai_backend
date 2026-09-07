@@ -26,7 +26,8 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from ...aovivo import assinatura, fluxo, snapshot
+from ...aovivo import assinatura, bbo, fluxo, snapshot
+from ...calibracao import piloto
 from ..comum import _conn
 
 log = logging.getLogger(__name__)
@@ -289,3 +290,242 @@ def listar_snapshots(request: Request) -> dict[str, Any]:
         l["completo"] = l["barras_presentes"] == l["barras_esperadas"]
         l["hash_conferido"] = snapshot.reconferir(conn, int(l["id"]))
     return {"snapshots": linhas, "quantidade": len(linhas)}
+
+
+# ===========================================================================
+# BBO alinhado a grade. ADR 0032, incremento 18.
+#
+# ROTA E TABELA PROPRIAS (requisito 1), e o protocolo e o MESMO do rele. O que
+# nao se compartilha e o destino: `stream_bar` e a serie de DECISAO, e e dela
+# que o snapshot do forward tira o hash; `bbo_amostra` e insumo de MEDICAO.
+# Misturar faria o hash do snapshot depender de dado de calibracao, e um
+# resultado do forward passaria a citar procedencia que nao e dele.
+# ===========================================================================
+
+MAX_AMOSTRAS = 500
+
+
+class AmostraEntrada(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    t_grid_ms: int = Field(ge=0)
+    disponivel: bool
+    motivo: str | None = None
+
+    bid: int | None = None
+    bid_qty: int | None = None
+    ask: int | None = None
+    ask_qty: int | None = None
+    u: int | None = None
+
+    received_at_ms: int | None = None
+    received_at_corrigido_ms: int | None = None
+    sampled_at_ms: int | None = None
+    defasagem_ms: int | None = None
+
+    offset_us: int | None = None
+    rtt_us: int | None = None
+    incerteza_residual_us: int | None = None
+
+
+class LoteBBO(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    venue: str
+    symbol: str
+    contrato: str
+    price_scale_exp: int = Field(ge=0, le=18)
+    volume_scale_exp: int = Field(ge=0, le=18)
+    amostras: list[AmostraEntrada]
+
+    def serie(self) -> bbo.Serie:
+        return bbo.Serie(
+            venue=self.venue, symbol=self.symbol,
+            price_scale_exp=self.price_scale_exp,
+            volume_scale_exp=self.volume_scale_exp,
+        )
+
+
+@router.get("/bbo/ponto")
+def ponto_do_bbo(
+    request: Request, venue: str, symbol: str, contrato: str
+) -> dict[str, Any]:
+    """De onde a extracao deve retomar.
+
+    Mesma regra do fluxo: o estado de verdade e o desta ponta, e nao o que o
+    coletor lembra. E `ultimo_t_grid` conta a INDISPONIVEL tambem - ela
+    tambem e observacao, e retomar de antes dela reprocessaria o que a
+    extracao ja concluiu.
+    """
+    conn = _conn(request)
+    try:
+        c = bbo.ler_contrato(conn, contrato)
+    except bbo.ContratoDesconhecido as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+    serie = bbo.Serie(venue=venue, symbol=symbol,
+                      price_scale_exp=0, volume_scale_exp=0)
+    ultimo = bbo.ultimo_t_grid(conn, serie, contrato)
+    return {
+        "venue": venue, "symbol": symbol, "contrato": contrato,
+        "ultimo_t_grid_ms": ultimo,
+        "retomar_de_ms": None if ultimo is None else ultimo + c.grade_ms,
+        "grade_ms": c.grade_ms,
+        "tolerancia_ms": c.tolerancia_ms,
+        "max_amostras_por_lote": MAX_AMOSTRAS,
+    }
+
+
+@router.post("/bbo", status_code=status.HTTP_202_ACCEPTED)
+async def receber_bbo(
+    request: Request,
+    x_rele_assinatura: str = Header(...),
+    x_rele_carimbo: int = Header(...),
+    x_rele_nonce: str = Header(...),
+) -> dict[str, Any]:
+    """Recebe um lote de amostras alinhadas a grade.
+
+    O corpo assinado e o CRU, pelo mesmo motivo da rota de barras: assinar o
+    JSON re-serializado faria a verificacao depender de espacamento, e a
+    primeira divergencia de biblioteca quebraria tudo parecendo credencial
+    errada.
+    """
+    from ...settings import get_settings
+
+    conn = _conn(request)
+    bruto = await request.body()
+
+    try:
+        assinatura.conferir(
+            conn,
+            assinatura.Pedido(
+                carimbo_ms=x_rele_carimbo, nonce=x_rele_nonce, corpo=bruto
+            ),
+            x_rele_assinatura,
+            get_settings().coletor_hmac_secret.get_secret_value(),
+        )
+    except assinatura.AssinaturaInvalida as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e)
+        ) from e
+
+    try:
+        lote = LoteBBO.model_validate_json(bruto)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"corpo invalido: {e}",
+        ) from e
+
+    if not lote.amostras:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="lote vazio: nada a receber",
+        )
+    if len(lote.amostras) > MAX_AMOSTRAS:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"{len(lote.amostras)} amostras excede o teto de {MAX_AMOSTRAS}",
+        )
+
+    amostras = [
+        bbo.Amostra(
+            t_grid_ms=a.t_grid_ms, disponivel=a.disponivel, motivo=a.motivo,
+            bid=a.bid, bid_qty=a.bid_qty, ask=a.ask, ask_qty=a.ask_qty, u=a.u,
+            received_at_ms=a.received_at_ms,
+            received_at_corrigido_ms=a.received_at_corrigido_ms,
+            sampled_at_ms=a.sampled_at_ms, defasagem_ms=a.defasagem_ms,
+            offset_us=a.offset_us, rtt_us=a.rtt_us,
+            incerteza_residual_us=a.incerteza_residual_us,
+        )
+        for a in lote.amostras
+    ]
+
+    try:
+        r = bbo.receber(conn, lote.serie(), lote.contrato, amostras)
+        assinatura.podar(conn)
+    except bbo.ContratoDesconhecido as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+    except bbo.DivergenciaDeAmostra as e:
+        log.error("bbo.divergencia", extra={"erro": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except bbo.AmostraInvalida as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        ) from e
+
+    log.info("bbo.lote_recebido", extra={
+        "symbol": lote.symbol, "contrato": lote.contrato,
+        "aceitas": r.aceitas, "repetidas": r.repetidas,
+    })
+    return {
+        "aceitas": r.aceitas, "repetidas": r.repetidas,
+        "primeira_ms": r.primeira_ms, "ultima_ms": r.ultima_ms,
+        "ultimo_t_grid_ms": bbo.ultimo_t_grid(conn, lote.serie(), lote.contrato),
+    }
+
+
+@router.get("/bbo/estado")
+def estado_do_bbo(
+    request: Request,
+    venue: str = "binance",
+    symbol: str = "BTCUSDT",
+    contrato: str = "bbo@1",
+) -> dict[str, Any]:
+    """Cobertura, e em que pe esta a janela do piloto.
+
+    A janela e **lida**, e so derivada quando ainda nao foi fechada - e nunca
+    fechada por esta rota. Uma consulta de estado que congelasse a fronteira
+    do periodo de calibracao como efeito colateral seria exatamente o que a
+    quinta pergunta do teste de escopo proibe.
+    """
+    conn = _conn(request)
+    try:
+        c = bbo.ler_contrato(conn, contrato)
+    except bbo.ContratoDesconhecido as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+    serie = bbo.Serie(venue=venue, symbol=symbol,
+                      price_scale_exp=0, volume_scale_exp=0)
+
+    janela = piloto.ler(conn, serie, contrato)
+    if janela is None:
+        try:
+            previa = piloto.derivar(conn, serie, contrato)
+            piloto_json: dict[str, Any] = {
+                "estado": "pronta_para_fechar",
+                "de_ms": previa.de_ms,
+                "ate_ms_exclusive": previa.ate_ms_exclusive,
+                "fechada_por": previa.fechada_por,
+            }
+        except piloto.PilotoNaoFechaAinda as e:
+            piloto_json = {"estado": "acumulando", "falta": str(e)}
+    else:
+        piloto_json = {
+            "estado": "fechada",
+            "de_ms": janela.de_ms,
+            "ate_ms_exclusive": janela.ate_ms_exclusive,
+            "observacoes_validas": janela.observacoes_validas,
+            "observacoes_totais": janela.observacoes_totais,
+            "dias_corridos": janela.dias_corridos,
+            "fechada_por": janela.fechada_por,
+        }
+
+    return {
+        "contrato": {
+            "nome": c.contrato, "timeframe": c.timeframe,
+            "execution_reference": c.execution_reference,
+            "latency_bars": c.latency_bars, "grade_ms": c.grade_ms,
+            "tolerancia_ms": c.tolerancia_ms,
+        },
+        "cobertura": bbo.cobertura(conn, serie, contrato),
+        "piloto": piloto_json,
+    }

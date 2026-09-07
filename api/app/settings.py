@@ -28,7 +28,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Usada pela redacao de log e pelo teste que garante que nada vaza.
 SECRET_FIELDS = frozenset(
     {"api_service_token", "anthropic_api_key", "openai_api_key",
-     "rele_hmac_secret"}
+     "rele_hmac_secret", "coletor_hmac_secret"}
 )
 
 
@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     # ESCREVER no fluxo. Reusar o mesmo faria o comprometimento de um dar o
     # outro.
     rele_hmac_secret: SecretStr = SecretStr("")
+
+    # Segredo do HMAC do COLETOR (ADR 0032, incremento 18). Quinto
+    # segredo do projeto, e separado do do rele pelo mesmo argumento que
+    # separou o rele do token: sao dois processos diferentes, em dois
+    # servicos diferentes, e o comprometimento de um nao pode dar o
+    # outro. Custa uma variavel a mais, e e o preco ja aceito uma vez.
+    coletor_hmac_secret: SecretStr = SecretStr("")
 
     # Nao e segredo: e o identificador do workspace em que a chave age. Uma
     # chave ligada a identidade (e nao ao workspace) e recusada com 400 sem

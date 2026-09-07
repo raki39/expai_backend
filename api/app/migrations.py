@@ -2516,6 +2516,220 @@ MIGRACOES: list[tuple[int, str, str]] = [
         CREATE INDEX idx_rele_nonce_carimbo ON rele_nonce(carimbo_ms);
         """,
     ),
+    (
+        19,
+        "incremento 18: o BBO alinhado a grade, sob contrato de extracao",
+        """
+        -- ==================================================================
+        -- CONTRATO DE EXTRACAO. ADR 0032, requisito 5.
+        --
+        -- Amostrar na ABERTURA da barra so cobre os instantes de execucao
+        -- porque a D20 fixou `execution_reference` ali. Se ela virasse
+        -- `limite_adverso`, a execucao aconteceria noutro preco da barra e as
+        -- 96 amostras/dia deixariam de cobrir o que importa - E NADA
+        -- ACUSARIA. Por isso o contrato GRAVA a semantica que assume, e a
+        -- calibracao compara contra a config antes de usar qualquer amostra.
+        --
+        -- `latency_bars` entra pelo mesmo motivo: ele desloca o instante em
+        -- que a ordem chega ao mercado, e um deslocamento que a extracao nao
+        -- conhece produz alinhamento errado com aparencia perfeita.
+        --
+        -- Append-only: mudar o vinculo depois de existirem amostras
+        -- reinterpretaria em silencio tudo que ja foi medido sob ele.
+        -- ==================================================================
+        CREATE TABLE bbo_contrato (
+            contrato            TEXT    PRIMARY KEY,
+            timeframe           TEXT    NOT NULL,
+            execution_reference TEXT    NOT NULL,
+            latency_bars        INTEGER NOT NULL CHECK (latency_bars >= 1),
+            grade_ms            INTEGER NOT NULL CHECK (grade_ms > 0),
+            tolerancia_ms       INTEGER NOT NULL CHECK (tolerancia_ms > 0),
+            criado_em           TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER bbo_contrato_sem_update
+        BEFORE UPDATE ON bbo_contrato
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bbo_contrato e imutavel: mudar o vinculo reinterpretaria em silencio toda amostra medida sob ele - crie um contrato novo');
+        END;
+
+        CREATE TRIGGER bbo_contrato_sem_delete
+        BEFORE DELETE ON bbo_contrato
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bbo_contrato e imutavel: apagar um contrato deixaria amostras orfas de semantica');
+        END;
+
+        INSERT INTO bbo_contrato (
+            contrato, timeframe, execution_reference, latency_bars,
+            grade_ms, tolerancia_ms, criado_em
+        ) VALUES (
+            'bbo@1', '15m', 'abertura', 1, 900000, 2000,
+            strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        );
+
+        -- ==================================================================
+        -- AMOSTRA DE BBO ALINHADA A GRADE. ADR 0032.
+        --
+        -- Tabela PROPRIA, e nao `stream_bar` (requisito 1): aquela e a serie
+        -- de DECISAO, e e dela que o snapshot do forward tira o hash. Esta e
+        -- insumo de MEDICAO. Misturar faria o hash canonico do snapshot
+        -- depender de dado de calibracao, e um resultado do forward passaria
+        -- a citar procedencia que nao e dele.
+        --
+        -- A CHAVE INCLUI O CONTRATO, e nao e redundancia: sem ele, mudar a
+        -- regra de extracao reescreveria a historia - a mesma
+        -- (instrumento, t_grid) passaria a ter outro conteudo numa tabela
+        -- append-only. Com o contrato na chave as duas versoes COEXISTEM.
+        -- ==================================================================
+        CREATE TABLE bbo_amostra (
+            venue     TEXT    NOT NULL,
+            symbol    TEXT    NOT NULL,
+            t_grid_ms INTEGER NOT NULL,
+            contrato  TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+
+            grade_ms  INTEGER NOT NULL,
+
+            disponivel INTEGER NOT NULL CHECK (disponivel IN (0, 1)),
+            motivo     TEXT,
+
+            bid     INTEGER,
+            bid_qty INTEGER,
+            ask     INTEGER,
+            ask_qty INTEGER,
+            u       INTEGER,
+
+            received_at_ms           INTEGER,
+            received_at_corrigido_ms INTEGER,
+            sampled_at_ms            INTEGER,
+            defasagem_ms             INTEGER,
+
+            -- INTEIROS em microssegundos, e nao REAL em milissegundos.
+            -- O horario corrigido e recomputado pela api e comparado por
+            -- IGUALDADE com o que o coletor mandou; com float, os dois lados
+            -- discordariam por arredondamento e a divergencia apareceria como
+            -- corrupcao de dado. A regra e uma so, e e inteira:
+            --
+            --     corrigido_ms = received_at_ms + offset_us // 1000
+            offset_us             INTEGER,
+            rtt_us                INTEGER,
+            incerteza_residual_us INTEGER,
+
+            price_scale_exp  INTEGER NOT NULL,
+            volume_scale_exp INTEGER NOT NULL,
+            recebido_em      TEXT    NOT NULL,
+
+            PRIMARY KEY (venue, symbol, t_grid_ms, contrato),
+
+            -- O instante TEM de cair na grade. Amostra desalinhada nao e
+            -- amostra da grade, e sem isto a alegacao "uma observacao por
+            -- barra" seria disciplina em vez de estrutura.
+            CHECK (t_grid_ms % grade_ms = 0),
+
+            -- CAUSALIDADE, imposta pelo banco. `defasagem = t_grid -
+            -- corrigido`, entao negativo significa cotacao POSTERIOR ao
+            -- instante, que e ler o futuro dele. E a mesma regra que
+            -- `retornos_causais` impoe no historico, aqui como CHECK porque
+            -- o dado vem de outro processo pela rede.
+            CHECK (defasagem_ms IS NULL OR defasagem_ms >= 0),
+
+            -- Disponivel exige o conjunto COMPLETO. Preco sem quantidade
+            -- tornaria a condicao de validade por tamanho do ADR 0027
+            -- incomputavel, e a calibracao afirmaria mais do que mediu.
+            CHECK (
+                disponivel = 0 OR (
+                    bid IS NOT NULL AND bid_qty IS NOT NULL
+                    AND ask IS NOT NULL AND ask_qty IS NOT NULL
+                    AND received_at_ms IS NOT NULL
+                    AND received_at_corrigido_ms IS NOT NULL
+                    AND defasagem_ms IS NOT NULL
+                    AND motivo IS NULL
+                    AND bid > 0 AND ask > 0
+                    AND bid_qty > 0 AND ask_qty > 0
+                    AND bid <= ask
+                )
+            ),
+
+            -- INDISPONIVEL NUNCA CARREGA PRECO. A D41 e literal sobre nao
+            -- interpolar, e a forma mais facil de violar isso seria repetir a
+            -- cotacao anterior num campo que ninguem olha. Aqui o banco
+            -- recusa.
+            CHECK (
+                disponivel = 1 OR (
+                    motivo IS NOT NULL
+                    AND bid IS NULL AND bid_qty IS NULL
+                    AND ask IS NULL AND ask_qty IS NULL
+                )
+            )
+        );
+
+        CREATE TRIGGER bbo_amostra_sem_update
+        BEFORE UPDATE ON bbo_amostra
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bbo_amostra e apenas por acrescimo: reescrever uma observacao mudaria a calibracao ja publicada sob ela');
+        END;
+
+        CREATE TRIGGER bbo_amostra_sem_delete
+        BEFORE DELETE ON bbo_amostra
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bbo_amostra e apenas por acrescimo: apagar observacao indisponivel melhoraria a cobertura sem melhorar o dado');
+        END;
+
+        CREATE INDEX idx_bbo_amostra_serie
+            ON bbo_amostra(venue, symbol, contrato, t_grid_ms);
+
+        -- ==================================================================
+        -- JANELA DO PILOTO. ADR 0032, requisito 7.
+        --
+        -- A REGRA e do ADR 0027 e e anterior ao dado: "encerra no mais tarde
+        -- entre 14 dias corridos e 1.000 observacoes validas". E por ela ser
+        -- anterior que o piloto pode ser reconstruido desde 2026-09-04 sem
+        -- que isso seja escolher a janela depois de ver o resultado.
+        --
+        -- O `UNIQUE` e o que faz "gravada UMA vez" ser estrutura: sem ele a
+        -- janela mudaria a cada nova amostra que chegasse, e "o piloto"
+        -- nomearia coisas diferentes em dias diferentes - INVISIVELMENTE.
+        -- ==================================================================
+        CREATE TABLE janela_piloto (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+
+            de_ms            INTEGER NOT NULL,
+            ate_ms_exclusive INTEGER NOT NULL,
+
+            observacoes_validas INTEGER NOT NULL,
+            observacoes_totais  INTEGER NOT NULL,
+            dias_corridos_x1000 INTEGER NOT NULL,
+            fechada_por         TEXT    NOT NULL
+                CHECK (fechada_por IN ('dias', 'observacoes')),
+
+            criado_em TEXT NOT NULL,
+
+            UNIQUE (contrato, venue, symbol),
+            CHECK (ate_ms_exclusive > de_ms),
+            CHECK (observacoes_validas <= observacoes_totais)
+        );
+
+        CREATE TRIGGER janela_piloto_sem_update
+        BEFORE UPDATE ON janela_piloto
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_piloto e gravada UMA vez: mover a fronteira depois e escolher o periodo de calibracao olhando o resultado');
+        END;
+
+        CREATE TRIGGER janela_piloto_sem_delete
+        BEFORE DELETE ON janela_piloto
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_piloto e gravada UMA vez: apagar para regravar e a mesma coisa que mover a fronteira');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

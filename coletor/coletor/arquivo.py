@@ -13,6 +13,7 @@ mesma licao do `exec` no start-backend.sh: desligar direito nao e detalhe.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import time
@@ -79,7 +80,13 @@ class Diario:
         return self.diretorio / f"{self.prefixo}-{dia}.jsonl.gz"
 
     def _abrir(self, dia: str) -> None:
+        anterior = self._dia
         self._fechar()
+        if anterior is not None and anterior != dia:
+            # O dia FECHOU. E o unico instante em que o arquivo dele tem hash
+            # estavel - ADR 0032, requisito 6, e a mesma fronteira do ADR 0029
+            # entre fluxo aberto e snapshot fechado, um nivel abaixo.
+            escrever_manifesto(self.caminho(anterior))
         # mtime=0 para que o gzip seja reproduzivel byte a byte dado o mesmo
         # conteudo - o cabecalho do gzip carrega o horario de criacao, e sem
         # isso dois arquivos identicos teriam hashes diferentes.
@@ -240,3 +247,121 @@ def integridade(caminho: Path) -> dict[str, Any]:
     except (EOFError, OSError, gzip.BadGzipFile):
         truncado = True
     return {"caminho": str(caminho), "linhas": linhas, "truncado": truncado}
+
+
+# ===========================================================================
+# MANIFESTO DO ARQUIVO BRUTO. ADR 0032, requisito 6.
+#
+# A amostra que atravessa para a `api` e DERIVADA. O que a torna auditavel e o
+# bruto continuar existindo com identidade - e o que a torna REEXTRAIVEL e
+# saber que o bruto nao mudou desde a extracao.
+#
+# `Diario` abre o gzip com `mtime=0` justamente para que o arquivo seja
+# reproduzivel byte a byte dado o mesmo conteudo. Sem isso, dois arquivos com
+# as mesmas linhas teriam hashes diferentes e o manifesto nao provaria nada.
+# ===========================================================================
+
+SUFIXO_MANIFESTO = ".manifesto.json"
+
+
+def caminho_do_manifesto(caminho: Path) -> Path:
+    return caminho.with_name(caminho.name + SUFIXO_MANIFESTO)
+
+
+def manifesto(caminho: Path) -> dict[str, Any]:
+    """Identidade do arquivo bruto: hash, contagem e fronteiras.
+
+    O `sha256` e dos BYTES do arquivo, e nao do conteudo descomprimido: e o
+    arquivo que fica guardado, e e ele que precisa ser conferivel sem
+    descomprimir 30 dias de amostras.
+
+    `truncado` continua sendo FATO OBSERVADO. Um arquivo truncado tem
+    manifesto assim mesmo - esconde-lo faria uma lacuna de dado parecer
+    mercado parado, que e exatamente o que `integridade` existe para impedir.
+    """
+    h = hashlib.sha256()
+    tamanho = 0
+    with caminho.open("rb") as f:
+        while bloco := f.read(1 << 20):
+            h.update(bloco)
+            tamanho += len(bloco)
+
+    primeiro = ultimo = None
+    linhas = 0
+    for linha in ler(caminho):
+        ns = linha.get("sampled_at_ns") or linha.get("medido_em_ns")
+        if ns is not None:
+            if primeiro is None:
+                primeiro = ns
+            ultimo = ns
+        linhas += 1
+
+    truncado = False
+    try:
+        with gzip.open(caminho, "rb") as f:
+            while f.read(1 << 20):
+                pass
+    except (EOFError, OSError, gzip.BadGzipFile):
+        truncado = True
+
+    return {
+        "arquivo": caminho.name,
+        "sha256": h.hexdigest(),
+        "bytes": tamanho,
+        "linhas": linhas,
+        "primeiro_ns": primeiro,
+        "ultimo_ns": ultimo,
+        "truncado": truncado,
+        "selado_em": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def escrever_manifesto(caminho: Path) -> Path | None:
+    """Sela um arquivo FECHADO. Nao sobrescreve, e nao sela o que nao existe.
+
+    **Nao sobrescrever e a regra, e nao uma otimizacao.** Um manifesto que
+    muda nao e manifesto: se o arquivo divergir do hash selado, isso tem de
+    APARECER na conferencia, e nao ser apagado por um manifesto novo.
+    """
+    if not caminho.exists():
+        return None
+    destino = caminho_do_manifesto(caminho)
+    if destino.exists():
+        return destino
+    destino.write_text(
+        json.dumps(manifesto(caminho), separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    return destino
+
+
+def conferir_manifesto(caminho: Path) -> bool | None:
+    """O arquivo ainda bate com o hash selado? `None` se nao ha manifesto."""
+    destino = caminho_do_manifesto(caminho)
+    if not destino.exists() or not caminho.exists():
+        return None
+    selado = json.loads(destino.read_text(encoding="utf-8"))
+    h = hashlib.sha256()
+    with caminho.open("rb") as f:
+        while bloco := f.read(1 << 20):
+            h.update(bloco)
+    return h.hexdigest() == selado["sha256"]
+
+
+def selar_dias_fechados(diretorio: Path, prefixo: str, hoje: str) -> list[Path]:
+    """Sela todo arquivo de dia passado que ainda nao tem manifesto.
+
+    Existe porque a rotacao normal sela ao virar o dia, e um processo que
+    MORREU antes da virada nao selou nada. Sem esta varredura no boot, um
+    reinicio a meia-noite deixaria um dia inteiro sem identidade - e o defeito
+    so apareceria quando alguem tentasse auditar a extracao.
+    """
+    selados = []
+    for arquivo in sorted(diretorio.glob(f"{prefixo}-*.jsonl.gz")):
+        dia = arquivo.name[len(prefixo) + 1:-len(".jsonl.gz")]
+        if dia >= hoje:
+            continue
+        if not caminho_do_manifesto(arquivo).exists():
+            escrever_manifesto(arquivo)
+            selados.append(arquivo)
+    return selados

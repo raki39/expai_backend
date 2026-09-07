@@ -971,6 +971,11 @@ FORA_DO_EXPORT = {
     # Exportar isto acrescentaria um numero que so faz sentido para quem esta
     # enviando dado, e nao para quem esta lendo o experimento.
     "/api/aovivo/ponto": "coordenacao do rele, nao estado do experimento",
+    # Mesma familia, mesmo motivo: diz de que instante da grade a
+    # EXTRACAO retoma. Quem quer saber quanto do periodo foi observado
+    # olha `/api/aovivo/bbo/estado`, que ESTA no export com cobertura,
+    # motivos de indisponibilidade e a janela do piloto.
+    "/api/aovivo/bbo/ponto": "coordenacao da extracao, nao estado do experimento",
 }
 
 

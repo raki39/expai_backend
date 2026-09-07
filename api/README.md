@@ -96,6 +96,9 @@ tag é o que faz o Swagger desenhar seções em vez de uma lista de 33 linhas.
 | GET | `/api/aovivo/ponto` | de que barra o relé retoma o backfill. Coordenação, não estado do experimento |
 | GET | `/api/aovivo/estado` | atraso e contagem do fluxo. **Atraso não é lacuna**: kline é recuperável |
 | GET | `/api/aovivo/snapshots` | os intervalos **fechados**, com hash, completude e finalidade. Todo resultado do forward cita um deles |
+| POST | `/api/aovivo/bbo` | a **segunda** rota que recebe dado: amostras de topo de livro alinhadas à grade, vindas do coletor. Mesmo protocolo do relé, **segredo próprio** |
+| GET | `/api/aovivo/bbo/ponto` | de que instante da grade a extração retoma. Coordenação, não estado do experimento |
+| GET | `/api/aovivo/bbo/estado` | cobertura da calibração e em que pé está a janela do piloto. **Lê** a janela; nunca a fecha |
 | POST | `/api/dataset/separacao` | cria a divisão de um dataset já ingerido; idempotente |
 
 ### ledger — partidas dobradas, dois livros, ciclo do run

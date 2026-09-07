@@ -481,6 +481,9 @@ PARAMETROS_DE_ROTA = {
         "venue": "binance", "symbol": "BTCUSDT",
         "timeframe": "15m", "interval_ms": 900_000,
     },
+    "/api/aovivo/bbo/ponto": {
+        "venue": "binance", "symbol": "BTCUSDT", "contrato": "bbo@1",
+    },
     "/api/relatorio/auditoria/{hypothesis_id}": {"hypothesis_id": 1},
     "/api/relatorio/vinculo/evento/{event_id}": {"event_id": 1},
     "/api/relatorio/vinculo/execucao/{execution_id}": {"execution_id": 1},

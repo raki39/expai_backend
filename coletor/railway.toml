@@ -14,6 +14,16 @@
 #
 # Variaveis (ver .env.example):
 #   APP_ENV=railway         OBRIGATORIO - sem volume montado, RECUSA subir
+#
+#   COLETOR_API_URL         entrega da amostra alinhada (ADR 0032)
+#   API_SERVICE_TOKEN       o mesmo token de servico da api
+#   COLETOR_HMAC_SECRET     PROPRIO, e nao o do rele
+#
+# As TRES da entrega sao OPCIONAIS, e a ausencia nao impede o boot: sem
+# elas o coletor segue COLETANDO e so nao entrega. Ao contrario do rele,
+# que falha fechado - la a entrega e a unica funcao; aqui a coleta e a
+# parte irrecuperavel, e recusar a subir trocaria uma perda que nao volta
+# por uma que volta.
 #   COLETOR_DIR=/dados      CAMINHO ABSOLUTO, volume proprio
 #   COLETOR_SIMBOLO=btcusdt
 #
