@@ -14,6 +14,8 @@ from ...relatorio import montar as relatorio_montar
 from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
 from ...relatorio import monitoramento as relatorio_monitoramento
+from ...relatorio import viabilidade as relatorio_viabilidade
+from ...hipotese import dimensionamento
 from ...relatorio import quarentena as relatorio_quarentena
 from ...relatorio import portao_b as relatorio_portao_b
 from ...relatorio import reprodutibilidade as relatorio_reprodutibilidade
@@ -116,6 +118,25 @@ def monitoramento(request: Request) -> dict[str, Any]:
             conn, duracao_barra_ms=ds.interval_ms
         ),
     }
+
+
+@router.get("/viabilidade")
+def viabilidade(request: Request) -> dict[str, Any]:
+    """A capacidade experimental do desenho, sob a regua da D48.
+
+    Responde a pergunta que a D48 obrigou a fazer: **este desenho consegue
+    testar o efeito minimo que ele proprio declara?** A resposta e derivada -
+    familia e FDR saem da config versionada, variancia e dependencia sao
+    MEDIDAS no in-sample, e as janelas saem da divisao da D27.
+
+    A potencia vai daqui como `POTENCIA_ALVO_PPM` **explicitamente**, e nao por
+    default do modulo: o relatorio que publica a conclusao e o lugar mais
+    provavel para o numero voltar a ser implicito, e a D48 existe justamente
+    porque ele era implicito.
+    """
+    return relatorio_viabilidade.montar(
+        _conn(request), potencia_ppm=dimensionamento.POTENCIA_ALVO_PPM
+    )
 
 
 @router.get("/portao-a")
@@ -344,6 +365,13 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # errada mais provavel de um forward sem alarme.
         ("monitoramento", "/api/relatorio/monitoramento",
          lambda: monitoramento(request)),
+        # `viabilidade` ENTRA porque ela carrega a conclusao da D48, e uma
+        # conclusao sobre o que o desenho NAO consegue testar e a que mais
+        # facilmente some de um pacote de resultados. E ela e derivada:
+        # se um dia o dataset crescer o bastante, o campo vira `false`
+        # sozinho em vez de continuar impresso descrevendo outro mundo.
+        ("viabilidade", "/api/relatorio/viabilidade",
+         lambda: viabilidade(request)),
         # `integridade` ENTRA porque ela e a unica parte do pacote que responde
         # "o substrato que produziu tudo isso continua de pe?" - e um export
         # que mostra resultado sem isso pede confianca no lugar de prova.

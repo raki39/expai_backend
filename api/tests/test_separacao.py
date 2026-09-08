@@ -761,3 +761,134 @@ def test_o_ciclo_da_0b_recusa_rodar_sem_separacao(
     assert (
         int(conn.execute("SELECT COUNT(*) AS n FROM run").fetchone()["n"]) == 0
     )
+
+
+# ===========================================================================
+# D49 (ADR 0039) — o agente não invoca o mercado ao vivo NEM RECEBE o resultado
+# ===========================================================================
+#
+# A precisão do usuário é "nem indiretamente", e ela muda o que se testa:
+#
+#     não invoca         ->  o agente não tem a ferramenta provisionada
+#     nem indiretamente  ->  nenhum campo DERIVADO dela chega ao contexto dele
+#
+# A segunda é a que protege o experimento. Se um resumo, média, contagem ou
+# flag calculado a partir do mercado ao vivo entrar no contexto que o agente
+# lê, a contaminação já aconteceu — pelo caminho que ninguém estava olhando,
+# porque a proibição nominal estava cumprida.
+#
+# §8.5.1 diz por que a garantia tem de ser estrutural: "uma garantia que
+# depende de boa vontade já foi violada".
+
+#: Os módulos que compõem o que o agente LÊ. `contexto` é o que vai ao prompt;
+#: `grafo` e `ciclo` são o que o monta.
+#:
+#: Lista EXPLÍCITA, e não `app/cerebro/*`: um módulo novo no pacote tem de
+#: passar por uma decisão para entrar aqui, e é justamente na adição de módulo
+#: que uma fronteira se fura sem que ninguém note.
+MODULOS_DO_QUE_O_AGENTE_LE = (
+    "app/cerebro/contexto.py",
+    "app/cerebro/grafo.py",
+    "app/cerebro/ciclo.py",
+)
+
+#: O vocabulário do dado ao vivo. Cada nome é uma tabela ou um pacote que só
+#: existe porque o mercado ao vivo existe.
+VOCABULARIO_AO_VIVO = (
+    "aovivo",
+    "stream_bar",
+    "bbo_amostra",
+    "bbo_contrato",
+    "snapshot_bar",
+    "inspect_live_market",
+)
+
+
+def _importados(caminho: pathlib.Path) -> set[str]:
+    """Os módulos que este arquivo importa, por AST e não por texto.
+
+    Por AST porque um comentário que EXPLICA a proibição não pode acusá-la —
+    e é o comentário que este arquivo mais provavelmente vai ter.
+    """
+    arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+    nomes: set[str] = set()
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.Import):
+            nomes.update(a.name for a in no.names)
+        elif isinstance(no, ast.ImportFrom):
+            nomes.add(no.module or "")
+            nomes.update(f"{no.module or ''}.{a.name}" for a in no.names)
+    return nomes
+
+
+def test_o_que_o_agente_le_nao_importa_o_pacote_do_dado_ao_vivo() -> None:
+    """A metade "não invoca": nenhum caminho de código até `app/aovivo`.
+
+    Provisionada é diferente de desativada — §11.2.1 é literal sobre isso com
+    `place_order`: *"não é provisionada; não basta estar desativada"*. Uma
+    importação presente e não usada seria a ferramenta provisionada.
+    """
+    raiz = pathlib.Path(__file__).resolve().parents[1]
+    for relativo in MODULOS_DO_QUE_O_AGENTE_LE:
+        arquivo = raiz / relativo
+        assert arquivo.exists(), f"{relativo} sumiu: reveja esta lista"
+        for modulo in _importados(arquivo):
+            assert "aovivo" not in modulo, (
+                f"{relativo} importa {modulo!r}: o agente passou a ter caminho"
+                " até o mercado ao vivo (D49, ADR 0039). Se foi deliberado, é"
+                " decisão nova com separação temporal própria — não um import"
+            )
+
+
+def test_nenhum_campo_derivado_do_ao_vivo_chega_ao_CONTEXTO_do_agente() -> None:
+    """A metade "nem indiretamente", e é a que tem dente.
+
+    Não basta não importar: o contexto é um dicionário que vai ao prompt, e um
+    campo com nome do vocabulário ao vivo entraria por qualquer caminho. Aqui a
+    varredura é sobre as CONSULTAS e os literais de uma linha, que é onde nome
+    de tabela mora.
+    """
+    raiz = pathlib.Path(__file__).resolve().parents[1]
+    fonte = sql_sem_prosa(raiz / "app/cerebro/contexto.py")
+    acusados = [p for p in VOCABULARIO_AO_VIVO if p in fonte]
+    assert not acusados, (
+        f"o contexto do agente menciona {acusados}: a D49 proíbe que ele"
+        " receba o resultado do mercado ao vivo mesmo indiretamente"
+    )
+
+
+def test_a_guarda_da_D49_nao_e_vazia() -> None:
+    """Ela encontra o que procura quando o defeito está presente.
+
+    Guarda vazia é pior que guarda ausente: afirma proteção que não existe.
+    Este projeto conta essa história em `volume_gravavel`, em `BLOCOS`, no
+    comentário de `braco.py` e na guarda do `app.state.conn` — que passava com
+    o defeito reintroduzido porque `sql_sem_prosa` junta tokens com espaço.
+    """
+    assert any(
+        p in "SELECT ask FROM bbo_amostra WHERE 1" for p in VOCABULARIO_AO_VIVO
+    )
+    assert any(p in "from ..aovivo import fluxo" for p in VOCABULARIO_AO_VIVO)
+
+
+def test_quem_LE_o_dado_ao_vivo_e_o_executor_e_o_validador() -> None:
+    """O outro lado da decisão: ela nomeia quem PODE, e não só quem não pode.
+
+    Sem esta metade, a suíte estaria satisfeita por um sistema em que ninguém
+    lê o dado ao vivo — e aí o coletor, o relé e o piloto do ADR 0027 seriam
+    dado coletado e nunca usado.
+
+    `calibracao` é o lado do Executor (shadow do B3, §8.4.1.2); a rota de
+    relatório é o lado do Validador.
+    """
+    raiz = pathlib.Path(__file__).resolve().parents[1]
+    leitores = {
+        caminho.relative_to(raiz).as_posix()
+        for caminho in (raiz / "app").rglob("*.py")
+        if any("aovivo" in m for m in _importados(caminho))
+    }
+    assert leitores, "ninguém lê o dado ao vivo: o coletor virou dado morto"
+    for leitor in leitores:
+        assert leitor.startswith(("app/calibracao/", "app/api/")), (
+            f"{leitor} lê o dado ao vivo e não é Executor nem Validador (D49)"
+        )

@@ -40,12 +40,15 @@ ESTRUTURA_ESPERADA = {
     27: ["quarentena_congelado"],
     28: ["monitor_limiar", "monitor_passo", "monitor_alarme",
          "monitor_reteste"],
+    29: [],  # ALTER TABLE, conferido por coluna abaixo
 }
 
 COLUNAS_ESPERADAS = {
     ("bbo_amostra", "relogio_medido_em_ms"): 20,
     ("config_version", "calibracao_perfil_hash"): 24,
     ("run", "calibracao_perfil_hash"): 25,
+    ("hypothesis", "regua_dimensionamento"): 29,
+    ("hypothesis", "dimensionamento_json"): 29,
 }
 
 # Os gatilhos que impedem reescrita. Se um deles sumir, a tabela continua
@@ -70,6 +73,7 @@ GATILHOS_ESPERADOS = [
     "monitor_alarme_sem_update", "monitor_alarme_sem_delete",
     "monitor_critico_exige_alerta",
     "monitor_reteste_e_posterior", "monitor_reteste_sem_update",
+    "hypothesis_dimensionamento_coerente",
 ]
 
 # A migracao a partir da qual estas listas valem. Abaixo dela esta o substrato

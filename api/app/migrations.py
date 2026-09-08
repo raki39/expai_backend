@@ -3737,6 +3737,58 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        29,
+        "D48: a regua que dimensionou cada hipotese, gravada linha a linha",
+        """
+        -- ==================================================================
+        -- QUAL REGUA DIMENSIONOU ESTA HIPOTESE (D48)
+        --
+        -- A D48 vale **so para hipoteses futuras**. Mudar as ja registradas
+        -- alteraria o `efeito_minimo` de cada uma (secao 10.2.3) e invalidaria
+        -- toda comparacao que atravessasse a mudanca.
+        --
+        -- O perigo nao e alguem reescrever: `hypothesis_sem_update` ja recusa
+        -- isso desde a migracao 9. O perigo e `n_minimo` passar a significar
+        -- DUAS coisas em linhas vizinhas sem que nada anuncie - 19.240 sob
+        -- `t = 2` numa, 95.579 sob `t = z_alfa + z_beta` na outra, o mesmo
+        -- nome de coluna nas duas.
+        --
+        -- E o padrao que este projeto conta vinte e quatro vezes: um valor que
+        -- descrevia algo, parou de descrever, e nada indicou a mudanca.
+        -- A coluna e a nao-retroatividade virando estrutura em vez de nota.
+        --
+        -- O DEFAULT e 'secao_8_3' porque e a verdade sobre toda linha que ja
+        -- existe: nenhuma delas conheceu potencia-alvo nenhuma.
+        -- ==================================================================
+        ALTER TABLE hypothesis ADD COLUMN regua_dimensionamento TEXT NOT NULL
+            DEFAULT 'secao_8_3'
+            CHECK (regua_dimensionamento IN ('secao_8_3', 'by_potencia'));
+
+        -- Os sete insumos que a D48 manda registrar, em JSON, e SO para a
+        -- regua nova. Guardar o dimensionamento inteiro - e nao apenas o
+        -- `n_minimo` que saiu dele - e o que torna a conta auditavel depois:
+        -- procedimento, familia, FDR, efeito minimo, variancia, dependencia e
+        -- potencia. Sem eles, `n_minimo = 95579` e um numero sem procedencia.
+        ALTER TABLE hypothesis ADD COLUMN dimensionamento_json TEXT;
+
+        -- As duas metades andam juntas ou a linha nao entra. Um
+        -- `by_potencia` sem insumos seria a regua nova sem a procedencia que
+        -- ela existe para exigir; um `secao_8_3` COM insumos afirmaria uma
+        -- conta que nao dimensionou aquela hipotese.
+        CREATE TRIGGER hypothesis_dimensionamento_coerente
+        BEFORE INSERT ON hypothesis
+        WHEN (NEW.regua_dimensionamento = 'by_potencia'
+              AND (NEW.dimensionamento_json IS NULL
+                   OR NOT json_valid(NEW.dimensionamento_json)))
+          OR (NEW.regua_dimensionamento = 'secao_8_3'
+              AND NEW.dimensionamento_json IS NOT NULL)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'regua e insumos andam juntos (D48): by_potencia exige dimensionamento_json valido, secao_8_3 proibe');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

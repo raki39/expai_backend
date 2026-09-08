@@ -15,6 +15,7 @@ import sqlite3
 import pytest
 
 from app.config.schema import ExperimentConfig
+from app.relatorio import portao_b
 from tests.test_cerebro import settings  # noqa: F401
 
 
@@ -624,3 +625,173 @@ def test_rodar_o_agente_de_novo_produz_a_MESMA_hipotese(
     # livro simulado, e nao no real (D21). O agente pagou pelo pensamento; nos
     # e que nao pagamos de novo.
     assert segundo.gasto["gasto_real_brl_cents"] == 0
+
+
+# ===========================================================================
+# D47 — o DSR nunca decide sozinho, e os dois `n` andam juntos
+# ===========================================================================
+#
+# Aprovada em 2026-09-08, e a terceira frase da precisao do usuario e a que
+# tem dente: as duas primeiras (publicar com `n` bruto, mostrar os dois `n`)
+# eram relato; "nunca decide sozinho" e VEREDITO.
+#
+# Testado sobre `resolver`, que e pura. Montar seis criterios num run real
+# faria o teste medir o cenario em vez de medir a regra - e o cenario que
+# reprova SO pelo DSR e justamente o mais difícil de produzir de proposito.
+
+
+def _criterios(**mudancas):
+    base = {
+        "b1_liquido_positivo_apos_todos_os_custos": True,
+        "b2_supera_b2_e_b3": True,
+        "b3_acima_do_p95_de_b1": True,
+        "b4_supera_b4_por_credito": True,
+        "b5_walk_forward_em_3_janelas": True,
+        "b6_dsr_no_minimo": True,
+    }
+    base.update(mudancas)
+    return base
+
+
+def test_os_seis_criterios_verdadeiros_passam():
+    """A guarda de nao-vacuidade: o portao TEM de conseguir aprovar.
+
+    Sem isto, todos os testes abaixo passariam com uma funcao que devolve
+    `rejeitado` sempre - e um portao que nunca aprova nao mede nada.
+    """
+    resultado, reprovando, sem_medida, sozinho = portao_b.resolver(_criterios())
+    assert resultado == portao_b.PASSOU
+    assert reprovando == [] and sem_medida == [] and sozinho is False
+
+
+def test_o_dsr_reprovando_SOZINHO_nao_rejeita():
+    """**A garantia da D47.**
+
+    Antes desta decisao o resultado era `rejeitado` - na forca de um numero so,
+    e de um numero cujo proprio `n` esta declarado como otimista. §14.4 traduz
+    "rejeitado" como *"a abordagem esta descartada. Reprojetar."*
+    """
+    resultado, reprovando, _sem, sozinho = portao_b.resolver(
+        _criterios(b6_dsr_no_minimo=False)
+    )
+    assert sozinho is True
+    assert resultado == portao_b.INCONCLUSIVO
+    assert reprovando == ["b6_dsr_no_minimo"]
+
+
+def test_o_dsr_com_companhia_rejeita_normalmente():
+    """A D47 nao desliga o critério 6: ela proibe que ele decida SOZINHO.
+
+    Com qualquer outro criterio reprovando junto, o resultado volta a ser
+    `rejeitado` - e o DSR continua contando para isso.
+    """
+    for outro in (
+        "b1_liquido_positivo_apos_todos_os_custos",
+        "b2_supera_b2_e_b3",
+        "b3_acima_do_p95_de_b1",
+        "b4_supera_b4_por_credito",
+        "b5_walk_forward_em_3_janelas",
+    ):
+        resultado, reprovando, _s, sozinho = portao_b.resolver(
+            _criterios(**{outro: False, "b6_dsr_no_minimo": False})
+        )
+        assert sozinho is False, f"{outro} nao pode ser lido como DSR sozinho"
+        assert resultado == portao_b.REJEITADO
+        assert "b6_dsr_no_minimo" in reprovando
+
+
+def test_qualquer_outro_criterio_sozinho_ainda_rejeita():
+    """A D47 vale so para o DSR, e nao virou uma regra geral de "um so nao vale".
+
+    Os outros cinco criterios sao FATOS DO LEDGER - patrimonio abaixo da
+    semente, abaixo do B2, abaixo do p95 - e nao dependem de amostra nem de
+    `n` nenhum. Nao ha motivo para eles nao decidirem.
+    """
+    for unico in (
+        "b1_liquido_positivo_apos_todos_os_custos",
+        "b2_supera_b2_e_b3",
+        "b3_acima_do_p95_de_b1",
+        "b4_supera_b4_por_credito",
+        "b5_walk_forward_em_3_janelas",
+    ):
+        resultado, _r, _s, sozinho = portao_b.resolver(
+            _criterios(**{unico: False})
+        )
+        assert resultado == portao_b.REJEITADO, (
+            f"{unico} reprovando sozinho tem de rejeitar: a D47 e sobre o DSR"
+        )
+        assert sozinho is False
+
+
+def test_None_continua_diferente_de_False():
+    """`sem_medida` e inconclusivo, e nunca rejeitado (§14.4).
+
+    Herdado do incremento 14 e refeito aqui porque a extracao de `resolver`
+    poderia ter perdido a distincao sem que nada acusasse.
+    """
+    resultado, reprovando, sem_medida, _s = portao_b.resolver(
+        _criterios(b5_walk_forward_em_3_janelas=None)
+    )
+    assert resultado == portao_b.INCONCLUSIVO
+    assert reprovando == []
+    assert sem_medida == ["b5_walk_forward_em_3_janelas"]
+
+
+def test_reprovacao_definitiva_ganha_de_falta_de_medida():
+    """Um `False` real decide, mesmo com outro criterio sem medida.
+
+    E o caso do Portao B em producao: cinco criterios reprovaram e o 5 ficou
+    `None` porque nao foi medido - e o resultado foi `rejeitado`, nao
+    `inconclusivo`.
+    """
+    resultado, _r, sem_medida, _s = portao_b.resolver(
+        _criterios(
+            b1_liquido_positivo_apos_todos_os_custos=False,
+            b5_walk_forward_em_3_janelas=None,
+        )
+    )
+    assert resultado == portao_b.REJEITADO
+    assert sem_medida == ["b5_walk_forward_em_3_janelas"]
+
+
+def test_a_limitacao_do_dsr_vai_no_MESMO_bloco_do_numero():
+    """Uma ressalva a trinta linhas do numero e uma ressalva que ninguem le.
+
+    A D47 manda mostrar `n_bruto`, `n_efetivo` e a limitacao **sempre**. O
+    texto ja existia na lista do que a 0B nao responde; o que faltava era ele
+    estar ao lado do DSR.
+    """
+    import pathlib
+    import re
+
+    # `sql_sem_prosa`, e NAO `codigo_sem_prosa`. A diferenca esta escrita na
+    # docstring de `tests/_prosa.py` e eu a ignorei na primeira versao deste
+    # teste: `codigo_sem_prosa` remove TODO literal, entao `dsr_bloco["n_bruto"]`
+    # sai `dsr_bloco [ ]` e a guarda procura uma chave que ela mesma apagou.
+    # Sao objetivos opostos, e trocar um pelo outro cega a guarda.
+    from tests._prosa import sql_sem_prosa
+
+    fonte = sql_sem_prosa(pathlib.Path(portao_b.__file__))
+    for campo in (
+        "n_bruto",
+        "n_efetivo",
+        "autocorrelacao_ppm",
+        "limitacao_por_dependencia",
+    ):
+        padrao = r"dsr_bloco\s*\[\s*[\"']" + campo + r"[\"']\s*\]"
+        assert re.search(padrao, fonte), (
+            f"o bloco do DSR parou de publicar {campo} (D47)"
+        )
+
+
+def test_o_texto_da_limitacao_nomeia_os_dois_n_e_a_direcao_do_erro():
+    """E a direcao importa: a discordancia corre para o lado de APROVAR.
+
+    Este e o unico lugar deste projeto onde uma escolha erra nessa direcao, e
+    e por isso que o texto tem de dize-lo em vez de so registrar que existe
+    uma diferenca.
+    """
+    texto = portao_b.LIMITE_DO_DSR.lower()
+    assert "n_efetivo" in texto
+    assert "bruto" in texto
+    assert "aprovar" in texto

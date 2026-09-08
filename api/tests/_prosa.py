@@ -1,4 +1,4 @@
-"""Isolar CODIGO da PROSA, para guardas que varrem fonte.
+r"""Isolar CODIGO da PROSA, para guardas que varrem fonte.
 
 Existe porque uma guarda que busca texto cru acusa a **explicacao** de por que
 algo e proibido - e a correcao errada e apagar a explicacao. O incremento 11
@@ -20,6 +20,25 @@ neles: remove-los deixaria a guarda cega para o que ela procura.
 `codigo_sem_prosa` remove TODO literal, porque
 lá o alvo e uma palavra que pode aparecer em texto qualquer. Sao objetivos
 opostos, e trocar um pelo outro cega uma das duas guardas.
+
+**E eu troquei os dois, no mesmo dia, escrevendo guardas para a D47 e a D48**
+(2026-09-08). Fica registrado porque o aviso acima ja existia e nao bastou:
+
+| guarda | o que eu usei | o que acontecia |
+|---|---|---|
+| a rota de viabilidade passa a potencia explicitamente | `codigo_sem_prosa`, procurando a substring | os tokens saem JUNTOS COM ESPACO: `dimensionamento . POTENCIA_ALVO_PPM`. A substring nunca casa, e a guarda **passa com o defeito presente** |
+| o bloco do DSR publica `n_bruto` e `n_efetivo` | `codigo_sem_prosa`, procurando as chaves | ele apaga TODO literal, entao `dsr_bloco["n_bruto"]` sai `dsr_bloco [ ]` — a guarda procurava uma chave que ela mesma tinha removido |
+
+As duas correcoes:
+
+1. **regex com `\s*`**, e nunca substring, quando o alvo atravessa mais de um
+   token. E a licao do incremento 17, onde `app.state.conn` saiu
+   `app . state . conn` e a guarda ficou vazia;
+2. **`sql_sem_prosa` quando o alvo esta DENTRO de um literal** — chave de
+   dicionario, nome de tabela, nome de campo.
+
+A regra curta: **o alvo esta num literal? `sql_sem_prosa`. E uma palavra do
+codigo? `codigo_sem_prosa`, e com regex se ela atravessa tokens.**
 """
 
 from __future__ import annotations

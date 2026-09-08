@@ -180,7 +180,7 @@ class Efetivo:
     efetivo: int
 
 
-def _autocorrelacao_lag1_ppm(serie: list[int]) -> int:
+def autocorrelacao_lag1_ppm(serie: list[int]) -> int:
     """Autocorrelacao de defasagem 1, em partes por milhao.
 
     Recebe inteiros (retornos por barra em bps) e devolve inteiro. Zero
@@ -201,10 +201,8 @@ def _autocorrelacao_lag1_ppm(serie: list[int]) -> int:
     return max(-1_000_000, min(1_000_000, round(rho * 1_000_000)))
 
 
-def efetivo_de_bruto(retornos_por_barra_bps: list[int], bruto: int) -> Efetivo:
-    """`n_efetivo` a partir do que foi de fato observado (secao 8.3).
-
-    Fator de inflacao de variancia de um AR(1):
+def fator_ppm_de_rho(rho_ppm: int) -> int:
+    """Fator de inflacao de variancia de um AR(1), em ppm.
 
         fator = (1 - rho) / (1 + rho)
 
@@ -214,15 +212,24 @@ def efetivo_de_bruto(retornos_por_barra_bps: list[int], bruto: int) -> Efetivo:
     inteiro deste projeto e construido na direcao oposta (regra 9). Descontar
     quando ha dependencia e conservador; premiar quando parece nao haver e
     apostar na estimativa.
+
+    **Uma definicao so.** A avaliacao desconta o observado por este fator e o
+    dimensionamento da D48 converte `n_efetivo` exigido em barras brutas pelo
+    inverso dele. Duas copias da mesma conversao divergiriam, e o resultado
+    seria um `n_minimo` que nao casa com o `n_efetivo` que o mede - defeito de
+    forma que este projeto ja pagou em `condicoes_da_config` e no
+    `SELECT MAX(run_id)`.
     """
-    rho_ppm = _autocorrelacao_lag1_ppm(retornos_por_barra_bps)
     if rho_ppm >= 1_000_000:
-        fator_ppm = 0
-    else:
-        fator_ppm = round(
-            (1_000_000 - rho_ppm) * 1_000_000 / (1_000_000 + rho_ppm)
-        )
-    fator_ppm = max(0, min(1_000_000, fator_ppm))
+        return 0
+    fator = round((1_000_000 - rho_ppm) * 1_000_000 / (1_000_000 + rho_ppm))
+    return max(0, min(1_000_000, fator))
+
+
+def efetivo_de_bruto(retornos_por_barra_bps: list[int], bruto: int) -> Efetivo:
+    """`n_efetivo` a partir do que foi de fato observado (secao 8.3)."""
+    rho_ppm = autocorrelacao_lag1_ppm(retornos_por_barra_bps)
+    fator_ppm = fator_ppm_de_rho(rho_ppm)
     return Efetivo(
         bruto=bruto,
         autocorrelacao_ppm=rho_ppm,

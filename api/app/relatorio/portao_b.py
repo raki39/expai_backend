@@ -130,6 +130,65 @@ def _agora() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: O criterio 6 de §14.4, pelo nome com que ele aparece em `criterios`.
+CRITERIO_DSR = "b6_dsr_no_minimo"
+
+
+def resolver(
+    criterios: dict[str, bool | None]
+) -> tuple[str, list[str], list[str], bool]:
+    """Os seis criterios viram UM resultado. PURA, e testavel na fronteira.
+
+    Devolve `(resultado, reprovando, sem_medida, dsr_decidiria_sozinho)`.
+
+    Estava embutida no meio de `_avaliar`, e o motivo de sair e a D47: a regra
+    "o DSR nunca decide sozinho" e uma regra sobre ESTA conta, e uma regra
+    enterrada num bloco de cem linhas nao se consegue exercitar sem montar um
+    run inteiro - o que faz o teste medir o cenario em vez de medir a regra.
+
+    ## As tres respostas, e por que `sem_medida` nao e reprovacao
+
+    `None` nao e `False`. Um criterio que ninguem mediu nao e um criterio
+    satisfeito **nem** violado - §14.4: falta de amostra e inconclusivo, nunca
+    rejeitado, e tratar os dois como a mesma coisa e "o erro simetrico ao de
+    promover ruido".
+
+    ## E o DSR nao decide sozinho (D47)
+
+    > *"Preserve o DSR publicado com `n` bruto, mas mostre sempre `n_bruto`,
+    > `n_efetivo` e a limitacao causada pela dependencia. **O DSR nunca decide
+    > sozinho.**"* - o usuario, 2026-09-08
+
+    A terceira frase e a que tem dente, e ela **nao era cumprida**: com o DSR
+    como unico criterio reprovando, o portao saia `rejeitado` na forca de um
+    numero so - e de um numero cujo proprio `n` esta declarado como otimista
+    (`LIMITE_DO_DSR`). §14.4 traduz "rejeitado" como *"a abordagem esta
+    descartada. Reprojetar."*, que e afirmacao forte demais para vir de uma
+    estatistica sozinha e qualificada.
+
+    **Passa a `inconclusivo`, e isso nao afrouxa nada.** §14.4 e literal em que
+    *"inconclusivo nunca vira sucesso"*: nada e promovido por esta mudanca, e o
+    caminho de volta de uma candidata inconclusiva continua sendo a 0B com
+    linhagem (D38, ADR 0034). O que muda e o que o relatorio **afirma**.
+
+    E a leitura antiga fica **calculada e visivel** em
+    `leitura_se_o_dsr_decidisse`, como a D37 fez com a D29 - apagar
+    `rejeitado` esconderia que houve correcao.
+    """
+    reprovando = sorted(k for k, v in criterios.items() if v is False)
+    sem_medida = sorted(k for k, v in criterios.items() if v is None)
+
+    dsr_decidiria_sozinho = reprovando == [CRITERIO_DSR]
+
+    if reprovando and not dsr_decidiria_sozinho:
+        resultado = REJEITADO
+    elif reprovando or sem_medida:
+        resultado = INCONCLUSIVO
+    else:
+        resultado = PASSOU
+    return resultado, reprovando, sem_medida, dsr_decidiria_sozinho
+
+
 def _candidatas(
     conn: sqlite3.Connection, config_version_id: int
 ) -> list[dict]:
@@ -307,6 +366,22 @@ def _uma_candidata(
         except dsr_mod.DSRImpossivel as erro:
             dsr_bloco = {"disponivel": False, "por_que": str(erro)}
 
+    # D47: os DOIS `n` andam juntos, sempre, com a limitacao ao lado.
+    #
+    # O `n` do DSR e o BRUTO, porque e o `n` da formula publicada. O do
+    # veredito e o EFETIVO. Publicar so o primeiro dentro do bloco do DSR
+    # deixava o leitor com um `n` sem saber que existe outro - e a diferenca
+    # corre para o lado de APROVAR.
+    #
+    # A limitacao entra no MESMO bloco, e nao numa lista de ressalvas no fim:
+    # uma ressalva a trinta linhas de distancia e uma ressalva que ninguem le
+    # junto com o numero que ela qualifica.
+    amostra = (detalhe.get("amostra") or {})
+    dsr_bloco["n_bruto"] = amostra.get("n_bruto")
+    dsr_bloco["n_efetivo"] = amostra.get("n_efetivo")
+    dsr_bloco["autocorrelacao_ppm"] = amostra.get("autocorrelacao_ppm")
+    dsr_bloco["limitacao_por_dependencia"] = LIMITE_DO_DSR
+
     # 5. Walk-forward. Roda DEPOIS dos baratos, e so se nenhum deles ja
     #    reprovou de forma definitiva - o criterio 5 ficar `None` por "nao foi
     #    medido" e diferente de ficar `None` por falta de amostra.
@@ -356,14 +431,9 @@ def _uma_candidata(
         "b5_walk_forward_em_3_janelas": c5,
         "b6_dsr_no_minimo": c6,
     }
-    reprovando = sorted(k for k, v in criterios.items() if v is False)
-    sem_medida = sorted(k for k, v in criterios.items() if v is None)
-    if reprovando:
-        resultado = REJEITADO
-    elif sem_medida:
-        resultado = INCONCLUSIVO
-    else:
-        resultado = PASSOU
+    resultado, reprovando, sem_medida, dsr_decidiria_sozinho = resolver(
+        criterios
+    )
 
     return {
         "hypothesis_id": hid,
@@ -381,6 +451,18 @@ def _uma_candidata(
         "reprovando": reprovando,
         "sem_medida": sem_medida,
         "resultado": resultado,
+        "dsr_decidiria_sozinho": dsr_decidiria_sozinho,
+        "leitura_se_o_dsr_decidisse": (
+            REJEITADO if dsr_decidiria_sozinho else None
+        ),
+        "por_que_nao_rejeitado_pelo_dsr": (
+            "o DSR era o UNICO criterio reprovando, e ele nao decide sozinho"
+            " (D47): o `n` da formula publicada e o bruto, e a diferenca contra"
+            " o `n_efetivo` corre para o lado de aprovar. Nada e promovido por"
+            " isso - inconclusivo nunca vira sucesso (§14.4)."
+            if dsr_decidiria_sozinho
+            else None
+        ),
         "parecer_in_sample": parecer.get("veredito"),
     }
 

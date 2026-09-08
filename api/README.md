@@ -177,6 +177,7 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | GET | `/api/relatorio/portao-a` | **o Portão A (§14.4): o protocolo rejeita defeito?** — passa / reprova / pendente |
 | GET | `/api/relatorio/quarentena` | **nenhuma candidata admitida**, o motivo de cada exclusão e que o B3 foi só controle negativo (ADR 0034). A ausência é DECLARADA, não omitida |
 | GET | `/api/relatorio/monitoramento` | **o monitoramento contínuo de §8.8**: CUSUM unilateral inferior, dois limiares congelados, e a ausência de sujeito na 0C — nenhum conhecimento em uso (ADR 0035) |
+| GET | `/api/relatorio/viabilidade` | **a capacidade experimental do desenho** (D48): `n_minimo` contra o limiar da primeira rejeição do BY com potência-alvo de 80%, o menor efeito detectável por horizonte, e o déficit — variância e dependência **medidas** no in-sample |
 | GET | `/api/relatorio/portao-b` | **o Portão B (§14.4): existe candidata digna de auditoria?** — só avaliado se o A passar |
 | POST | `/api/relatorio/portao-b` | roda o walk-forward das candidatas (§14.4 B5) — CPU e runs, sem dinheiro |
 | GET | `/api/relatorio/auditoria/{hypothesis_id}` | o roteiro de §14.4.1 na parte que só lê |

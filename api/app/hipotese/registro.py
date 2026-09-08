@@ -17,7 +17,8 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 
-from . import poder
+from . import dimensionamento, poder
+from .dimensionamento import Dimensionamento
 from .schema import PreRegistroBruto, hash_do_conteudo
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ def registrar(
     rule_id: int | None = None,
     supersedes: int | None = None,
     agente_origem: str = AGENTE_ORIGEM,
+    dimensionamento_d48: Dimensionamento | None = None,
 ) -> tuple[int, bool]:
     """Grava a hipotese. Devolve `(id, testavel)`.
 
@@ -94,19 +96,54 @@ def registrar(
     backtest retrospectivo custa CPU. E recusar aqui faria `arquivada` e
     `refutada` terem o mesmo efeito pratico, que e exatamente a confusao que
     a secao 14.4 chama de "erro simetrico ao de promover ruido".
-    """
-    n_min = poder.n_minimo(
-        sharpe_milesimos=bruto.sharpe_esperado_milesimos,
-        duracao_barra_ms=duracao_barra_ms,
-    )
 
-    testavel = 1
+    ## As duas reguas, e qual linha nasce sob qual (D48)
+
+    Sem `dimensionamento_d48`, vale a secao 8.3: `t = 2`, potencia implicita de
+    50%, e a linha grava `regua_dimensionamento = 'secao_8_3'`. Com ele, vale a
+    D48: `t = z_alfa + z_beta` contra o limiar da primeira rejeicao do BY, e a
+    linha grava `'by_potencia'` mais os sete insumos.
+
+    **A regua fica na LINHA, e nao numa data.** A D48 nao e retroativa, e sem
+    este campo `n_minimo` significaria duas coisas em linhas vizinhas sem que
+    nada anunciasse - o padrao que este projeto conta vinte e quatro vezes.
+    Ninguem precisa saber quando a decisao foi tomada para ler a linha certa.
+
+    E a potencia de hipotese nova e **fixada em 80%** (`POTENCIA_ALVO_PPM`):
+    aceitar outro valor aqui deixaria a regua ser escolhida por hipotese, que e
+    exatamente a porta que a D48 fechou.
+    """
+    regua = dimensionamento.REGUA_SECAO_8_3
+    dimensionamento_json: str | None = None
     motivo: str | None = None
-    try:
-        poder.conferir_horizonte(n_min=n_min, horizonte_barras=horizonte_barras)
-    except poder.HorizonteInsuficiente as erro:
-        testavel = 0
-        motivo = str(erro)
+
+    if dimensionamento_d48 is None:
+        n_min = poder.n_minimo(
+            sharpe_milesimos=bruto.sharpe_esperado_milesimos,
+            duracao_barra_ms=duracao_barra_ms,
+        )
+        testavel = 1
+        try:
+            poder.conferir_horizonte(
+                n_min=n_min, horizonte_barras=horizonte_barras
+            )
+        except poder.HorizonteInsuficiente as erro:
+            testavel = 0
+            motivo = str(erro)
+    else:
+        potencia = dimensionamento_d48.insumos.potencia_ppm
+        if potencia != dimensionamento.POTENCIA_ALVO_PPM:
+            raise dimensionamento.PotenciaNaoDeclarada(
+                "hipotese nova exige potencia de"
+                f" {dimensionamento.POTENCIA_ALVO_PPM} ppm (D48); veio"
+                f" {potencia}. A potencia e politica da fase, e nao escolha por"
+                " hipotese - deixa-la variar seria escolher a regua por caso"
+            )
+        regua = dimensionamento.REGUA_BY_POTENCIA
+        n_min = dimensionamento_d48.n_minimo_efetivo
+        testavel = 1 if dimensionamento_d48.cabe else 0
+        motivo = dimensionamento_d48.motivo
+        dimensionamento_json = _canonico(dimensionamento_d48.como_dict())
 
     conteudo = hash_do_conteudo(bruto, condicoes_validade, agente_origem)
 
@@ -117,8 +154,9 @@ def registrar(
         "  sharpe_esperado_milesimos, criterio_parada,"
         "  condicoes_validade_json, condicoes_falseamento_json,"
         "  testavel, motivo_nao_testavel, horizonte_barras,"
-        "  rule_id, supersedes, content_hash"
-        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "  rule_id, supersedes, content_hash,"
+        "  regua_dimensionamento, dimensionamento_json"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             run_id,
             agent_event_id,
@@ -140,6 +178,8 @@ def registrar(
             rule_id,
             supersedes,
             conteudo,
+            regua,
+            dimensionamento_json,
         ),
     )
     hypothesis_id = int(cur.lastrowid)
@@ -149,6 +189,7 @@ def registrar(
             "run_id": run_id,
             "hypothesis_id": hypothesis_id,
             "n_minimo": n_min,
+            "regua": regua,
             "testavel": bool(testavel),
             "content_hash": conteudo[:12],
         },
@@ -197,6 +238,12 @@ def como_dict(linha: sqlite3.Row) -> dict:
             int(linha["supersedes"]) if linha["supersedes"] is not None else None
         ),
         "content_hash": linha["content_hash"],
+        "regua_dimensionamento": linha["regua_dimensionamento"],
+        "dimensionamento": (
+            json.loads(linha["dimensionamento_json"])
+            if linha["dimensionamento_json"] is not None
+            else None
+        ),
     }
 
 
