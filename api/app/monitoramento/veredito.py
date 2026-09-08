@@ -34,6 +34,7 @@ from dataclasses import dataclass
 
 from ..regime.deteccao import FRACAO_MINIMA_PRESENTE
 from . import cusum
+from .limiar import MOTIVO_DIAGNOSTICO, PODE_INVALIDAR
 
 SEM_CONHECIMENTO = "sem_conhecimento_em_uso"
 INDISPONIVEL = "indisponivel_por_dados"
@@ -118,6 +119,24 @@ class Veredito:
         """SEMPRE `False`. Mesmo motivo."""
         return False
 
+    @property
+    def invalida(self) -> bool:
+        """O alarme move a hipotese na maquina de §8.1?
+
+        **Hoje, nunca** - `PODE_INVALIDAR` e `False`, porque a calibracao nao
+        entrega o orcamento de 10% que o ADR 0035 declarou: o nivel realizado
+        ficou entre 7,5% e 18,4% sobre tres in-samples da mesma lei.
+
+        Cruzar continua sendo registrado, com motivo e instante. O que nao
+        acontece e a transicao - alarme e SINAL para olhar, e nao veredito.
+        """
+        return PODE_INVALIDAR and self.estado in ESTADOS_DA_MAQUINA
+
+    @property
+    def motivo_diagnostico(self) -> str | None:
+        """Por que o alarme nao invalida. `None` quando ele passar a invalidar."""
+        return None if PODE_INVALIDAR else MOTIVO_DIAGNOSTICO
+
     def como_dict(self) -> dict:
         return {
             "estado": self.estado,
@@ -132,6 +151,8 @@ class Veredito:
             "maximo_milicents": self.maximo_milicents,
             "comprova_edge": self.comprova_edge,
             "promove_candidata": self.promove_candidata,
+            "invalida": self.invalida,
+            "motivo_diagnostico": self.motivo_diagnostico,
         }
 
 

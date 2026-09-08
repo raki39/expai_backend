@@ -68,6 +68,16 @@ class LimiarNaoCongelado(Exception):
     """Nao ha limiar congelado. O monitor NAO roda com limiar improvisado."""
 
 
+class MonitorDiagnostico(Exception):
+    """O CUSUM nao invalida estrategia enquanto for diagnostico.
+
+    `limiar.PODE_INVALIDAR` e `False` porque a calibracao nao entrega o
+    orcamento de 10% do ADR 0035 - o nivel realizado ficou entre 7,5% e 18,4%
+    sobre tres in-samples da mesma lei. O alarme continua sendo registrado com
+    motivo; o que nao acontece e a transicao na maquina de §8.1.
+    """
+
+
 @dataclass(frozen=True)
 class LimiarCongelado:
     assunto: str
@@ -580,6 +590,12 @@ def transitar_por_alarme(
 
     R81: o motivo vai na evidencia, e a transicao e imutavel por gatilho.
     """
+    if not limiar_mod.PODE_INVALIDAR:
+        raise MonitorDiagnostico(
+            f"alarme {nivel!r} registrado, e a transicao NAO acontece: "
+            + limiar_mod.MOTIVO_DIAGNOSTICO
+        )
+
     para = (
         veredito_mod.EM_SUSPEITA if nivel == cusum.ALERTA
         else veredito_mod.INVALIDADO

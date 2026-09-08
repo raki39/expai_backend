@@ -305,30 +305,34 @@ def test_os_dois_estados_existem_na_maquina_desde_a_migracao_11(
     assert ("em_suspeita", "revalidado") in legais
 
 
-def test_nenhum_estado_pode_ser_pulado_pelo_monitor(conn: sqlite3.Connection):
-    """Uma hipotese recem-registrada nao vai direto para `em_suspeita`."""
+def test_nenhum_estado_pode_ser_pulado_ate_em_suspeita(conn: sqlite3.Connection):
+    """Uma hipotese recem-registrada nao vai direto para `em_suspeita`.
+
+    Conferido no `estados`, e nao no monitor: desde o rebaixamento da D46 o
+    monitor recusa ANTES de chegar na maquina, e um teste que passasse pela
+    recusa dele nao estaria mais medindo a maquina.
+    """
     h = _hipotese(conn)
     estados.registrar_entrada(conn, h, evidencia={"t": 1})
     with pytest.raises(estados.TransicaoRecusada):
-        monitor.transitar_por_alarme(
-            conn, hypothesis_id=h, nivel="alerta", motivo="x", alarme_id=1,
-        )
+        estados.transitar(conn, h, para="em_suspeita", evidencia={"t": 1})
 
 
-def test_o_caminho_completo_ate_invalidado_funciona(conn: sqlite3.Connection):
+def test_o_caminho_completo_ate_invalidado_EXISTE_na_maquina(
+    conn: sqlite3.Connection,
+):
+    """Criterio 4 do incremento 20: os dois estados estao na maquina.
+
+    **A capacidade nao foi retirada; a autoridade do monitor foi.** O caminho
+    inteiro continua percorrivel pelo validador, e e por isso que ele e
+    exercitado aqui - o dia em que o CUSUM deixar de ser diagnostico nao vai
+    precisar de migracao nenhuma.
+    """
     h = _hipotese(conn)
     estados.registrar_entrada(conn, h, evidencia={"t": 1})
-    for para in ("candidata", "em_quarentena", "conhecimento_validado"):
+    for para in ("candidata", "em_quarentena", "conhecimento_validado",
+                 "em_suspeita", "invalidado"):
         estados.transitar(conn, h, para=para, evidencia={"t": 1})
-
-    monitor.transitar_por_alarme(
-        conn, hypothesis_id=h, nivel="alerta", motivo="cruzou", alarme_id=1,
-    )
-    assert estados.atual(conn, h).estado == "em_suspeita"
-
-    monitor.transitar_por_alarme(
-        conn, hypothesis_id=h, nivel="critico", motivo="cruzou", alarme_id=2,
-    )
     assert estados.atual(conn, h).estado == "invalidado"
 
 
@@ -948,3 +952,133 @@ def test_serie_curta_demais_nao_calibra():
             [1, 2, 3], alvo_milicents_por_barra=1, folga_milicents_por_barra=0,
             horizonte_barras=10,
         )
+
+
+# ===========================================================================
+# O CUSUM E DIAGNOSTICO, e o numero que o rebaixou
+#
+# O ADR 0035 declarou orcamento de falso alarme <= 10% no horizonte. A
+# calibracao NAO entrega isso, e o usuario recusou que o desvio fosse
+# apresentado como cumprimento:
+#
+#   "o falso alarme observado de 13,3% nao pode ser apresentado como
+#    cumprimento do orcamento de 10%. Se ainda nao foi corrigido, o CUSUM
+#    permanece diagnostico e nao pode invalidar estrategia."
+#
+# Tentei corrigir por duplo bootstrap e falhou (estimou 11,4% onde o real era
+# 14,6%). A medicao seguinte mostrou por que nao ha o que corrigir: o nivel
+# realizado nao e um vies fixo, e uma DISPERSAO que depende de qual amostra
+# finita se teve.
+# ===========================================================================
+
+
+def test_o_cusum_nao_invalida_enquanto_for_diagnostico():
+    assert limiar.PODE_INVALIDAR is False
+    assert "7,5%" in limiar.MOTIVO_DIAGNOSTICO
+    assert "18,4%" in limiar.MOTIVO_DIAGNOSTICO
+
+
+def test_o_veredito_de_cruzamento_nao_invalida(conn: sqlite3.Connection):
+    """Cruzou o critico, e `invalida` continua `False`.
+
+    O alarme e registrado com motivo e instante - o que nao acontece e a
+    transicao. Alarme e SINAL para olhar, e nao veredito.
+    """
+    lim = _congelar(conn)
+    monitor.registrar(
+        conn, assunto="teste",
+        observados=[(BARRA_MS, -(lim.critico_milicents * 3))],
+    )
+    ver = veredito_do_assunto(conn, "teste")
+    assert ver.estado == v.INVALIDADO
+    assert ver.cruzou_critico is True
+    assert ver.invalida is False
+    assert ver.motivo_diagnostico is not None
+    # E o alarme ESTA la, com motivo: rebaixar nao e apagar.
+    assert [a["nivel"] for a in monitor.alarmes(conn, "teste")] == [
+        "alerta", "critico",
+    ]
+
+
+def veredito_do_assunto(conn: sqlite3.Connection, assunto: str):
+    lim = monitor.exigir(conn, assunto)
+    return v.avaliar(
+        monitor.serie(conn, assunto), lim.como_limiares(),
+        duracao_barra_ms=BARRA_MS,
+    )
+
+
+def test_transitar_por_alarme_RECUSA_enquanto_diagnostico(
+    conn: sqlite3.Connection,
+):
+    """A recusa e do caminho de producao, e nao um aviso no relatorio."""
+    h = _hipotese(conn)
+    estados.registrar_entrada(conn, h, evidencia={"t": 1})
+    for para in ("candidata", "em_quarentena", "conhecimento_validado"):
+        estados.transitar(conn, h, para=para, evidencia={"t": 1})
+
+    with pytest.raises(monitor.MonitorDiagnostico):
+        monitor.transitar_por_alarme(
+            conn, hypothesis_id=h, nivel="alerta", motivo="cruzou", alarme_id=1,
+        )
+    # A hipotese NAO se mexeu.
+    assert estados.atual(conn, h).estado == "conhecimento_validado"
+
+
+def test_o_relatorio_publica_o_rebaixamento(conn: sqlite3.Connection):
+    r = relatorio.montar(conn, duracao_barra_ms=BARRA_MS)
+    assert r["pode_invalidar"] is False
+    assert r["motivo_diagnostico"] is not None
+    medido = r["nivel_realizado_medido"]
+    assert medido["orcamento_declarado_ppm"] == 100_000
+    realizados = [x["realizado_ppm"] for x in medido["realizado_por_in_sample"]]
+    assert min(realizados) < 100_000 < max(realizados), (
+        "o ponto do rebaixamento e que o realizado NAO cerca o orcamento:"
+        " ele o atravessa"
+    )
+
+
+def test_o_nivel_realizado_e_disperso_e_nao_um_vies_fixo():
+    """A medicao que decidiu o rebaixamento, em escala reduzida.
+
+    Tres in-samples sorteados da MESMA lei; o limiar calibrado em cada um e
+    testado contra realizacoes novas. Se o desvio fosse um vies fixo, os tres
+    dariam o mesmo numero e um fator de correcao resolveria. Eles nao dao.
+
+    **Este teste e o que torna `PODE_INVALIDAR = True` uma decisao com
+    medicao.** Quem virar a constante tem de fazer este numero mudar.
+    """
+    from app.calibracao.bootstrap import reamostrar_por_blocos
+
+    alvo, k, horizonte = 2_379, 1_189, 400
+    realizados = []
+    for semente in (5, 77, 123):
+        in_sample = _serie(6_000, 5_000, 2_000, semente=semente)
+        rng = random.Random(limiar.SEMENTE)
+        maximos = [
+            cusum.maximo_de_uma_replica(
+                reamostrar_por_blocos(in_sample, horizonte, 1, rng),
+                alvo=alvo, k=k,
+            )
+            for _ in range(400)
+        ]
+        h = limiar.menor_limiar(maximos, 0.10)
+        cruzam = sum(
+            1
+            for i in range(200)
+            if cusum.maximo_de_uma_replica(
+                _serie(horizonte, 5_000, 2_000, semente=40_000 + i),
+                alvo=alvo, k=k,
+            )
+            >= h
+        ) / 200
+        realizados.append(cruzam)
+
+    assert max(realizados) - min(realizados) > 0.05, (
+        "a dispersao entre in-samples e o motivo do rebaixamento; se ela"
+        f" sumiu, remeça a decisao com o numero novo: {realizados}"
+    )
+    assert max(realizados) > 0.10, (
+        "se nenhum in-sample estoura o orcamento, a calibracao passou a"
+        f" entrega-lo e `PODE_INVALIDAR` merece ser reexaminado: {realizados}"
+    )

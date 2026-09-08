@@ -96,6 +96,60 @@ ALGORITMO = "maximo-cusum-bootstrap-estacionario-politis-romano@1"
 REPETICOES = 2_000
 SEMENTE = 42
 
+# ===========================================================================
+# O CUSUM E DIAGNOSTICO. Ele NAO invalida estrategia.
+#
+# O ADR 0035 fixou o orcamento em "probabilidade de cruzamento <= 10% no
+# horizonte". **A calibracao nao entrega isso**, e o usuario recusou que o
+# desvio fosse apresentado como cumprimento:
+#
+#   "o falso alarme observado de 13,3% nao pode ser apresentado como
+#    cumprimento do orcamento de 10%. Se ainda nao foi corrigido, o CUSUM
+#    permanece diagnostico e nao pode invalidar estrategia."
+#
+# ## A tentativa de correcao, e por que ela falhou
+#
+# Tentei um DUPLO BOOTSTRAP: calibrar o limiar numa pseudo-amostra tirada do
+# in-sample, medir quanto ele erra contra o in-sample, e usar esse erro para
+# corrigir o nivel nominal. Ele estimou 10% -> 11,4%, e o real era 14,6%.
+# **Subestima o vies**, porque o erro entre pseudo-amostra e amostra e menor
+# que o erro entre amostra e a lei - a truncagem de cauda compoe.
+#
+# ## E a medicao seguinte mostrou que nao ha vies a corrigir
+#
+# Tres in-samples de 21.024 barras, sorteados da MESMA lei, limiar calibrado
+# em cada um com 2.000 replicas e testado contra 1.000 realizacoes novas:
+#
+#     semente   5  ->  h = 3.563  ->  realizado 14,3%
+#     semente  77  ->  h = 4.003  ->  realizado  7,5%
+#     semente 123  ->  h = 3.425  ->  realizado 18,4%
+#
+# **Nao e um vies de tres pontos: e uma dispersao de 7,5% a 18,4%.** Qualquer
+# correcao fixa estaria ajustando ruido, e escolher o nivel nominal que faz o
+# realizado dar 10% seria fixar a regua olhando a resposta - a quinta pergunta
+# do teste de escopo.
+#
+# ## O que isso muda, e o que nao muda
+#
+# O monitor continua acumulando, cruzando e registrando alarme com motivo. O
+# que ele NAO faz e mover hipotese na maquina de §8.1: `transitar_por_alarme`
+# recusa enquanto esta constante for `False`. Um alarme e um SINAL para olhar,
+# e nao um veredito.
+#
+# **Virar isto para `True` exige MEDICAO, e nao decisao.** O teste que fixa a
+# dispersao acima quebra junto, e quem mudar a constante tem de mostrar o
+# numero novo.
+PODE_INVALIDAR = False
+
+MOTIVO_DIAGNOSTICO = (
+    "o orcamento de falso alarme do ADR 0035 e <= 10% no horizonte, e a"
+    " calibracao nao o entrega: sobre tres in-samples de 21.024 barras da"
+    " mesma lei, o nivel realizado ficou entre 7,5% e 18,4%. Nao e vies"
+    " corrigivel, e dispersao do limiar estimado numa amostra finita. O CUSUM"
+    " permanece DIAGNOSTICO: acumula, cruza e registra, e nao invalida"
+    " estrategia nem move hipotese na maquina de §8.1"
+)
+
 # Minimo de observacoes para calibrar. O mesmo piso do bootstrap de quantil:
 # abaixo dele o reamostrador devolve variacao que e do sorteio, e nao da serie.
 SERIE_MINIMA = 10

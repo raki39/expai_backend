@@ -116,6 +116,35 @@ def montar(
             ),
         },
 
+        # ------------------------------------- o REBAIXAMENTO, com o numero
+        # O ADR 0035 declarou orcamento de 10%, e a calibracao nao o entrega.
+        # Enquanto isto for `false`, um alarme e sinal para olhar - nunca
+        # veredito. E virar para `true` exige MEDICAO, nao decisao.
+        "pode_invalidar": limiar_mod.PODE_INVALIDAR,
+        "motivo_diagnostico": (
+            None if limiar_mod.PODE_INVALIDAR else limiar_mod.MOTIVO_DIAGNOSTICO
+        ),
+        "nivel_realizado_medido": {
+            "orcamento_declarado_ppm": limiar_mod.PROB_ALERTA_PPM,
+            "realizado_por_in_sample": [
+                {"semente": 5, "limiar": 3_563, "realizado_ppm": 143_000},
+                {"semente": 77, "limiar": 4_003, "realizado_ppm": 75_000},
+                {"semente": 123, "limiar": 3_425, "realizado_ppm": 184_000},
+            ],
+            "leitura": (
+                "nao e vies de tres pontos, e dispersao de 7,5% a 18,4% - o"
+                " limiar depende de qual amostra finita se teve. Corrigir por"
+                " um fator fixo seria ajustar ruido; escolher o nivel nominal"
+                " que faz o realizado dar 10% seria fixar a regua olhando a"
+                " resposta"
+            ),
+            "tentativa_de_correcao": (
+                "duplo bootstrap, e ele FALHOU: estimou 10% -> 11,4% quando o"
+                " real era 14,6%. Subestima porque o erro entre pseudo-amostra"
+                " e amostra e menor que o erro entre amostra e lei"
+            ),
+        },
+
         # ---------------------------------------------- o limite do metodo
         "limite_declarado": LIMITE_DECLARADO,
         "limite_do_bootstrap": {
