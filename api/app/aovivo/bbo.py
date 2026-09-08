@@ -42,6 +42,19 @@ log = logging.getLogger(__name__)
 MOTIVOS = ("sem_mensagem", "desconectado", "defasada", "sem_amostra_na_janela")
 
 
+#: O contrato vigente do BBO. **Uma definicao**, e nao o literal repetido.
+#:
+#: Ele estava escrito a mao em `rotas/aovivo.py` e em `rotas/calibracao.py`, e
+#: eu quase escrevi a terceira copia em `relatorio/fase_0c.py`. Contrato e o
+#: objeto que amarra `execution_reference` e `latency_bars` a semantica de
+#: execucao vigente - trocar de contrato e mudanca material, e um nome com tres
+#: donos e um nome que divergira.
+#:
+#: A migracao 23 grava a LINHA com este nome; aqui fica o nome, e os dois
+#: precisam concordar - ha teste conferindo contra o banco migrado.
+CONTRATO_PADRAO = "bbo@1"
+
+
 class AmostraInvalida(Exception):
     """O conteudo nao faz sentido como amostra alinhada."""
 

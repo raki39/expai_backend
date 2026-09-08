@@ -110,6 +110,47 @@ REGUA_BY_POTENCIA = "by_potencia"
 REGUAS = (REGUA_SECAO_8_3, REGUA_BY_POTENCIA)
 
 
+#: A decisao prospectiva de capacidade experimental. **AINDA NAO TOMADA.**
+#:
+#: A D48 mediu que este desenho nao consegue testar o efeito minimo no
+#: horizonte disponivel, e isso abriu uma decisao com quatro saidas: coletar
+#: mais dados, reduzir previamente o tamanho das proximas familias, exigir
+#: efeito minimo maior, ou adotar outro procedimento estatistico valido.
+#:
+#: > "A decisao de capacidade experimental fica como bloqueante absoluto antes
+#: > de qualquer nova hipotese, nao como bloqueante da construcao do relatorio
+#: > da 0C." - o usuario, 2026-09-08
+#:
+#: **`None` bloqueia hipotese nova, e nao bloqueia o relatorio.** A distincao e
+#: exata: relatar o que se mediu nao decide nada, e registrar uma hipotese nova
+#: sob uma regua cuja capacidade ninguem decidiu e comecar a gastar horizonte
+#: contra uma pergunta que ja se sabe nao respondivel.
+#:
+#: E ela e CONSTANTE DE CODIGO, e nao campo de config, de proposito: virar este
+#: valor exige commit e ADR. Um campo de config poderia ser trocado em produção
+#: por quem quisesse desbloquear, e a decisao e do usuario.
+DECISAO_DE_CAPACIDADE_EXPERIMENTAL: str | None = None
+
+#: As quatro saidas, e **nenhuma escolhida**. Lista fechada: acrescentar uma
+#: quinta e decisao, e nao conveniencia.
+SAIDAS_DE_CAPACIDADE = (
+    "coletar_mais_dados",
+    "reduzir_familias_futuras",
+    "exigir_efeito_minimo_maior",
+    "outro_procedimento_valido",
+)
+
+
+class CapacidadeNaoDecidida(Exception):
+    """Hipotese nova sob a regua da D48 antes da decisao de capacidade.
+
+    Bloqueante ABSOLUTO, e nao aviso. A D48 provou que o horizonte disponivel
+    nao alcanca o efeito minimo; registrar hipotese nova antes de decidir o que
+    fazer sobre isso e gastar horizonte contra uma pergunta cuja resposta ja se
+    conhece.
+    """
+
+
 class PotenciaNaoDeclarada(ValueError):
     """A potencia-alvo nao foi informada, ou esta fora da faixa util."""
 
@@ -182,6 +223,31 @@ def z_de_potencia_micro(potencia_ppm: int) -> int:
     """
     exigir_potencia(potencia_ppm)
     return math.ceil(_NORMAL.inv_cdf(potencia_ppm / 1_000_000) * 1_000_000)
+
+
+def exigir_decisao_de_capacidade() -> None:
+    """Recusa hipotese nova enquanto a capacidade experimental nao for decidida.
+
+    Chamada de `registro.registrar`, e so no caminho da regua nova: as linhas
+    da 0B nasceram sob a secao 8.3 e nao dependem desta decisao.
+    """
+    if DECISAO_DE_CAPACIDADE_EXPERIMENTAL is None:
+        raise CapacidadeNaoDecidida(
+            "hipotese nova esta BLOQUEADA: a D48 mediu que o horizonte"
+            " disponivel nao alcanca o efeito minimo, e a decisao prospectiva"
+            " de capacidade experimental nao foi tomada. As quatro saidas sao"
+            f" {', '.join(SAIDAS_DE_CAPACIDADE)}, e nenhuma foi escolhida -"
+            " escolher agora, olhando o resultado que acabou de sair, e o que"
+            " a secao 8.2 existe para impedir. O relatorio da 0C NAO depende"
+            " desta decisao e segue sendo construido"
+        )
+    if DECISAO_DE_CAPACIDADE_EXPERIMENTAL not in SAIDAS_DE_CAPACIDADE:
+        raise CapacidadeNaoDecidida(
+            f"saida de capacidade desconhecida:"
+            f" {DECISAO_DE_CAPACIDADE_EXPERIMENTAL!r}. A lista e fechada"
+            f" ({', '.join(SAIDAS_DE_CAPACIDADE)}); acrescentar uma quinta e"
+            " decisao com ADR, e nao conveniencia"
+        )
 
 
 def exigir_potencia(potencia_ppm: int | None) -> int:
@@ -300,18 +366,62 @@ class Dimensionamento:
         return self.veredito == VEREDITO_TESTAVEL
 
     @property
+    def taxa_por_barra_bps_micro(self) -> int:
+        """A TAXA que o efeito minimo implica. E ela, e nao o total, que se detecta.
+
+        Nome proprio porque o total engana. `efeito_minimo` e um total
+        declarado **sobre um horizonte**, e a conta de amostra detecta a taxa
+        que os dois implicam. Confundir os dois faz "US$ 500" parecer uma
+        constante quando ele esta sendo escalado com a janela.
+        """
+        return self.efeito_por_barra_bps_micro
+
+    @property
+    def efeito_acumulado_no_cruzamento_cents(self) -> int:
+        """O que a MESMA taxa acumula ao longo das barras exigidas.
+
+        **Este e o numero que faltava, e a ausencia dele era um defeito de
+        apresentacao.** Dizer "detectar o efeito minimo de 50.000 centavos
+        exige 95.579 barras" le como se 50.000 centavos fossem detectaveis
+        depois de 95.579 barras. Nao sao: naquele ponto a mesma taxa acumulou
+        **227.309** centavos, e e esse valor que iguala o minimo detectavel.
+
+        O que se detecta e a TAXA. O total cresce com a janela em que ela corre,
+        e o cruzamento acontece quando o acumulado alcanca o detectavel - por
+        construcao, porque `n_bruto_necessario` e definido como o `n` em que a
+        taxa detectavel iguala a declarada.
+        """
+        return (
+            self.efeito_por_barra_bps_micro
+            * self.insumos.capital_exposto_cents
+            * self.n_bruto_necessario
+            // (1_000_000 * 10_000)
+        )
+
+    @property
     def motivo(self) -> str | None:
-        """A frase que vai para `motivo_nao_testavel`, ou `None` se cabe."""
+        """A frase que vai para `motivo_nao_testavel`, ou `None` se cabe.
+
+        Ela fala da TAXA de proposito. A versao anterior falava do total, e
+        deixava o efeito minimo parecer um valor constante que bastaria esperar
+        para medir.
+        """
         if self.cabe:
             return None
         return (
-            "nao_testavel_por_potencia: detectar o efeito minimo de"
-            f" {self.insumos.efeito_minimo_cents} centavos com potencia de"
+            "nao_testavel_por_potencia: o efeito minimo de"
+            f" {self.insumos.efeito_minimo_cents} centavos sobre"
+            f" {self.insumos.horizonte_declarado_barras} barras implica a taxa"
+            f" de {self.taxa_por_barra_bps_micro / 1_000_000:.6f} bps por"
+            " barra; detectar ESSA TAXA com potencia de"
             f" {self.insumos.potencia_ppm / 10_000:.1f}% contra o limiar de"
             f" {self.alfa_primeira_rejeicao_ppm} ppm da primeira rejeicao do"
             f" {self.insumos.procedimento} exige {self.n_bruto_necessario}"
             f" barras; ha {self.n_bruto_disponivel}. Deficit de"
-            f" {self.deficit_barras} barras (D48)"
+            f" {self.deficit_barras} barras. Nas"
+            f" {self.n_bruto_necessario} barras exigidas a mesma taxa acumula"
+            f" {self.efeito_acumulado_no_cruzamento_cents} centavos - o efeito"
+            " minimo NAO e um total constante (D48)"
         )
 
     def como_dict(self) -> dict:
@@ -323,6 +433,10 @@ class Dimensionamento:
             "z_beta_micro": self.z_beta_micro,
             "t_exigido_micro": self.t_exigido_micro,
             "efeito_por_barra_bps_micro": self.efeito_por_barra_bps_micro,
+            "taxa_por_barra_bps_micro": self.taxa_por_barra_bps_micro,
+            "efeito_acumulado_no_cruzamento_cents": (
+                self.efeito_acumulado_no_cruzamento_cents
+            ),
             "sharpe_por_barra_micro": self.sharpe_por_barra_micro,
             "n_minimo_efetivo": self.n_minimo_efetivo,
             "fator_dependencia_ppm": self.fator_dependencia_ppm,
@@ -497,6 +611,12 @@ class Capacidade:
     sharpe_anualizado_milesimos: int
     efeito_por_barra_bps_micro: int
     menor_efeito_detectavel_cents: int
+    #: Os tres campos da conferência dimensional, e eles so existem quando uma
+    #: TAXA declarada e informada. `None` quando nao ha taxa contra que
+    #: comparar - nunca zero, que afirmaria um efeito esperado de nada.
+    taxa_declarada_bps_micro: int | None
+    efeito_esperado_acumulado_cents: int | None
+    diferenca_cents: int | None
 
     def como_dict(self) -> dict:
         return {
@@ -508,6 +628,11 @@ class Capacidade:
             "sharpe_anualizado_milesimos": self.sharpe_anualizado_milesimos,
             "efeito_por_barra_bps_micro": self.efeito_por_barra_bps_micro,
             "menor_efeito_detectavel_cents": self.menor_efeito_detectavel_cents,
+            "taxa_declarada_bps_micro": self.taxa_declarada_bps_micro,
+            "efeito_esperado_acumulado_cents": (
+                self.efeito_esperado_acumulado_cents
+            ),
+            "diferenca_cents": self.diferenca_cents,
         }
 
 
@@ -526,6 +651,7 @@ def capacidade(
     potencia_ppm: int | None,
     familia_m: int,
     fdr_alfa_bps: int,
+    taxa_declarada_bps_micro: int | None = None,
     procedimento: str = "BY",
 ) -> Capacidade:
     """O menor efeito detectavel naquele horizonte, com a potencia declarada.
@@ -544,6 +670,19 @@ def capacidade(
     `sharpe_anualizado_milesimos` e o numero comparavel entre horizontes - o
     efeito total em centavos nao e, porque cresce com a janela sobre a qual e
     declarado.
+
+    ## `taxa_declarada_bps_micro`, e por que ela e o insumo que faltava
+
+    Sem ela, esta funcao publica so o menor efeito detectavel - e esse numero
+    CRESCE com o horizonte, porque e um total sobre uma janela que cresceu mais
+    rapido do que a sensibilidade melhorou. Lido sozinho, ele parece dizer que
+    mais dado piora a situacao.
+
+    Com a taxa, saem os tres numeros que tornam a leitura possivel: o efeito
+    **esperado acumulado** naquela taxa, o **minimo detectavel**, e a
+    **diferenca**. Os dois primeiros crescem, e a diferenca **encolhe** - que e
+    a leitura correta. Ela cruza zero exatamente em `n_bruto_necessario`, por
+    construcao.
     """
     exigir_potencia(potencia_ppm)
     assert potencia_ppm is not None
@@ -578,6 +717,24 @@ def capacidade(
     sharpe_anual_milesimos = -(
         -sharpe_barra_micro * raiz_bpa_micro // (1_000_000 * 1_000)
     )
+    esperado = diferenca = None
+    if taxa_declarada_bps_micro is not None:
+        if taxa_declarada_bps_micro <= 0:
+            raise DimensionamentoImpossivel(
+                "a taxa declarada precisa ser positiva: uma taxa nula nao"
+                " acumula efeito nenhum, e comparar contra ela nao informa"
+            )
+        # O acumulado trunca para BAIXO, ao contrario do detectavel, que
+        # arredonda para cima. Os dois erram na mesma direcao - a de nao
+        # prometer sensibilidade nem desempenho que nao se mediu.
+        esperado = (
+            taxa_declarada_bps_micro
+            * capital_exposto_cents
+            * barras_disponiveis
+            // (1_000_000 * 10_000)
+        )
+        diferenca = esperado - efeito_cents
+
     return Capacidade(
         barras_disponiveis=barras_disponiveis,
         fator_dependencia_ppm=fator_ppm,
@@ -587,6 +744,9 @@ def capacidade(
         sharpe_anualizado_milesimos=sharpe_anual_milesimos,
         efeito_por_barra_bps_micro=efeito_barra_micro,
         menor_efeito_detectavel_cents=efeito_cents,
+        taxa_declarada_bps_micro=taxa_declarada_bps_micro,
+        efeito_esperado_acumulado_cents=esperado,
+        diferenca_cents=diferenca,
     )
 
 

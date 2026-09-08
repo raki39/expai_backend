@@ -15,6 +15,7 @@ from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
 from ...relatorio import monitoramento as relatorio_monitoramento
 from ...relatorio import viabilidade as relatorio_viabilidade
+from ...relatorio import fase_0c as relatorio_fase_0c
 from ...hipotese import dimensionamento
 from ...relatorio import quarentena as relatorio_quarentena
 from ...relatorio import portao_b as relatorio_portao_b
@@ -135,6 +136,24 @@ def viabilidade(request: Request) -> dict[str, Any]:
     porque ele era implicito.
     """
     return relatorio_viabilidade.montar(
+        _conn(request), potencia_ppm=dimensionamento.POTENCIA_ALVO_PPM
+    )
+
+
+@router.get("/fase-0c")
+def fase_0c(request: Request) -> dict[str, Any]:
+    """O relatorio da fase 0C - incremento 21. **Nasce PROVISORIO.**
+
+    Ele gera tudo agora e nao chama de definitivo enquanto tres gates de
+    evidencia nao fecharem: o piloto real, a calibracao com a revalidacao, e os
+    criterios 5, 6 e 7 do incremento 18.
+
+    **A maquina roda, o veredito espera.** Nao gerar nada ate a evidencia
+    chegar deixaria o relatorio para ser escrito no dia em que houvesse numero
+    para olhar - e um relatorio escrito com o numero na frente e um relatorio
+    escrito PARA o numero.
+    """
+    return relatorio_fase_0c.montar(
         _conn(request), potencia_ppm=dimensionamento.POTENCIA_ALVO_PPM
     )
 
@@ -372,6 +391,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # sozinho em vez de continuar impresso descrevendo outro mundo.
         ("viabilidade", "/api/relatorio/viabilidade",
          lambda: viabilidade(request)),
+        # `fase_0c` ENTRA porque e o relatorio da FASE, e um export que
+        # mostra os pedacos sem o fechamento pede que o leitor monte a
+        # resposta sozinho. Ele carrega o estado `provisorio` junto, entao
+        # o pacote nunca sai parecendo conclusivo.
+        ("fase_0c", "/api/relatorio/fase-0c",
+         lambda: fase_0c(request)),
         # `integridade` ENTRA porque ela e a unica parte do pacote que responde
         # "o substrato que produziu tudo isso continua de pe?" - e um export
         # que mostra resultado sem isso pede confianca no lugar de prova.

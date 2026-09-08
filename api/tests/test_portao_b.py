@@ -795,3 +795,148 @@ def test_o_texto_da_limitacao_nomeia_os_dois_n_e_a_direcao_do_erro():
     assert "n_efetivo" in texto
     assert "bruto" in texto
     assert "aprovar" in texto
+
+
+# ===========================================================================
+# A MATRIZ DE DECISAO da D47, e ela e derivada de `resolver`
+# ===========================================================================
+#
+# > "Publique a matriz de decisao: BY falhou; DSR falhou sozinho; DSR passou
+# > mas n_efetivo foi insuficiente; ambos passaram - mostrando em quais casos o
+# > resultado e rejeitado, inconclusivo ou sobrevivente. Isso evita que 'DSR
+# > nunca decide sozinho' seja interpretado de maneiras diferentes."
+# > - o usuario, 2026-09-08
+
+
+def test_a_matriz_cobre_os_quatro_casos_pedidos_mais_o_contraste():
+    """Os quatro do usuario, e a quinta linha que eu acrescentei com motivo.
+
+    Sem `dsr_falhou_com_companhia`, os quatro casos pedidos terminam todos em
+    `inconclusivo` ou `sobrevivente` - e a matriz leria como se NADA fosse
+    rejeitado, invertendo o sentido de "o DSR nunca decide sozinho".
+    """
+    casos = {l["caso"] for l in portao_b.matriz_de_decisao()}
+    assert casos == {
+        "by_falhou",
+        "dsr_falhou_sozinho",
+        "dsr_passou_mas_amostra_insuficiente",
+        "ambos_passaram",
+        "dsr_falhou_com_companhia",
+    }
+
+
+def test_a_matriz_da_os_tres_desfechos_e_nenhum_a_mais():
+    """`rejeitado`, `inconclusivo` e `sobrevivente` - os tres, e so os tres.
+
+    Se um quarto desfecho aparecesse, alguem teria criado vocabulario novo sem
+    decidir o que ele significa.
+    """
+    finais = {l["resultado_final"] for l in portao_b.matriz_de_decisao()}
+    assert finais == {
+        portao_b.REJEITADO,
+        portao_b.INCONCLUSIVO,
+        portao_b.SOBREVIVENTE,
+    }
+
+
+def test_cada_linha_da_matriz_tem_o_desfecho_certo():
+    """A tabela inteira, fixada. E o resumo da D47 em cinco linhas.
+
+    | caso | BY | DSR | amostra | resultado |
+    |---|---|---|---|---|
+    | by_falhou | X | ok | ok | **inconclusivo** |
+    | dsr_falhou_sozinho | ok | X | ok | **inconclusivo** |
+    | dsr_passou_mas_amostra_insuficiente | ok | ok | X | **inconclusivo** |
+    | ambos_passaram | ok | ok | ok | **sobrevivente** |
+    | dsr_falhou_com_companhia | ok | X | ok | **rejeitado** |
+    """
+    esperado = {
+        "by_falhou": portao_b.INCONCLUSIVO,
+        "dsr_falhou_sozinho": portao_b.INCONCLUSIVO,
+        "dsr_passou_mas_amostra_insuficiente": portao_b.INCONCLUSIVO,
+        "ambos_passaram": portao_b.SOBREVIVENTE,
+        "dsr_falhou_com_companhia": portao_b.REJEITADO,
+    }
+    for linha in portao_b.matriz_de_decisao():
+        assert linha["resultado_final"] == esperado[linha["caso"]], (
+            f"o caso {linha['caso']} passou a dar"
+            f" {linha['resultado_final']!r}: a matriz da D47 mudou, e isso e"
+            " decisao com ADR"
+        )
+
+
+def test_os_tres_inconclusivos_da_matriz_tem_motivos_DIFERENTES():
+    """A R51 existe para separar rejeitado de inconclusivo, e ha TRES deles.
+
+    O terceiro caso - "nunca testado" - foi o que a 0B descobriu colado no
+    segundo, quando um parecer `inconclusiva` nao escrevia transicao e uma
+    hipotese avaliada ficava indistinguivel de uma nunca olhada. Um rotulo so
+    para tres situacoes devolveria essa confusao.
+    """
+    motivos = {
+        l["caso"]: l["por_que_inconclusivo"]
+        for l in portao_b.matriz_de_decisao()
+        if l["resultado_final"] == portao_b.INCONCLUSIVO
+    }
+    assert len(motivos) == 3
+    assert len(set(motivos.values())) == 3, (
+        f"dois inconclusivos com o mesmo motivo: {motivos}"
+    )
+    assert "n_efetivo" in motivos["dsr_passou_mas_amostra_insuficiente"]
+    assert "BY" in motivos["by_falhou"]
+    assert "SOZINHO" in motivos["dsr_falhou_sozinho"]
+
+
+def test_a_matriz_e_DERIVADA_de_resolver_e_nao_digitada():
+    """Ela chama a mesma funcao que decide de verdade.
+
+    Uma matriz escrita a mao passaria a mentir no dia em que `resolver`
+    mudasse - e este projeto conta vinte e seis vezes o custo de uma tabela que
+    parou de descrever. A prova: mexer em `resolver` muda a matriz.
+    """
+    import unittest.mock as mock
+
+    real = portao_b.resolver
+
+    def sempre_rejeita(criterios):
+        return portao_b.REJEITADO, ["b1_liquido_positivo_apos_todos_os_custos"], [], False
+
+    with mock.patch.object(portao_b, "resolver", sempre_rejeita):
+        finais = {l["resultado_final"] for l in portao_b.matriz_de_decisao()}
+    assert finais == {portao_b.REJEITADO}, (
+        "a matriz nao acompanhou `resolver`: ela esta digitada em algum lugar"
+    )
+    assert portao_b.resolver is real
+
+
+def test_o_dsr_sozinho_carrega_a_leitura_antiga_na_matriz():
+    """`leitura_se_o_dsr_decidisse` presente onde ela significa algo, e so ali.
+
+    O padrao da D37: a leitura anterior fica calculada e visivel. Mas ela so
+    existe no caso em que houve uma troca - nas outras linhas seria um campo
+    afirmando uma decisao que ninguem tomou.
+    """
+    for linha in portao_b.matriz_de_decisao():
+        if linha["caso"] == "dsr_falhou_sozinho":
+            assert linha["dsr_decidiria_sozinho"] is True
+            assert linha["leitura_se_o_dsr_decidisse"] == portao_b.REJEITADO
+        else:
+            assert linha["dsr_decidiria_sozinho"] is False
+            assert linha["leitura_se_o_dsr_decidisse"] is None
+
+
+def test_a_matriz_e_publicada_mesmo_sem_candidata(client):
+    """Ela descreve a REGRA, e nao este lote.
+
+    Na 0C nao ha candidata. Se a matriz aparecesse so quando houvesse uma, a
+    unica forma de saber como o portao decide seria ter algo para decidir - e a
+    D47 existe justamente para que a regra seja legivel antes.
+    """
+    r = client.get("/api/relatorio/portao-b")
+    assert r.status_code == 200
+    corpo = r.json()
+    assert "matriz_de_decisao" in corpo, (
+        "a matriz sumiu quando nao ha candidata: ela e da regra, nao do lote"
+    )
+    assert len(corpo["matriz_de_decisao"]) == 5
+    assert corpo["matriz_como_ler"]

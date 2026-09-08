@@ -889,6 +889,21 @@ def test_quem_LE_o_dado_ao_vivo_e_o_executor_e_o_validador() -> None:
     }
     assert leitores, "ninguém lê o dado ao vivo: o coletor virou dado morto"
     for leitor in leitores:
-        assert leitor.startswith(("app/calibracao/", "app/api/")), (
-            f"{leitor} lê o dado ao vivo e não é Executor nem Validador (D49)"
-        )
+        assert leitor.startswith(
+            ("app/calibracao/", "app/api/", "app/relatorio/")
+        ), f"{leitor} lê o dado ao vivo e não é Executor nem Validador (D49)"
+
+    # **E o alvo real, dito por extenso.** A lista positiva acima nomeia quem
+    # pode; sozinha, ela deixaria a proibição implícita — e uma proibição que
+    # depende de alguém ler uma allowlist ao contrário é uma proibição frágil.
+    #
+    # `app/relatorio/` entrou porque relatório é a SAÍDA do Validador: o
+    # relatório da fase 0C lê o contrato e a janela do piloto para dizer se a
+    # evidência chegou. Isso é medir cobertura, que é literalmente o que
+    # §8.5.1 dá ao Validador.
+    do_agente = [l for l in leitores if l.startswith("app/cerebro/")]
+    assert not do_agente, (
+        f"{do_agente} está no caminho do AGENTE e lê o dado ao vivo: é a"
+        " metade 'nem indiretamente' da D49 sendo violada, e ela é a que"
+        " protege o próximo pré-registro"
+    )

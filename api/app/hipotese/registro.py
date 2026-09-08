@@ -131,6 +131,12 @@ def registrar(
             testavel = 0
             motivo = str(erro)
     else:
+        # BLOQUEANTE ABSOLUTO, antes de qualquer outra conferência: a D48 provou
+        # que o horizonte disponivel nao alcanca o efeito minimo, e a decisao
+        # de capacidade experimental nao foi tomada. Vem primeiro de proposito -
+        # recusar depois de validar a potencia daria a impressao de que a
+        # potencia e o obstaculo.
+        dimensionamento.exigir_decisao_de_capacidade()
         potencia = dimensionamento_d48.insumos.potencia_ppm
         if potencia != dimensionamento.POTENCIA_ALVO_PPM:
             raise dimensionamento.PotenciaNaoDeclarada(

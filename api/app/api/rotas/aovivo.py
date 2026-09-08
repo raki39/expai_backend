@@ -478,7 +478,7 @@ def estado_do_bbo(
     request: Request,
     venue: str = "binance",
     symbol: str = "BTCUSDT",
-    contrato: str = "bbo@1",
+    contrato: str = bbo.CONTRATO_PADRAO,
 ) -> dict[str, Any]:
     """Cobertura, e em que pe esta a janela do piloto.
 

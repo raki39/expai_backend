@@ -110,6 +110,79 @@ FORA_DE_COGITACAO = [
 ]
 
 
+#: A conferência dimensional que o usuario pediu antes do incremento 21, e ela
+#: virou campo porque a resposta e uma DISTINÇÃO, nao um numero.
+#:
+#: > "Nao deixe 'US$ 500' parecer um total constante se ele estiver sendo
+#: > escalado proporcionalmente com o horizonte." - o usuario, 2026-09-08
+#:
+#: Ele **esta** sendo escalado, e a resposta e o segundo ramo da pergunta: o
+#: efeito minimo e um total declarado SOBRE UM HORIZONTE, entao ele define uma
+#: taxa, e e a taxa que se detecta.
+_CONFERENCIA_DIMENSIONAL = {
+    "o_que_e_detectado": "a TAXA por barra, nunca um total em centavos",
+    "por_que_o_minimo_detectavel_CRESCE_com_o_horizonte": (
+        "porque ele e um TOTAL sobre a janela: a taxa detectavel cai com"
+        " 1/sqrt(n), e a janela cresce com n - entao o produto cresce com"
+        " sqrt(n). Nao significa que mais dado piora nada"
+    ),
+    "por_que_ele_tambem_aparece_como_NECESSARIO": (
+        "porque as duas contas resolvem variaveis diferentes da mesma"
+        " equacao. `dimensionar` fixa a taxa e resolve o `n`; `capacidade`"
+        " fixa o `n` e resolve a taxa. Elas fecham por construcao: a"
+        " diferenca entre esperado e detectavel cruza zero exatamente em"
+        " `n_bruto_necessario`"
+    ),
+    "o_numero_comparavel_entre_horizontes": (
+        "`sharpe_anualizado_milesimos`. O efeito em centavos NAO e"
+        " comparavel entre janelas, porque e um total sobre elas"
+    ),
+    "como_ler_a_tabela": (
+        "esperado e detectavel crescem OS DOIS. A diferenca entre eles NAO e"
+        " monotonica: ver o campo seguinte, que e o unico jeito de ler esta"
+        " tabela sem tirar a conclusao errada"
+    ),
+    "a_diferenca_PIORA_antes_de_melhorar": (
+        "o esperado cresce com n (linear na janela) e o detectavel com sqrt(n)"
+        " (a sensibilidade melhora com a raiz). A raiz lidera no comeco e o"
+        " linear vence no fim, entao a diferenca em centavos ATINGE UM MINIMO"
+        " intermediario e so depois sobe para zero. Medido: -764 no in-sample,"
+        " -788 no dobro dele (pior), -642 no dataset inteiro, e zero no"
+        " cruzamento. Dobrar o dado piora o vao EM DINHEIRO antes de melhorar,"
+        " ainda que o Sharpe exigido caia sempre - e e exatamente por isso que"
+        " o numero comparavel entre horizontes e o Sharpe, e nao o dolar"
+    ),
+    "onde_esta_o_pior_ponto": (
+        "em sqrt(n) = detectavel_por_barra / (2 x taxa_declarada), que sai da"
+        " derivada de a*n - b*sqrt(n). Nao e publicado como campo porque nao"
+        " decide nada: e curiosidade da forma da curva, e o que decide e o"
+        " cruzamento"
+    ),
+}
+
+#: E a segunda exigência da mesma conferência, que é sobre RESERVA e não sobre
+#: aritmética.
+#:
+#: > "Deixe explicito que in-sample + walk-forward e dataset inteiro sao
+#: > cenarios prospectivos de capacidade, nao dados que possam ser reutilizados
+#: > livremente pela hipotese atual. Walk-forward e holdout continuam selados
+#: > segundo suas finalidades originais." - o usuario, 2026-09-08
+#:
+#: Sem isto, a tabela convida ao pior erro possivel nesta fase: somar conjuntos
+#: para "ter mais amostra" e descobrir depois que o que se gastou era o
+#: conjunto que validava o resultado.
+_PROSPECTIVO_NAO_E_REUTILIZAVEL = (
+    "As linhas marcadas `prospectivo` respondem 'e se tivessemos mais dado?',"
+    " e NAO 'a hipotese atual pode usar isto'. A separacao da secao 8.5.1"
+    " continua inteira: o walk-forward segue selado para confirmar FORA da"
+    " amostra em tres janelas (secao 14.4, criterio 5), o holdout tem uso"
+    " UNICO por hipotese imposto por `UNIQUE (hypothesis_id)`, e a exploracao"
+    " ja foi observada pelo agente (D34) - reusa-la como teste devolveria a"
+    " sobreposicao amostral que caiu de 100% para zero. Anexar qualquer um"
+    " deles ao in-sample nao produz amostra: gasta a evidencia que valida."
+)
+
+
 def _desvio_por_barra_bps(retornos: list[int]) -> int:
     """A variancia da D48, medida - e arredondada para BAIXO.
 
@@ -123,6 +196,64 @@ def _desvio_por_barra_bps(retornos: list[int]) -> int:
     if len(retornos) < 2:
         return 0
     return int(statistics.pstdev(retornos))
+
+
+def _taxa_de_referencia(
+    conn: sqlite3.Connection, comum: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A hipotese de referencia, e a TAXA que o efeito minimo dela implica.
+
+    Referencia e a **ultima do agente** - a que o Portao B avaliou. Nao e uma
+    escolha estetica: a tabela de capacidade compara contra UMA taxa, e usar a
+    media de varias produziria um numero que nenhuma hipotese declarou.
+
+    Devolve `None` quando nao ha hipotese do agente. `None` e nao zero: sem
+    hipotese nao ha taxa declarada, e uma taxa zero afirmaria um efeito
+    esperado de nada.
+    """
+    from ..hipotese import registro as hipotese_registro
+
+    linha = conn.execute(
+        "SELECT id, efeito_minimo, horizonte_barras, sharpe_esperado_milesimos"
+        "  FROM hypothesis WHERE agente_origem = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (hipotese_registro.AGENTE_ORIGEM,),
+    ).fetchone()
+    if linha is None:
+        return None
+    try:
+        d = dimensionamento.dimensionar(
+            efeito_minimo_cents=abs(int(linha["efeito_minimo"])),
+            horizonte_barras=int(linha["horizonte_barras"]),
+            sharpe_esperado_milesimos=int(linha["sharpe_esperado_milesimos"]),
+            **comum,
+        )
+    except dimensionamento.DimensionamentoImpossivel:
+        return None
+    return {
+        "hypothesis_id": int(linha["id"]),
+        "efeito_minimo_cents": d.insumos.efeito_minimo_cents,
+        "horizonte_declarado_barras": d.insumos.horizonte_declarado_barras,
+        "capital_exposto_cents": d.insumos.capital_exposto_cents,
+        "taxa_por_barra_bps_micro": d.taxa_por_barra_bps_micro,
+        "n_bruto_necessario": d.n_bruto_necessario,
+        "efeito_acumulado_no_cruzamento_cents": (
+            d.efeito_acumulado_no_cruzamento_cents
+        ),
+        "o_efeito_minimo_nao_e_um_total_constante": (
+            f"{d.insumos.efeito_minimo_cents} centavos e o efeito TOTAL"
+            f" declarado sobre {d.insumos.horizonte_declarado_barras} barras,"
+            " e nao um total que valha em qualquer janela. O que a conta de"
+            " amostra detecta e a TAXA que os dois implicam:"
+            f" {d.taxa_por_barra_bps_micro / 1_000_000:.6f} bps por barra."
+            f" Nas {d.n_bruto_necessario} barras exigidas essa mesma taxa"
+            f" acumula {d.efeito_acumulado_no_cruzamento_cents} centavos - e e"
+            " esse valor, e nao o declarado, que iguala o minimo detectavel"
+            " ali. Por isso o minimo detectavel CRESCE com o horizonte e a"
+            " taxa exigida CAI: sao duas leituras da mesma coisa, e a que"
+            " compara entre janelas e o Sharpe anualizado."
+        ),
+    }
 
 
 def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
@@ -190,11 +321,35 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         procedimento=cfg.fdr_procedimento,
     )
 
-    # Os horizontes que existem, na ordem em que crescem. `in_sample` e o que
-    # a secao 8.5.1 da a uma hipotese; os outros estao aqui para responder
-    # "e se tivessemos mais?" sem que ninguem precise consumir nada para saber.
-    escalas: list[tuple[str, int]] = [
-        ("in_sample", in_sample.bars),
+    # A TAXA de referencia, e ela e o insumo que faltava no relatorio.
+    #
+    # `efeito_minimo` e um TOTAL declarado sobre um horizonte. A conta de
+    # amostra detecta a TAXA que os dois implicam - e por isso o mesmo valor em
+    # centavos significa coisas diferentes em janelas diferentes.
+    #
+    # Sem publicar a taxa, a tabela de capacidade era ilegivel: o menor efeito
+    # detectavel CRESCE com o horizonte (e um total sobre uma janela que cresceu
+    # mais rapido do que a sensibilidade melhorou), e lido sozinho isso parece
+    # dizer que mais dado piora a situacao.
+    referencia = _taxa_de_referencia(conn, comum)
+    taxa_micro = referencia["taxa_por_barra_bps_micro"] if referencia else None
+
+    # Os horizontes, na ordem em que crescem - e cada um DECLARANDO se e dado
+    # que a hipotese atual pode usar ou cenario prospectivo de capacidade.
+    #
+    # **A distincao e da secao 8.5.1, e ela nao e formalidade.** Somar
+    # walk-forward ao in-sample para "ter mais amostra" e consumir o conjunto
+    # que existe para confirmar fora da amostra; somar o dataset inteiro inclui
+    # a reserva selada (uso unico por hipotese) e a exploracao que o agente JA
+    # observou (D34). Nenhum dos dois e anexavel.
+    escalas: list[tuple[str, int, bool, str]] = [
+        (
+            "in_sample",
+            in_sample.bars,
+            True,
+            "e o conjunto da propria hipotese (secao 8.5.1): 30% do dataset,"
+            " contiguo e cronologico, e o unico que ela pode usar para estimar",
+        ),
         (
             "in_sample_mais_walk_forward",
             sum(
@@ -202,20 +357,70 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 for f in ("in_sample", "walk_forward")
                 if f in conjuntos
             ),
+            False,
+            "CENARIO PROSPECTIVO. O walk-forward continua selado para a"
+            " finalidade dele - confirmar FORA da amostra, em tres janelas"
+            " (secao 14.4, criterio 5). Anexa-lo ao in-sample para ganhar"
+            " amostra gastaria justamente o conjunto que valida o resultado, e"
+            " a hipotese atual NAO pode faze-lo",
         ),
-        ("dataset_inteiro", ds.bars),
+        (
+            "dataset_inteiro",
+            ds.bars,
+            False,
+            "CENARIO PROSPECTIVO, e o mais enganoso dos tres. Inclui a reserva"
+            " selada, cujo uso e UNICO por hipotese e imposto por"
+            " `UNIQUE (hypothesis_id)` (secao 8.5.1), e inclui a exploracao que"
+            " o agente JA observou (D34) - reusa-la como teste devolveria a"
+            " sobreposicao amostral que caiu de 100% para zero. A hipotese"
+            " atual NAO pode usar nem uma das duas partes",
+        ),
     ]
+
     horizontes = [
         {
             "horizonte": nome,
             "barras": barras,
+            "cenario": "disponivel" if reutilizavel else "prospectivo",
+            "reutilizavel_pela_hipotese_atual": reutilizavel,
+            "por_que": por_que,
             **dimensionamento.capacidade(
-                barras_disponiveis=barras, **comum
+                barras_disponiveis=barras,
+                taxa_declarada_bps_micro=taxa_micro,
+                **comum,
             ).como_dict(),
         }
-        for nome, barras in escalas
+        for nome, barras, reutilizavel, por_que in escalas
         if barras > 0
     ]
+
+    # E o CRUZAMENTO: o horizonte em que a taxa declarada passaria a ser
+    # detectavel. Ele fecha a leitura da tabela - sem ele, as tres linhas acima
+    # mostram uma diferenca que encolhe e nunca dizem onde ela chega a zero.
+    #
+    # Nao existe conjunto nenhum com esse tamanho, e a linha diz isso.
+    if referencia is not None:
+        cruzamento = referencia["n_bruto_necessario"]
+        horizontes.append(
+            {
+                "horizonte": "n_necessario_para_a_taxa_declarada",
+                "barras": cruzamento,
+                "cenario": "inexistente",
+                "reutilizavel_pela_hipotese_atual": False,
+                "por_que": (
+                    "NAO E UM CONJUNTO: e o horizonte em que a taxa declarada"
+                    " passaria a ser detectavel, e nenhum conjunto deste"
+                    f" dataset tem {cruzamento} barras. A diferenca cruza zero"
+                    " aqui por construcao - `n_bruto_necessario` e definido"
+                    " como o `n` em que a taxa detectavel iguala a declarada"
+                ),
+                **dimensionamento.capacidade(
+                    barras_disponiveis=cruzamento,
+                    taxa_declarada_bps_micro=taxa_micro,
+                    **comum,
+                ).como_dict(),
+            }
+        )
 
     # E as hipoteses ja registradas, cada uma contra a regua nova. Elas NAO sao
     # redimensionadas no banco (a D48 nao e retroativa): isto e leitura, e o
@@ -263,8 +468,24 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             ),
             "t_secao_8_3_micro": poder.T_ALVO * 1_000_000,
         },
+        "taxa_de_referencia": referencia,
         "horizontes": horizontes,
+        "conferencia_dimensional": _CONFERENCIA_DIMENSIONAL,
+        "cenarios_prospectivos_nao_sao_dado_reutilizavel": (
+            _PROSPECTIVO_NAO_E_REUTILIZAVEL
+        ),
         "hipoteses": hipoteses,
+        "decisao_de_capacidade": {
+            "escolhida": dimensionamento.DECISAO_DE_CAPACIDADE_EXPERIMENTAL,
+            "saidas_possiveis": list(dimensionamento.SAIDAS_DE_CAPACIDADE),
+            "bloqueia": (
+                "hipotese nova sob a regua da D48 - bloqueante ABSOLUTO"
+            ),
+            "nao_bloqueia": (
+                "a construcao do relatorio da 0C, nem a leitura deste"
+                " relatorio: relatar o que se mediu nao decide nada"
+            ),
+        },
         "conclusao": CONCLUSAO,
         "conclusao_sustentada": _sustenta(horizontes, hipoteses),
         "opcoes_prospectivas": OPCOES_PROSPECTIVAS,

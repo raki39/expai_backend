@@ -189,6 +189,188 @@ def resolver(
     return resultado, reprovando, sem_medida, dsr_decidiria_sozinho
 
 
+#: Os tres desfechos que a matriz da D47 usa. `SOBREVIVENTE` nao e o mesmo que
+#: `PASSOU` do portao: passar no Portao B faz a candidata **digna de
+#: auditoria** (secao 14.4.1), e sobreviver exige tambem que BY a tenha
+#: promovido e que a amostra alcance o minimo. Sao gates diferentes, e a matriz
+#: existe porque ninguem os tinha visto juntos.
+SOBREVIVENTE = "sobrevivente"
+
+#: Os quatro casos que o usuario pediu, cada um dizendo o que reprova onde.
+#:
+#: > "Publique a matriz de decisao: BY falhou; DSR falhou sozinho; DSR passou
+#: > mas n_efetivo foi insuficiente; ambos passaram - mostrando em quais casos
+#: > o resultado e rejeitado, inconclusivo ou sobrevivente. Isso evita que 'DSR
+#: > nunca decide sozinho' seja interpretado de maneiras diferentes."
+#: > - o usuario, 2026-09-08
+#:
+#: **Os tres gates sao independentes, e e isso que a matriz torna visivel:**
+#:
+#: | gate | onde vive | o que ele decide |
+#: |---|---|---|
+#: | **BY** | `validador/lote` + `promocao` | se a hipotese e PROMOVIDA a conhecimento validado |
+#: | **DSR** | criterio 6 do Portao B | se ela e digna de auditoria pelo lado da deflacao |
+#: | **`n_efetivo >= n_minimo`** | `veredito.emitir` | se ha amostra para REJEITAR a afirmacao dela |
+#:
+#: Nenhum deles substitui os outros, e nenhum e redundante. Um resultado so e
+#: `sobrevivente` quando os tres passam.
+_CASOS_DA_MATRIZ = (
+    {
+        "caso": "by_falhou",
+        "descricao": (
+            "BY nao rejeitou a hipotese no lote (p-valor acima do limiar da"
+            " posicao dela)"
+        ),
+        "by": False,
+        "dsr": True,
+        "amostra_suficiente": True,
+        "outros_criterios_do_portao": True,
+        "consequencia_de_by": (
+            "NAO PROMOVIDA: sem rejeicao de BY nao ha caminho para"
+            " `conhecimento_validado`, e a promocao e do validador, nao do"
+            " portao (secao 8.1)"
+        ),
+    },
+    {
+        "caso": "dsr_falhou_sozinho",
+        "descricao": (
+            "o DSR ficou abaixo do minimo e foi o UNICO criterio do Portao B a"
+            " reprovar"
+        ),
+        "by": True,
+        "dsr": False,
+        "amostra_suficiente": True,
+        "outros_criterios_do_portao": True,
+        "consequencia_de_by": "BY rejeitou: a promocao nao esta bloqueada por ele",
+    },
+    {
+        "caso": "dsr_passou_mas_amostra_insuficiente",
+        "descricao": (
+            "o DSR passou e `n_efetivo` nao alcancou `n_minimo` - o caso que a"
+            " 0C torna comum, porque `n_efetivo >= n_minimo` e criterio de"
+            " parada do forward"
+        ),
+        "by": True,
+        "dsr": True,
+        "amostra_suficiente": False,
+        "outros_criterios_do_portao": True,
+        "consequencia_de_by": "BY rejeitou",
+    },
+    {
+        "caso": "ambos_passaram",
+        "descricao": "BY rejeitou, o DSR passou, e a amostra alcanca o minimo",
+        "by": True,
+        "dsr": True,
+        "amostra_suficiente": True,
+        "outros_criterios_do_portao": True,
+        "consequencia_de_by": "BY rejeitou",
+    },
+    # A QUINTA linha nao estava na lista do usuario, e ela e necessaria: sem
+    # ela, os quatro casos acima terminam em `inconclusivo` ou `sobrevivente` e
+    # a matriz le como se NADA fosse rejeitado - o que inverteria o sentido de
+    # "o DSR nunca decide sozinho".
+    #
+    # Ela e o contraste que fixa a leitura: a D47 retira do DSR a autoridade
+    # SOLITARIA, e nao o peso. Com qualquer companhia, ele conta e o portao
+    # rejeita.
+    {
+        "caso": "dsr_falhou_com_companhia",
+        "descricao": (
+            "o DSR reprovou E outro criterio tambem - a linha que mostra onde"
+            " `rejeitado` vive, e que o DSR continua contando para ele"
+        ),
+        "by": True,
+        "dsr": False,
+        "amostra_suficiente": True,
+        "outros_criterios_do_portao": False,
+        "consequencia_de_by": "BY rejeitou",
+    },
+)
+
+
+def matriz_de_decisao() -> list[dict]:
+    """A matriz da D47, **derivada de `resolver`** e nao digitada.
+
+    Cada linha chama a mesma funcao que decide de verdade, com os criterios do
+    caso montados. Isso e o ponto: uma matriz escrita a mao passaria a mentir no
+    dia em que `resolver` mudasse, e este projeto conta vinte e seis vezes o
+    custo de uma tabela que parou de descrever.
+
+    O `resultado_final` combina os tres gates, e a ordem nao e arbitraria:
+
+        1. reprovacao definitiva do portao (fatos do ledger)  -> rejeitado
+        2. amostra insuficiente                               -> inconclusivo
+        3. BY nao promoveu                                    -> inconclusivo
+        4. tudo passou                                        -> sobrevivente
+
+    **`inconclusivo` aparece por tres motivos diferentes, e eles nao sao a mesma
+    coisa** - a R51 existe para separar `rejeitado` de `inconclusivo`, e o
+    terceiro caso (nunca testado) foi o que a 0B descobriu colado no segundo. O
+    campo `por_que_inconclusivo` nomeia qual dos tres.
+    """
+    saida = []
+    for caso in _CASOS_DA_MATRIZ:
+        criterios = {
+            "b1_liquido_positivo_apos_todos_os_custos": caso[
+                "outros_criterios_do_portao"
+            ],
+            "b2_supera_b2_e_b3": caso["outros_criterios_do_portao"],
+            "b3_acima_do_p95_de_b1": caso["outros_criterios_do_portao"],
+            "b4_supera_b4_por_credito": caso["outros_criterios_do_portao"],
+            "b5_walk_forward_em_3_janelas": caso["outros_criterios_do_portao"],
+            CRITERIO_DSR: caso["dsr"],
+        }
+        portao, reprovando, sem_medida, sozinho = resolver(criterios)
+
+        por_que = None
+        if portao == REJEITADO:
+            final = REJEITADO
+        elif not caso["amostra_suficiente"]:
+            final = INCONCLUSIVO
+            por_que = (
+                "n_efetivo nao alcancou n_minimo: secao 14.4 exige amostra"
+                " suficiente para REJEITAR metrica estatistica, e sem ela o"
+                " veredito nao pode ser refutada"
+            )
+        elif not caso["by"]:
+            final = INCONCLUSIVO
+            por_que = (
+                "BY nao rejeitou: o portao pode ate dizer `passou`, e a"
+                " promocao e do validador (secao 8.1). Sem rejeicao de BY nao"
+                " ha conhecimento validado"
+            )
+        elif portao == INCONCLUSIVO:
+            final = INCONCLUSIVO
+            por_que = (
+                "o DSR reprovou SOZINHO: ele nao decide sozinho (D47), e o"
+                " `n` da formula publicada e o bruto - a diferenca contra"
+                " `n_efetivo` corre para o lado de aprovar"
+            )
+        else:
+            final = SOBREVIVENTE
+
+        saida.append(
+            {
+                "caso": caso["caso"],
+                "descricao": caso["descricao"],
+                "by_rejeitou": caso["by"],
+                "dsr_passou": caso["dsr"],
+                "amostra_suficiente": caso["amostra_suficiente"],
+                "consequencia_de_by": caso["consequencia_de_by"],
+                "portao_b": portao,
+                "dsr_decidiria_sozinho": sozinho,
+                "leitura_se_o_dsr_decidisse": (
+                    REJEITADO if sozinho else None
+                ),
+                "criterios_reprovando": reprovando,
+                "criterios_sem_medida": sem_medida,
+                "resultado_final": final,
+                "por_que_inconclusivo": por_que,
+            }
+        )
+    return saida
+
+
 def _candidatas(
     conn: sqlite3.Connection, config_version_id: int
 ) -> list[dict]:
@@ -557,6 +739,7 @@ def montar(
             },
             "resposta_da_0b": _resposta(a, avaliado=False, passaram=[]),
             "o_que_aprovar_nao_significa": O_QUE_APROVAR_NAO_SIGNIFICA,
+            **_bloco_da_matriz(),
         }
 
     por_credito = _por_credito(conn, config_version_id)
@@ -604,4 +787,35 @@ def montar(
         ),
         "resposta_da_0b": _resposta(a, avaliado=True, passaram=passaram),
         "o_que_aprovar_nao_significa": O_QUE_APROVAR_NAO_SIGNIFICA,
+        # A matriz da D47, publicada SEMPRE - inclusive quando nao ha candidata.
+        # Ela nao descreve este lote: descreve a REGRA, e o motivo de estar aqui
+        # e que "o DSR nunca decide sozinho" tem mais de uma leitura possivel se
+        # ninguem mostrar os casos lado a lado.
+        **_bloco_da_matriz(),
+    }
+
+
+def _bloco_da_matriz() -> dict:
+    """A matriz da D47, no formato em que ela entra em QUALQUER resposta.
+
+    Uma definicao, e nao o bloco repetido em cada `return`. O Portao B tem tres
+    caminhos de saida - A reprovou, A pendente, e o caso completo -, e a matriz
+    descreve a REGRA em todos eles.
+
+    **A primeira versao disto ficou so no caminho completo**, e o teste
+    `test_a_matriz_e_publicada_mesmo_sem_candidata` acusou: na 0C nao ha
+    candidata, entao a rota devolvia a resposta curta e a matriz nao aparecia.
+    A unica forma de ver como o portao decide seria ter algo para decidir - a
+    ordem invertida, e exatamente o que a D47 existe para evitar.
+    """
+    return {
+        "matriz_de_decisao": matriz_de_decisao(),
+        "matriz_como_ler": (
+            "Os tres gates sao INDEPENDENTES: BY decide promocao"
+            " (`validador/lote`), o DSR e o criterio 6 do portao, e"
+            " `n_efetivo >= n_minimo` decide se ha amostra para REJEITAR"
+            " (secao 14.4). `sobrevivente` exige os tres. E `inconclusivo`"
+            " aparece por tres motivos diferentes, que a R51 existe para"
+            " separar - o campo `por_que_inconclusivo` nomeia qual."
+        ),
     }

@@ -19,6 +19,7 @@ uma frase que continua impressa descrevendo outro mundo.
 
 from __future__ import annotations
 
+import math
 import pathlib
 import sqlite3
 
@@ -735,6 +736,103 @@ def _registrar(conn, evento, dimensionamento_d48=None):
     )
 
 
+@pytest.fixture
+def capacidade_decidida(monkeypatch: pytest.MonkeyPatch):
+    """Atravessa o bloqueante de capacidade, e DECLARA que atravessou.
+
+    A fixture existe para que nenhum teste passe pelo bloqueio por acidente:
+    quem precisa da regua nova pede a fixture pelo nome, e quem nao pede
+    encontra a recusa. Sem isso, acrescentar `DECISAO_DE_CAPACIDADE` global no
+    `conftest` tornaria o bloqueante invisivel para a suite inteira - que e
+    exatamente como uma guarda deixa de guardar.
+    """
+    monkeypatch.setattr(
+        dim, "DECISAO_DE_CAPACIDADE_EXPERIMENTAL", "coletar_mais_dados"
+    )
+
+
+def test_a_decisao_de_capacidade_AINDA_NAO_foi_tomada():
+    """O estado de hoje, fixado.
+
+    Se algum dia este teste falhar, alguem escolheu uma das quatro saidas - e
+    isso tem de ser um commit com ADR, nao um valor que apareceu.
+    """
+    assert dim.DECISAO_DE_CAPACIDADE_EXPERIMENTAL is None
+    assert dim.SAIDAS_DE_CAPACIDADE == (
+        "coletar_mais_dados",
+        "reduzir_familias_futuras",
+        "exigir_efeito_minimo_maior",
+        "outro_procedimento_valido",
+    )
+
+
+def test_hipotese_nova_esta_BLOQUEADA_ate_a_decisao_de_capacidade(conn, evento):
+    """**Bloqueante absoluto**, e nao aviso.
+
+    > "A decisao de capacidade experimental fica como bloqueante absoluto antes
+    > de qualquer nova hipotese, nao como bloqueante da construcao do relatorio
+    > da 0C." - o usuario, 2026-09-08
+
+    A D48 provou que o horizonte nao alcanca o efeito minimo. Registrar
+    hipotese nova antes de decidir o que fazer sobre isso e gastar horizonte
+    contra uma pergunta cuja resposta ja se conhece.
+    """
+    d = dim.dimensionar(**_insumos())
+    with pytest.raises(dim.CapacidadeNaoDecidida, match="BLOQUEADA"):
+        _registrar(conn, evento, dimensionamento_d48=d)
+
+
+def test_o_bloqueio_vem_ANTES_da_confererencia_de_potencia(conn, evento):
+    """A ordem importa para quem le a mensagem de erro.
+
+    Com uma potencia errada E a capacidade nao decidida, quem recusa e a
+    capacidade. Recusar pela potencia primeiro daria a impressao de que o
+    obstaculo e o numero - e bastaria corrigi-lo para passar.
+    """
+    d = dim.dimensionar(**_insumos(potencia_ppm=600_000))
+    with pytest.raises(dim.CapacidadeNaoDecidida):
+        _registrar(conn, evento, dimensionamento_d48=d)
+
+
+def test_saida_de_capacidade_desconhecida_e_recusada(
+    conn, evento, monkeypatch: pytest.MonkeyPatch
+):
+    """A lista e fechada. Uma quinta saida e decisao, e nao conveniencia.
+
+    Sem isto, desbloquear seria escrever qualquer string na constante - e a
+    proibicao de escolher olhando o resultado viraria uma proibicao de escolher
+    entre quatro nomes.
+    """
+    monkeypatch.setattr(
+        dim, "DECISAO_DE_CAPACIDADE_EXPERIMENTAL", "aumentar_o_teto_de_sharpe"
+    )
+    d = dim.dimensionar(**_insumos())
+    with pytest.raises(dim.CapacidadeNaoDecidida, match="desconhecida"):
+        _registrar(conn, evento, dimensionamento_d48=d)
+
+
+def test_a_regua_ANTIGA_nao_depende_da_decisao_de_capacidade(conn, evento):
+    """As linhas da 0B nasceram sob a secao 8.3 e nao dependem desta decisao.
+
+    Bloquea-las tambem tornaria a D48 retroativa pela porta de tras: nenhuma
+    hipotese da 0B poderia ser reregistrada nem retestada.
+    """
+    hid, _ = _registrar(conn, evento)  # sem a fixture, e passa
+    assert hid > 0
+
+
+def test_o_RELATORIO_nao_e_bloqueado_pela_decisao_de_capacidade(client):
+    """A distincao exata que o usuario fez, e ela e verificavel.
+
+    Relatar o que se mediu nao decide nada. Se o relatorio dependesse da
+    decisao, a unica forma de ver o numero que a sustenta seria tomar a decisao
+    primeiro - o que e a ordem invertida.
+    """
+    assert dim.DECISAO_DE_CAPACIDADE_EXPERIMENTAL is None
+    r = client.get("/api/relatorio/viabilidade")
+    assert r.status_code == 200
+
+
 def test_sem_a_regua_nova_a_linha_diz_secao_8_3(conn, evento):
     """A verdade sobre toda linha que ja existe.
 
@@ -751,7 +849,7 @@ def test_sem_a_regua_nova_a_linha_diz_secao_8_3(conn, evento):
 
 
 def test_com_a_regua_nova_a_linha_diz_by_potencia_e_carrega_os_insumos(
-    conn, evento
+    conn, evento, capacidade_decidida
 ):
     """Os sete insumos ficam gravados, e nao apenas o `n_minimo` que saiu deles.
 
@@ -779,7 +877,7 @@ def test_com_a_regua_nova_a_linha_diz_by_potencia_e_carrega_os_insumos(
 
 
 def test_hipotese_nova_com_potencia_diferente_de_oitenta_e_recusada(
-    conn, evento
+    conn, evento, capacidade_decidida
 ):
     """A potencia e politica da fase, e nao escolha por hipotese.
 
@@ -1009,3 +1107,237 @@ def test_a_variancia_medida_arredonda_para_baixo():
     # Serie curta demais devolve zero, que quem chama trata como NAO MEDIDO.
     assert viabilidade._desvio_por_barra_bps([]) == 0
     assert viabilidade._desvio_por_barra_bps([42]) == 0
+
+
+# ---------------------------------------------------------------------------
+# 11. A conferencia dimensional: o efeito minimo NAO e um total constante
+# ---------------------------------------------------------------------------
+#
+# > "Se os US$ 500 representarem a taxa economica implicita no horizonte
+# > original, mostre essa taxa explicitamente e, para cada horizonte,
+# > apresente: efeito esperado acumulado; efeito minimo detectavel; diferenca
+# > entre ambos. Nao deixe 'US$ 500' parecer um total constante se ele estiver
+# > sendo escalado proporcionalmente com o horizonte."
+# > - o usuario, 2026-09-08
+#
+# Ele esta sendo escalado. A resposta e o segundo ramo, e estes testes fixam a
+# aritmetica que a sustenta.
+
+
+def test_a_taxa_e_o_efeito_dividido_pelo_horizonte_DECLARADO():
+    """A taxa, explicita. US$ 500 sobre 21.024 barras = 0,297279 bps/barra.
+
+    Conferido a mao: 50.000 centavos x 10.000 / (80.000 centavos x 21.024
+    barras) = 0,297279 bps por barra.
+    """
+    d = dim.dimensionar(**_insumos())
+    assert d.taxa_por_barra_bps_micro == 297_279
+    # E ela e a mesma coisa que `efeito_por_barra_bps_micro`, com nome que diz
+    # o que ela e: o total engana, a taxa nao.
+    assert d.taxa_por_barra_bps_micro == d.efeito_por_barra_bps_micro
+
+
+def test_a_taxa_NAO_muda_com_o_horizonte_disponivel():
+    """Ela sai do horizonte DECLARADO. Confundir os dois inverte a resposta.
+
+    Se o disponivel entrasse na divisao, perguntar "cabe no dataset inteiro?"
+    diluiria o mesmo efeito por mais barras e exigiria MAIS amostra - a
+    resposta pioraria por haver mais dado.
+    """
+    curto = dim.dimensionar(**_insumos())
+    largo = dim.dimensionar(**_insumos(disponivel_barras=DATASET_BARRAS))
+    assert curto.taxa_por_barra_bps_micro == largo.taxa_por_barra_bps_micro
+
+
+def test_nas_barras_exigidas_a_taxa_acumula_MUITO_mais_que_o_declarado():
+    """**O numero que faltava, e a ausencia dele era o defeito.**
+
+    Dizer "detectar o efeito minimo de 50.000 centavos exige 95.579 barras" le
+    como se 50.000 centavos fossem detectaveis depois de 95.579 barras. Nao
+    sao: naquele ponto a mesma taxa acumulou 227.309 centavos - 4,5 vezes o
+    declarado, que e exatamente a razao entre os horizontes.
+    """
+    d = dim.dimensionar(**_insumos())
+    assert d.efeito_acumulado_no_cruzamento_cents == 227_309
+    razao_de_efeito = (
+        d.efeito_acumulado_no_cruzamento_cents / EFEITO_MINIMO_CENTS
+    )
+    razao_de_horizonte = d.n_bruto_necessario / IN_SAMPLE_BARRAS
+    assert abs(razao_de_efeito - razao_de_horizonte) < 0.01, (
+        "o acumulado tem de escalar com o horizonte na MESMA proporcao: e o"
+        " que prova que a taxa e constante e o total nao"
+    )
+
+
+def test_o_motivo_fala_da_TAXA_e_nao_do_total():
+    """A frase que vai ao pre-registro nao pode deixar o total parecer fixo.
+
+    A versao anterior dizia "detectar o efeito minimo de N centavos ... exige M
+    barras", e era ela que produzia a leitura errada.
+    """
+    d = dim.dimensionar(**_insumos())
+    assert d.motivo is not None
+    assert "implica a taxa" in d.motivo
+    assert "ESSA TAXA" in d.motivo
+    assert "NAO e um total constante" in d.motivo
+    assert str(d.efeito_acumulado_no_cruzamento_cents) in d.motivo
+
+
+def test_as_duas_contas_FECHAM_no_cruzamento():
+    """`dimensionar` resolve o `n`; `capacidade` resolve o efeito. Elas fecham.
+
+    E este e o teste que responde a pergunta do usuario de forma verificavel: o
+    minimo detectavel cresce com o horizonte E aparece como necessario porque
+    sao **duas variaveis da mesma equacao**. A diferenca cruza zero exatamente
+    em `n_bruto_necessario`, a menos do arredondamento dos dois lados.
+    """
+    d = dim.dimensionar(**_insumos())
+    cap = dim.capacidade(
+        barras_disponiveis=d.n_bruto_necessario,
+        taxa_declarada_bps_micro=d.taxa_por_barra_bps_micro,
+        dependencia_rho_ppm=RHO_MEDIDO_PPM,
+        variancia_desvio_por_barra_bps=DESVIO_BPS,
+        capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+        duracao_barra_ms=QUINZE_MIN_MS,
+        potencia_ppm=dim.POTENCIA_ALVO_PPM,
+        familia_m=48,
+        fdr_alfa_bps=1_000,
+    )
+    assert cap.diferenca_cents is not None
+    # Os dois lados arredondam na direcao conservadora, entao o cruzamento e
+    # exato a menos de alguns centavos - e nunca positivo.
+    assert -100 < cap.diferenca_cents <= 0, (
+        f"a diferenca no cruzamento deu {cap.diferenca_cents} centavos: as"
+        " duas contas deixaram de fechar"
+    )
+
+
+def test_a_diferenca_PIORA_antes_de_melhorar():
+    """A forma da curva, e ela nao e monotonica - eu tinha afirmado que era.
+
+    O esperado cresce com `n` e o detectavel com `sqrt(n)`. A raiz lidera no
+    comeco, o linear vence no fim: a diferenca atinge um MINIMO intermediario e
+    so depois sobe para zero.
+
+    **Dobrar o dado piora o vao em dinheiro antes de melhorar**, ainda que o
+    Sharpe exigido caia sempre - e e por isso que o numero comparavel entre
+    horizontes e o Sharpe, e nao o dolar.
+    """
+
+    def _dif(barras: int) -> int:
+        c = dim.capacidade(
+            barras_disponiveis=barras,
+            taxa_declarada_bps_micro=297_279,
+            dependencia_rho_ppm=RHO_MEDIDO_PPM,
+            variancia_desvio_por_barra_bps=DESVIO_BPS,
+            capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+            duracao_barra_ms=QUINZE_MIN_MS,
+            potencia_ppm=dim.POTENCIA_ALVO_PPM,
+            familia_m=48,
+            fdr_alfa_bps=1_000,
+        )
+        assert c.diferenca_cents is not None
+        return c.diferenca_cents
+
+    # **O vale depende dos insumos, e a primeira versao deste teste errou por
+    # supor que ele ficava entre o in-sample e o dobro dele.** Com estes
+    # insumos ele fica em ~23.895 barras, entao comparar 21.024 contra 42.048
+    # salta por cima e a diferenca aparece MELHORANDO.
+    #
+    # A propriedade que nao depende de parametrizacao: existe um vale interior.
+    # Ele sai da derivada de `a*n - b*sqrt(n)`, em `sqrt(n) = b/(2a)`.
+    a = 297_279 * CAPITAL_EXPOSTO_CENTS / (1_000_000 * 10_000)
+    b = _dif(IN_SAMPLE_BARRAS)
+    detectavel = a * IN_SAMPLE_BARRAS - b  # = b_curva * sqrt(in_sample)
+    b_curva = detectavel / math.sqrt(IN_SAMPLE_BARRAS)
+    vale = int((b_curva / (2 * a)) ** 2)
+    assert IN_SAMPLE_BARRAS < vale < DATASET_BARRAS, (
+        f"o vale caiu em {vale} barras, fora da faixa que este dataset cobre:"
+        " a forma da curva mudou e a leitura da tabela precisa ser reescrita"
+    )
+
+    # E no vale a diferenca e pior que nos dois lados dele. E a nao
+    # monotonicidade, medida onde ela acontece.
+    no_vale = _dif(vale)
+    assert no_vale < _dif(vale // 2), "antes do vale a diferenca ainda piora"
+    assert no_vale < _dif(vale * 3), "depois dele ela melhora"
+    assert no_vale < 0
+
+
+def test_o_sharpe_exigido_cai_SEMPRE_e_e_o_numero_comparavel():
+    """A metade monotonica, e a que se deve olhar.
+
+    O dolar nao e comparavel entre janelas porque e um total sobre elas; o
+    Sharpe anualizado e.
+    """
+    sharpes = [
+        _capacidade(b).sharpe_anualizado_milesimos
+        for b in (IN_SAMPLE_BARRAS, IN_SAMPLE_BARRAS * 2, DATASET_BARRAS)
+    ]
+    assert sharpes == sorted(sharpes, reverse=True)
+
+
+def test_taxa_declarada_nula_ou_negativa_recusa():
+    """Uma taxa nula nao acumula efeito, e comparar contra ela nao informa."""
+    for taxa in (0, -1):
+        with pytest.raises(dim.DimensionamentoImpossivel, match="taxa"):
+            dim.capacidade(
+                barras_disponiveis=IN_SAMPLE_BARRAS,
+                taxa_declarada_bps_micro=taxa,
+                dependencia_rho_ppm=RHO_MEDIDO_PPM,
+                variancia_desvio_por_barra_bps=DESVIO_BPS,
+                capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+                duracao_barra_ms=QUINZE_MIN_MS,
+                potencia_ppm=dim.POTENCIA_ALVO_PPM,
+                familia_m=48,
+                fdr_alfa_bps=1_000,
+            )
+
+
+def test_sem_taxa_declarada_as_tres_colunas_saem_None():
+    """`None` e "nao ha taxa contra que comparar". Zero afirmaria efeito nulo."""
+    cap = _capacidade(IN_SAMPLE_BARRAS)
+    assert cap.taxa_declarada_bps_micro is None
+    assert cap.efeito_esperado_acumulado_cents is None
+    assert cap.diferenca_cents is None
+
+
+# ---------------------------------------------------------------------------
+# 12. Cenario prospectivo NAO e dado reutilizavel
+# ---------------------------------------------------------------------------
+#
+# > "Deixe explicito que in-sample + walk-forward e dataset inteiro sao
+# > cenarios prospectivos de capacidade, nao dados que possam ser reutilizados
+# > livremente pela hipotese atual. Walk-forward e holdout continuam selados
+# > segundo suas finalidades originais." - o usuario, 2026-09-08
+
+
+def test_o_texto_dos_cenarios_prospectivos_nomeia_as_tres_reservas():
+    """Walk-forward, holdout e exploracao - cada um com o motivo proprio.
+
+    Nao e a mesma proibicao tres vezes: o walk-forward existe para confirmar
+    fora da amostra, o holdout tem uso UNICO por hipotese, e a exploracao ja
+    foi observada pelo agente. Somar qualquer um ao in-sample nao produz
+    amostra: gasta a evidencia que valida.
+    """
+    texto = viabilidade._PROSPECTIVO_NAO_E_REUTILIZAVEL
+    assert "walk-forward" in texto and "tres janelas" in texto
+    assert "holdout" in texto and "UNICO" in texto
+    assert "exploracao" in texto and "D34" in texto
+    assert "gasta a evidencia que valida" in texto
+
+
+def test_a_conferencia_dimensional_explica_a_nao_monotonicidade():
+    """O campo que impede a leitura errada da tabela.
+
+    A primeira versao deste bloco dizia "a diferenca encolhe", e estava
+    ERRADA - ela piora antes de melhorar. O campo agora diz isso com os
+    numeros medidos.
+    """
+    c = viabilidade._CONFERENCIA_DIMENSIONAL
+    assert "TAXA" in c["o_que_e_detectado"]
+    assert "sqrt" in c["a_diferenca_PIORA_antes_de_melhorar"]
+    assert "PIORA" in " ".join(c.keys())
+    assert "sharpe" in c["o_numero_comparavel_entre_horizontes"].lower()
+    # E o campo antigo nao pode voltar a afirmar monotonicidade.
+    assert "ela encolhe" not in c["como_ler_a_tabela"]

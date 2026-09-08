@@ -8,9 +8,11 @@ privada da Railway (ADR 0010). Por isso o `API_SERVICE_TOKEN` é **a única
 tranca** entre a internet e estes endpoints — não é opcional e não é
 defesa em profundidade.
 
-Estado: **Fase 0C, incremento 18**. A 0A e a 0B estão fechadas; o que roda
+Estado: **Fase 0C, incremento 21**. A 0A e a 0B estão fechadas; o que roda
 aqui é o forward contínuo — fluxo ao vivo, snapshots fechados e a calibração do
-simulador contra o mercado observado.
+simulador contra o mercado observado. **As doze decisões da fase estão
+fechadas** (ADRs 0025–0039), e o relatório da fase nasce **provisório**: ele
+gera tudo e espera a evidência.
 
 *(Este parágrafo dizia "incremento 0 — substrato. Ainda não há dataset, ledger,
 simulador nem agente" até 2026-09-07. Fica registrado porque é o padrão que
@@ -36,7 +38,7 @@ O bind é `0.0.0.0` (IPv4), que é o que o proxy público da Railway usa. Sobrep
 .venv/Scripts/python.exe -m pytest
 ```
 
-**807 testes**, 4 pulados (os que gastam dinheiro com LLM real, ligados por
+**1.094 testes**, 5 pulados (os que gastam dinheiro com LLM real, ligados por
 `RODAR_TESTES_DE_REDE=1`). O número não é enfeite: várias das guardas existem
 porque um defeito passou por elas antes, e o comentário de cada uma diz qual.
 
@@ -178,6 +180,7 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | GET | `/api/relatorio/quarentena` | **nenhuma candidata admitida**, o motivo de cada exclusão e que o B3 foi só controle negativo (ADR 0034). A ausência é DECLARADA, não omitida |
 | GET | `/api/relatorio/monitoramento` | **o monitoramento contínuo de §8.8**: CUSUM unilateral inferior, dois limiares congelados, e a ausência de sujeito na 0C — nenhum conhecimento em uso (ADR 0035) |
 | GET | `/api/relatorio/viabilidade` | **a capacidade experimental do desenho** (D48): `n_minimo` contra o limiar da primeira rejeição do BY com potência-alvo de 80%, o menor efeito detectável por horizonte, e o déficit — variância e dependência **medidas** no in-sample |
+| GET | `/api/relatorio/fase-0c` | **o relatório da fase 0C** (incremento 21). Nasce **provisório**: gera tudo e não chama de definitivo enquanto três gates de evidência não fecham — piloto real, calibração **e** revalidação, e os critérios 5/6/7 do incremento 18 |
 | GET | `/api/relatorio/portao-b` | **o Portão B (§14.4): existe candidata digna de auditoria?** — só avaliado se o A passar |
 | POST | `/api/relatorio/portao-b` | roda o walk-forward das candidatas (§14.4 B5) — CPU e runs, sem dinheiro |
 | GET | `/api/relatorio/auditoria/{hypothesis_id}` | o roteiro de §14.4.1 na parte que só lê |

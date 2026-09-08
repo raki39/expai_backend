@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/calibracao", tags=["calibracao"])
 
-CONTRATO_PADRAO = "bbo@1"
+CONTRATO_PADRAO = bbo.CONTRATO_PADRAO
 
 # O nocional de uma ordem entra na condicao de validade por tamanho (ADR
 # 0027), e ele e o do B3 - o unico que roda em shadow na 0C. Quem o deriva e

@@ -536,6 +536,12 @@ PODEM_LER_CONHECIMENTO_VALIDADO: dict[str, str] = {
         " derivada para saber quem está nesse estado. Ele nunca é alvo de"
         " transição aqui: o monitor só move para `em_suspeita` e `invalidado`"
     ),
+    "relatorio/portao_b.py": (
+        "a matriz de decisão da D47 EXPLICA que, sem rejeição de BY, não há"
+        " caminho para `conhecimento_validado` — e a promoção é do validador,"
+        " não do portão (§8.1). É texto de relatório sobre uma promoção que"
+        " NÃO acontece ali; o Portão B não move hipótese nenhuma"
+    ),
 }
 
 
