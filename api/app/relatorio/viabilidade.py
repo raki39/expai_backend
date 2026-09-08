@@ -234,7 +234,7 @@ def _taxa_de_referencia(
         "hypothesis_id": int(linha["id"]),
         "efeito_minimo_cents": d.insumos.efeito_minimo_cents,
         "horizonte_declarado_barras": d.insumos.horizonte_declarado_barras,
-        "capital_exposto_cents": d.insumos.capital_exposto_cents,
+        "base_de_normalizacao_cents": d.insumos.base_de_normalizacao_cents,
         "taxa_por_barra_bps_micro": d.taxa_por_barra_bps_micro,
         "n_bruto_necessario": d.n_bruto_necessario,
         "efeito_acumulado_no_cruzamento_cents": (
@@ -313,7 +313,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
     comum = dict(
         dependencia_rho_ppm=rho_ppm,
         variancia_desvio_por_barra_bps=desvio_bps,
-        capital_exposto_cents=capital,
+        base_de_normalizacao_cents=capital,
         duracao_barra_ms=ds.interval_ms,
         potencia_ppm=potencia_ppm,
         familia_m=cfg.familia_max_hipoteses,
@@ -454,7 +454,17 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             "variancia_desvio_por_barra_bps": desvio_bps,
             "dependencia_rho_ppm": rho_ppm,
             "fator_dependencia_ppm": poder.fator_ppm_de_rho(rho_ppm),
-            "capital_exposto_cents": capital,
+            "base_de_normalizacao_cents": capital,
+            "o_que_a_base_e": (
+                "BASE DE NORMALIZACAO, e nao exposicao real. Ela converte"
+                " centavos em fracao, e e o `seed_capital_usd_cents` da"
+                " config - fixo, declarado, igual em todos os horizontes."
+                " A exposicao VERDADEIRA varia barra a barra: a regra fica"
+                " fora do mercado parte do tempo, e quando esta dentro"
+                " aplica `fracao_bps` sobre o caixa do momento. A base"
+                " CANCELA no Sharpe anualizado (multiplica media e desvio"
+                " igualmente) e so aparece na coluna de dolares."
+            ),
             "duracao_barra_ms": ds.interval_ms,
         },
         "insumos_declarados": {
@@ -542,7 +552,7 @@ def _hipoteses_contra_a_regua(
         try:
             d = dimensionamento.dimensionar(
                 efeito_minimo_cents=abs(int(linha["efeito_minimo"])),
-                capital_exposto_cents=capital_cents,
+                base_de_normalizacao_cents=capital_cents,
                 variancia_desvio_por_barra_bps=desvio_bps,
                 dependencia_rho_ppm=rho_ppm,
                 horizonte_barras=int(linha["horizonte_barras"]),

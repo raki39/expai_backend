@@ -53,6 +53,7 @@ from ..aovivo import bbo
 from ..calibracao import piloto
 from ..dataset import loader
 from ..hipotese import dimensionamento
+from . import integridade as relatorio_integridade
 from . import viabilidade as relatorio_viabilidade
 
 #: O estado do relatorio enquanto a evidencia nao chega. Nome proprio, e nao um
@@ -263,17 +264,41 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         # A pergunta da fase nao tem resposta enquanto ha gate aberto, e o
         # campo diz `None` com o motivo - nunca `False`, que afirmaria que a
         # 0C falhou quando ela apenas nao terminou.
-        "resposta_da_0c": (
-            None
-            if pendentes
-            else "derivada das condicoes acima, todas cumpridas"
-        ),
+        "resposta_da_0c": None if pendentes else _resposta_derivada(conn),
+        # Os gates que seguram a resposta, NOMINALMENTE - e nao a contagem.
+        #
+        # > "mostre nominalmente quais sao os tres gates que mantem
+        # > `resposta_da_0c = None`" - o usuario
+        #
+        # "2 gates abertos" manda procurar quais; a lista informa. E cada
+        # entrada carrega o `por_que_bloqueia` do proprio gate, para que a
+        # leitura nao precise atravessar o documento.
+        "gates_que_seguram_a_resposta": [
+            {
+                "gate": nome,
+                "por_que_bloqueia": gates[nome]["por_que_bloqueia"],
+            }
+            for nome in pendentes
+        ],
         "por_que_sem_resposta": (
-            f"{len(pendentes)} gate(s) de evidencia aberto(s): "
-            + ", ".join(pendentes)
+            "a resposta esta retida por: " + ", ".join(pendentes)
             if pendentes
             else None
         ),
+        # **O desfecho que a fase JA pode antecipar, e ele nao depende de gate
+        # nenhum.** A D38 decidiu que nenhuma candidata entra no forward, e
+        # isso e fato do banco - nao evidencia a esperar.
+        #
+        # O usuario foi explicito: a decisao de capacidade "nao deve impedir
+        # que a 0C termine honestamente como sem candidata/inconclusiva". Este
+        # campo e o que garante isso: o desfecho existe, esta derivado, e nao
+        # espera decisao nenhuma.
+        "desfecho_antecipado": _desfecho_sem_candidata(conn),
+        # A reancoragem e a integridade, que o usuario mandou incluir. Entram
+        # INTEIRAS: um relatorio de fase que afirma sobre resultado sem dizer
+        # se o substrato que os produziu continua de pe pede confianca no lugar
+        # de prova.
+        "integridade": relatorio_integridade.montar(conn),
         "dataset": (
             None
             if ds is None
@@ -297,3 +322,91 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             ),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# O desfecho, e ele nao espera decisao nenhuma
+# ---------------------------------------------------------------------------
+
+
+def _desfecho_sem_candidata(conn: sqlite3.Connection) -> dict[str, Any]:
+    """O que a 0C ja pode concluir hoje, derivado de `hypothesis`.
+
+    > *"A decisao futura de capacidade deve bloquear novas hipoteses, nao
+    > impedir que a 0C termine honestamente como sem candidata/inconclusiva."*
+    > - o usuario, 2026-09-08
+
+    **Este campo e o que garante isso.** A D38 (ADR 0034) decidiu que nenhuma
+    candidata entra no forward, e o Portao B rejeitou a unica que existia. Isso
+    e fato do banco, e nao evidencia a esperar: nenhum dos tres gates muda a
+    resposta sobre EDGE, porque nao ha sujeito sobre o qual concluir.
+
+    O que os gates seguram e outra coisa - se o **simulador** esta calibrado, e
+    portanto se os numeros do forward do B3 significam alguma coisa. Sao
+    perguntas diferentes, e junta-las faria a fase parecer sem resposta quando
+    ela ja tem uma.
+
+    Derivado por consulta, e nao digitado: no dia em que uma candidata for
+    admitida, `admitidas` deixa de ser zero e este campo diz outra coisa
+    sozinho.
+    """
+    from ..hipotese import registro as hipotese_registro
+
+    admitidas = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM quarentena_congelado"
+        ).fetchone()["n"]
+    )
+    do_agente = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM hypothesis WHERE agente_origem = ?",
+            (hipotese_registro.AGENTE_ORIGEM,),
+        ).fetchone()["n"]
+    )
+    return {
+        "sobre_edge": (
+            "SEM CANDIDATA - inconclusiva" if admitidas == 0 else None
+        ),
+        "candidatas_admitidas_no_forward": admitidas,
+        "hipoteses_do_agente_registradas": do_agente,
+        "por_que": (
+            "§14.2 previa a candidata retrospectiva como INSUMO da 0C, e o"
+            " Portao B rejeitou a unica que existia. A D38 (ADR 0034) decidiu"
+            " que nenhuma entra no forward, e o B3 roda exclusivamente como"
+            " controle negativo - sem pre-registro, credito, familia ou DSR."
+            " Um forward sem candidata mede o ENCANAMENTO, nao estrategia."
+            if admitidas == 0
+            else "ha candidata admitida: o desfecho passa a depender do forward"
+        ),
+        "e_isto_e_o_desfecho_previsto": (
+            "§14.5: 'A candidata nao sobrevive a dados que nao existiam quando"
+            " foi registrada, ou nunca alcanca `n_efetivo` no horizonte"
+            " disponivel. Este e o desfecho mais provavel, e o mais valioso.'"
+        ),
+        "nao_depende_de_gate_nem_de_decisao": (
+            "Este desfecho e fato do banco. Os tres gates de evidencia dizem se"
+            " o SIMULADOR esta calibrado - se os numeros do forward do B3"
+            " significam algo -, e nao se ha edge. E a decisao de capacidade"
+            " experimental bloqueia hipotese NOVA, e nao o fechamento honesto"
+            " desta fase."
+        ),
+    }
+
+
+def _resposta_derivada(conn: sqlite3.Connection) -> str:
+    """A resposta da fase, quando os tres gates fecharem.
+
+    Derivada, e nao digitada - no dia em que houver candidata admitida ela muda
+    sozinha, e nenhuma frase precisa ser reescrita.
+    """
+    desfecho = _desfecho_sem_candidata(conn)
+    if desfecho["sobre_edge"] is not None:
+        return (
+            f"{desfecho['sobre_edge']} quanto a edge; o encanamento do forward"
+            " foi exercitado com o B3 como controle negativo, e o simulador"
+            " esta calibrado e revalidado"
+        )
+    return (
+        "ha candidata admitida e a evidencia chegou: o veredito sai do"
+        " forward dela, e nao deste campo"
+    )

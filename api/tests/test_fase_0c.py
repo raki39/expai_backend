@@ -338,3 +338,154 @@ def test_nenhum_modulo_novo_reintroduz_o_literal_do_contrato():
     )
     # E a guarda nao e vazia: ela encontra o literal onde ele legitimamente esta.
     assert "bbo@1" in sql_sem_prosa(raiz / "aovivo" / "bbo.py")
+
+
+# ---------------------------------------------------------------------------
+# 7. Os gates NOMINAIS, e o desfecho que nao espera decisao
+# ---------------------------------------------------------------------------
+
+
+def test_os_gates_que_seguram_a_resposta_sao_NOMEADOS(conn):
+    """> "mostre nominalmente quais sao os tres gates que mantem
+    > `resposta_da_0c = None`" — o usuario, 2026-09-08
+
+    "2 gates abertos" manda procurar quais; a lista informa. E cada entrada
+    carrega o motivo do proprio gate, para que a leitura nao precise
+    atravessar o documento.
+    """
+    r = fase_0c.montar(conn, potencia_ppm=dim.POTENCIA_ALVO_PPM)
+    nomeados = r["gates_que_seguram_a_resposta"]
+    assert {g["gate"] for g in nomeados} == set(r["pendentes"])
+    assert len(nomeados) == 3
+    for g in nomeados:
+        assert g["gate"] in r["gates_de_evidencia"]
+        assert g["por_que_bloqueia"], f"{g['gate']} nomeado sem motivo"
+
+
+def test_a_0C_JA_PODE_terminar_como_sem_candidata(conn):
+    """**A garantia que o usuario exigiu.**
+
+    > "A decisao futura de capacidade deve bloquear novas hipoteses, nao
+    > impedir que a 0C termine honestamente como sem candidata/inconclusiva."
+
+    O desfecho sobre EDGE nao depende de gate nenhum: a D38 decidiu que nenhuma
+    candidata entra, e isso e fato do banco. Os gates dizem se o SIMULADOR esta
+    calibrado — pergunta diferente.
+    """
+    assert dim.DECISAO_DE_CAPACIDADE_EXPERIMENTAL is None
+    r = fase_0c.montar(conn, potencia_ppm=dim.POTENCIA_ALVO_PPM)
+    d = r["desfecho_antecipado"]
+
+    assert d["sobre_edge"] == "SEM CANDIDATA - inconclusiva"
+    assert d["candidatas_admitidas_no_forward"] == 0
+    assert "encanamento" in d["por_que"].lower()
+    assert "14.5" in d["e_isto_e_o_desfecho_previsto"]
+    # E ele diz, no proprio campo, que nao espera nem gate nem decisao.
+    assert "bloqueia hipotese NOVA" in d["nao_depende_de_gate_nem_de_decisao"]
+
+
+def test_o_desfecho_e_DERIVADO_e_muda_sozinho(conn):
+    """Se uma candidata for admitida, o campo diz outra coisa sem reescrita.
+
+    Uma frase fixa dizendo "sem candidata" sobreviveria intacta ao dia em que
+    houvesse uma — que é o padrão que este projeto conta vinte e oito vezes.
+    """
+    antes = fase_0c._desfecho_sem_candidata(conn)
+    assert antes["sobre_edge"] is not None
+
+    # Uma candidata admitida de verdade, com as chaves que o banco exige - e
+    # nao um `monkeypatch` da consulta: o ponto do teste e que o campo sai do
+    # BANCO, e trocar a consulta por um substituto testaria outra coisa.
+    hid, run_id = _admitir_candidata(conn)
+    assert hid and run_id
+    depois = fase_0c._desfecho_sem_candidata(conn)
+    assert depois["candidatas_admitidas_no_forward"] == 1
+    assert depois["sobre_edge"] is None, (
+        "com candidata admitida o desfecho nao pode continuar dizendo"
+        " 'sem candidata'"
+    )
+
+
+def _admitir_candidata(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Uma linha em `quarentena_congelado`, com tudo que o banco exige.
+
+    Existe para que o teste do desfecho exercite a CONSULTA, e nao um duble
+    dela. As chaves estrangeiras sao reais: run, evento e hipotese.
+    """
+    conn.execute(
+        "INSERT INTO run (agent_id, state, config_version_id, created_at,"
+        " updated_at) VALUES ('agent-0001','concluido',1,'2026-09-08','x')"
+    )
+    run_id = int(conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"])
+    conn.execute(
+        "INSERT INTO agent_event (run_id, occurred_at, node, kind,"
+        " cost_usd_minor, cost_usd_micro)"
+        " VALUES (?,'2026-09-08','propor_regra','proposta',0,0)",
+        (run_id,),
+    )
+    ev = int(conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"])
+    conn.execute(
+        "INSERT INTO hypothesis (run_id, agent_event_id, enunciado,"
+        " agente_origem, timestamp_registro, metrica_primaria, efeito_minimo,"
+        " n_minimo, sharpe_esperado_milesimos, criterio_parada,"
+        " condicoes_validade_json, condicoes_falseamento_json, testavel,"
+        " horizonte_barras, content_hash)"
+        " VALUES (?,?,'uma abordagem','transacao@0b','2026-09-08',"
+        "'excesso_sobre_b3_cents',50000,19240,2700,'n_minimo_alcancado',"
+        "'{}','[{\"m\":1}]',1,21024,'hash-quarentena')",
+        (run_id, ev),
+    )
+    hid = int(conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"])
+    conn.execute(
+        "INSERT INTO abordagem (assinatura, familia, forma_json, estado,"
+        " criado_em) VALUES ('assinatura', 'cruzamento_medias', '{}',"
+        " 'aberta', '2026-09-08')"
+    )
+    conn.execute(
+        "INSERT INTO quarentena_congelado (hypothesis_id, run_id, run_digest,"
+        " content_hash, abordagem_assinatura, abordagem_versao,"
+        " identidade_executavel, dataset_sha256, timeframe, metrica_primaria,"
+        " metrica_valor_cents, congelado_em)"
+        " VALUES (?, ?, 'd', 'hash-quarentena', 'assinatura', 1, 'ident',"
+        " 'ds', '15m', 'excesso_sobre_b3_cents', 1, '2026-09-08')",
+        (hid, run_id),
+    )
+    return hid, run_id
+
+
+def test_a_integridade_entra_INTEIRA_no_relatorio(conn):
+    """> "inclua o resultado da reancoragem e de /api/diagnostico/integridade"
+
+    Inteira, e nao por referencia: um relatorio de fase que afirma sobre
+    resultado sem dizer se o substrato que os produziu continua de pe pede
+    confianca no lugar de prova.
+
+    E a reancoragem esta ali dentro — `todas_com_hash_integro` e a pergunta
+    "alguem reescreveu historico?", cuja resposta correta e `false`, porque a
+    reancoragem NAO toca as versoes antigas (ADR 0033).
+    """
+    r = fase_0c.montar(conn, potencia_ppm=dim.POTENCIA_ALVO_PPM)
+    integridade = r["integridade"]
+    assert "migracoes" in integridade or "schema_version" in integridade
+    # O bloco tem de ser o MESMO que a rota de diagnostico publica.
+    from app.relatorio import integridade as mod
+
+    direto = mod.montar(conn)
+    assert set(integridade) == set(direto), (
+        "o relatorio da fase publica um subconjunto da integridade: duas"
+        " versoes do mesmo bloco divergem"
+    )
+
+
+def test_a_integridade_do_relatorio_e_a_da_rota_sao_A_MESMA(client):
+    """Uma definicao. Duas montagens do mesmo diagnostico divergiriam."""
+    da_rota = client.get("/api/diagnostico/integridade")
+    da_fase = client.get("/api/relatorio/fase-0c")
+    assert da_rota.status_code == 200 and da_fase.status_code == 200
+    a = da_rota.json()
+    b = da_fase.json()["integridade"]
+    # `gerado_em` difere por serem duas chamadas; o resto tem de bater.
+    for campo in set(a) & set(b):
+        if "gerado" in campo or "em" == campo:
+            continue
+        assert a[campo] == b[campo], f"integridade divergiu em {campo}"

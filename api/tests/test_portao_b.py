@@ -940,3 +940,154 @@ def test_a_matriz_e_publicada_mesmo_sem_candidata(client):
     )
     assert len(corpo["matriz_de_decisao"]) == 5
     assert corpo["matriz_como_ler"]
+
+
+# ===========================================================================
+# A matriz nao pode ter ESTADO ESCONDIDO
+# ===========================================================================
+#
+# > "A matriz da D47 tem dois estados visualmente identicos com resultados
+# > diferentes (...). O relatorio nao pode mostrar as mesmas entradas
+# > produzindo dois resultados diferentes por estado oculto. A matriz deve
+# > conter todos os valores que `resolver` realmente utiliza, com teste
+# > garantindo que entradas visivelmente iguais nao geram resultados
+# > distintos." - o usuario, 2026-09-08
+#
+# Ele esta certo, e o defeito era meu: `dsr_falhou_sozinho` e
+# `dsr_falhou_com_companhia` mostravam BY, DSR e amostra IDENTICOS. O que os
+# separava era `outros_criterios_do_portao`, um booleano que eu montava e nao
+# publicava.
+#
+# Um relatorio assim faz o leitor concluir que a regra e arbitraria - ou pior,
+# que ele entendeu.
+
+#: As colunas que um leitor VE na matriz. Elas tem de ser chave: duas linhas
+#: com os mesmos valores aqui nao podem terminar diferente.
+COLUNAS_VISIVEIS = (
+    "by_rejeitou",
+    "dsr_passou",
+    "amostra_suficiente",
+    "outro_criterio_reprovado",
+    "falhas_adicionais",
+)
+
+
+def _chave_visivel(linha: dict) -> tuple:
+    return tuple(
+        tuple(linha[c]) if isinstance(linha[c], list) else linha[c]
+        for c in COLUNAS_VISIVEIS
+    )
+
+
+def test_entradas_visivelmente_iguais_nao_geram_resultados_distintos():
+    """**A exigencia do usuario, e ela e a definicao de "sem estado escondido".**
+
+    Se duas linhas tem os mesmos valores em toda coluna publicada e resultados
+    diferentes, existe uma variavel que decide e nao aparece. O teste agrupa
+    pelas colunas visiveis e exige um resultado por grupo.
+    """
+    por_chave: dict[tuple, set[str]] = {}
+    for linha in portao_b.matriz_de_decisao():
+        por_chave.setdefault(_chave_visivel(linha), set()).add(
+            linha["resultado_final"]
+        )
+    ambiguos = {k: v for k, v in por_chave.items() if len(v) > 1}
+    assert not ambiguos, (
+        "entradas visivelmente iguais com resultados diferentes — ha estado"
+        f" escondido na matriz: {ambiguos}"
+    )
+
+
+def test_as_duas_linhas_do_DSR_sao_distinguiveis_a_olho():
+    """O caso concreto que o usuario apontou, fixado.
+
+    As duas tem BY ok, DSR reprovando e amostra ok. O que as separa e
+    `falhas_adicionais` — e ela e uma LISTA NOMEADA, e nao um booleano
+    generico: "com companhia" continua sendo estado escondido se o relatorio
+    nao diz QUAL companhia.
+    """
+    linhas = {l["caso"]: l for l in portao_b.matriz_de_decisao()}
+    sozinho = linhas["dsr_falhou_sozinho"]
+    com = linhas["dsr_falhou_com_companhia"]
+
+    assert sozinho["resultado_final"] != com["resultado_final"]
+    assert _chave_visivel(sozinho) != _chave_visivel(com), (
+        "as duas linhas continuam visualmente identicas"
+    )
+    assert sozinho["falhas_adicionais"] == []
+    assert sozinho["outro_criterio_reprovado"] is False
+    assert com["outro_criterio_reprovado"] is True
+    assert com["falhas_adicionais"], (
+        "'com companhia' sem dizer QUAL companhia continua sendo estado oculto"
+    )
+    for nome in com["falhas_adicionais"]:
+        assert nome in portao_b.CRITERIOS_DO_PORTAO
+        assert nome != portao_b.CRITERIO_DSR, (
+            "a companhia do DSR nao pode ser o proprio DSR"
+        )
+
+
+def test_a_matriz_publica_TODOS_os_valores_que_resolver_usa():
+    """`resolver` consome um dicionario de seis criterios. Os seis aparecem.
+
+    Publicar so o agregado deixaria a matriz correta e ilegivel: dois casos com
+    `outro_criterio_reprovado = True` por criterios diferentes leriam igual.
+    """
+    for linha in portao_b.matriz_de_decisao():
+        entrada = linha["criterios_de_entrada"]
+        assert set(entrada) == set(portao_b.CRITERIOS_DO_PORTAO), (
+            f"{linha['caso']}: `criterios_de_entrada` nao cobre os seis"
+            f" criterios de §14.4 — falta {set(portao_b.CRITERIOS_DO_PORTAO) - set(entrada)}"
+        )
+        # E o que a linha publica tem de bater com o que ela passou.
+        assert entrada[portao_b.CRITERIO_DSR] == linha["dsr_passou"]
+        falharam = {k for k, v in entrada.items() if v is False}
+        assert falharam - {portao_b.CRITERIO_DSR} == set(
+            linha["falhas_adicionais"]
+        ), (
+            f"{linha['caso']}: `falhas_adicionais` nao descreve o que foi"
+            " passado a `resolver`"
+        )
+
+
+def test_a_matriz_reproduz_resolver_a_partir_das_colunas_publicadas():
+    """A prova forte: quem le a matriz consegue REFAZER a conta.
+
+    Reconstroi o dicionario de criterios **so** com o que a linha publica, e
+    exige que `resolver` devolva o mesmo `portao_b`. Se faltasse alguma
+    entrada, a reconstrucao divergiria — e e assim que estado escondido
+    aparece, em vez de por inspecao visual.
+    """
+    for linha in portao_b.matriz_de_decisao():
+        reconstruido = {
+            nome: nome not in linha["falhas_adicionais"]
+            for nome in portao_b.CRITERIOS_DO_PORTAO
+        }
+        reconstruido[portao_b.CRITERIO_DSR] = linha["dsr_passou"]
+        portao, _r, _s, sozinho = portao_b.resolver(reconstruido)
+        assert portao == linha["portao_b"], (
+            f"{linha['caso']}: refazendo a conta com as colunas publicadas deu"
+            f" {portao!r}, e a matriz diz {linha['portao_b']!r}"
+        )
+        assert sozinho == linha["dsr_decidiria_sozinho"]
+
+
+def test_a_guarda_de_estado_escondido_nao_e_vazia():
+    """Ela pega o defeito quando ele existe.
+
+    Guarda vazia e pior que guarda ausente. Aqui a prova e direta: duas linhas
+    forjadas com a mesma chave visivel e resultados diferentes tem de ser
+    detectadas pelo mesmo agrupamento que o teste usa.
+    """
+    forjadas = [
+        {**{c: False for c in COLUNAS_VISIVEIS}, "falhas_adicionais": [],
+         "resultado_final": "rejeitado"},
+        {**{c: False for c in COLUNAS_VISIVEIS}, "falhas_adicionais": [],
+         "resultado_final": "inconclusivo"},
+    ]
+    por_chave: dict[tuple, set[str]] = {}
+    for linha in forjadas:
+        por_chave.setdefault(_chave_visivel(linha), set()).add(
+            linha["resultado_final"]
+        )
+    assert any(len(v) > 1 for v in por_chave.values())

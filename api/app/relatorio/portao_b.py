@@ -133,6 +133,18 @@ def _agora() -> str:
 #: O criterio 6 de §14.4, pelo nome com que ele aparece em `criterios`.
 CRITERIO_DSR = "b6_dsr_no_minimo"
 
+#: Os SEIS criterios de §14.4, na ordem. Uma definicao, e nao a lista repetida
+#: em cada lugar que monta um dicionario de criterios - duas copias divergem, e
+#: um criterio que sumisse de uma delas passaria calado como "nao medido".
+CRITERIOS_DO_PORTAO = (
+    "b1_liquido_positivo_apos_todos_os_custos",
+    "b2_supera_b2_e_b3",
+    "b3_acima_do_p95_de_b1",
+    "b4_supera_b4_por_credito",
+    "b5_walk_forward_em_3_janelas",
+    CRITERIO_DSR,
+)
+
 
 def resolver(
     criterios: dict[str, bool | None]
@@ -224,7 +236,7 @@ _CASOS_DA_MATRIZ = (
         "by": False,
         "dsr": True,
         "amostra_suficiente": True,
-        "outros_criterios_do_portao": True,
+        "falhas_adicionais": (),
         "consequencia_de_by": (
             "NAO PROMOVIDA: sem rejeicao de BY nao ha caminho para"
             " `conhecimento_validado`, e a promocao e do validador, nao do"
@@ -240,7 +252,7 @@ _CASOS_DA_MATRIZ = (
         "by": True,
         "dsr": False,
         "amostra_suficiente": True,
-        "outros_criterios_do_portao": True,
+        "falhas_adicionais": (),
         "consequencia_de_by": "BY rejeitou: a promocao nao esta bloqueada por ele",
     },
     {
@@ -253,7 +265,7 @@ _CASOS_DA_MATRIZ = (
         "by": True,
         "dsr": True,
         "amostra_suficiente": False,
-        "outros_criterios_do_portao": True,
+        "falhas_adicionais": (),
         "consequencia_de_by": "BY rejeitou",
     },
     {
@@ -262,7 +274,7 @@ _CASOS_DA_MATRIZ = (
         "by": True,
         "dsr": True,
         "amostra_suficiente": True,
-        "outros_criterios_do_portao": True,
+        "falhas_adicionais": (),
         "consequencia_de_by": "BY rejeitou",
     },
     # A QUINTA linha nao estava na lista do usuario, e ela e necessaria: sem
@@ -282,7 +294,10 @@ _CASOS_DA_MATRIZ = (
         "by": True,
         "dsr": False,
         "amostra_suficiente": True,
-        "outros_criterios_do_portao": False,
+        # O criterio economico que tambem reprova. NOMEADO, e nao um
+        # booleano generico: "com companhia" e estado ESCONDIDO se o
+        # relatorio nao diz QUAL companhia.
+        "falhas_adicionais": ("b1_liquido_positivo_apos_todos_os_custos",),
         "consequencia_de_by": "BY rejeitou",
     },
 )
@@ -310,16 +325,21 @@ def matriz_de_decisao() -> list[dict]:
     """
     saida = []
     for caso in _CASOS_DA_MATRIZ:
+        # **Os criterios sao montados a partir de `falhas_adicionais`, que e
+        # publicada.** A versao anterior expandia um booleano escondido
+        # (`outros_criterios_do_portao`) e nao o mostrava - entao a matriz tinha
+        # duas linhas com BY, DSR e amostra IDENTICOS e resultados diferentes.
+        #
+        # Um relatorio que mostra as mesmas entradas produzindo dois resultados
+        # esta escondendo um estado, e e o leitor que paga: ele conclui que a
+        # regra e arbitraria, ou pior, que entendeu.
+        faltando = set(caso["falhas_adicionais"]) - set(CRITERIOS_DO_PORTAO)
+        assert not faltando, f"criterio inexistente em falhas_adicionais: {faltando}"
         criterios = {
-            "b1_liquido_positivo_apos_todos_os_custos": caso[
-                "outros_criterios_do_portao"
-            ],
-            "b2_supera_b2_e_b3": caso["outros_criterios_do_portao"],
-            "b3_acima_do_p95_de_b1": caso["outros_criterios_do_portao"],
-            "b4_supera_b4_por_credito": caso["outros_criterios_do_portao"],
-            "b5_walk_forward_em_3_janelas": caso["outros_criterios_do_portao"],
-            CRITERIO_DSR: caso["dsr"],
+            nome: nome not in caso["falhas_adicionais"]
+            for nome in CRITERIOS_DO_PORTAO
         }
+        criterios[CRITERIO_DSR] = caso["dsr"]
         portao, reprovando, sem_medida, sozinho = resolver(criterios)
 
         por_que = None
@@ -356,6 +376,14 @@ def matriz_de_decisao() -> list[dict]:
                 "by_rejeitou": caso["by"],
                 "dsr_passou": caso["dsr"],
                 "amostra_suficiente": caso["amostra_suficiente"],
+                # As tres colunas que faltavam. `falhas_adicionais` e a que
+                # separa `dsr_falhou_sozinho` de `dsr_falhou_com_companhia`:
+                # sem ela, as duas linhas eram visualmente identicas.
+                "falhas_adicionais": list(caso["falhas_adicionais"]),
+                "outro_criterio_reprovado": bool(caso["falhas_adicionais"]),
+                # E o dicionario INTEIRO que `resolver` recebeu, para que
+                # nenhuma entrada dele fique fora do relatorio.
+                "criterios_de_entrada": criterios,
                 "consequencia_de_by": caso["consequencia_de_by"],
                 "portao_b": portao,
                 "dsr_decidiria_sozinho": sozinho,

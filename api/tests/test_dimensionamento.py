@@ -53,13 +53,13 @@ DESVIO_BPS = 22
 # Sharpe esperado de 2,700, que e o que produz `n_minimo = 19.240` sob `t = 2`.
 EFEITO_MINIMO_CENTS = 50_000
 SHARPE_41_MILESIMOS = 2_700
-CAPITAL_EXPOSTO_CENTS = 80_000  # US$ 1.000 de semente a 80% de fracao
+BASE_DE_NORMALIZACAO_CENTS = 80_000  # US$ 1.000 de semente a 80% de fracao
 
 
 def _insumos(**mudancas):
     base = dict(
         efeito_minimo_cents=EFEITO_MINIMO_CENTS,
-        capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+        base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
         variancia_desvio_por_barra_bps=DESVIO_BPS,
         dependencia_rho_ppm=RHO_MEDIDO_PPM,
         horizonte_barras=IN_SAMPLE_BARRAS,
@@ -577,7 +577,7 @@ def _capacidade(barras: int):
         barras_disponiveis=barras,
         dependencia_rho_ppm=RHO_MEDIDO_PPM,
         variancia_desvio_por_barra_bps=DESVIO_BPS,
-        capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+        base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
         duracao_barra_ms=QUINZE_MIN_MS,
         potencia_ppm=dim.POTENCIA_ALVO_PPM,
         familia_m=48,
@@ -637,7 +637,7 @@ def test_a_capacidade_tambem_exige_a_potencia():
             barras_disponiveis=IN_SAMPLE_BARRAS,
             dependencia_rho_ppm=0,
             variancia_desvio_por_barra_bps=DESVIO_BPS,
-            capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+            base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
             duracao_barra_ms=QUINZE_MIN_MS,
             potencia_ppm=None,
             familia_m=48,
@@ -1197,7 +1197,7 @@ def test_as_duas_contas_FECHAM_no_cruzamento():
         taxa_declarada_bps_micro=d.taxa_por_barra_bps_micro,
         dependencia_rho_ppm=RHO_MEDIDO_PPM,
         variancia_desvio_por_barra_bps=DESVIO_BPS,
-        capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+        base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
         duracao_barra_ms=QUINZE_MIN_MS,
         potencia_ppm=dim.POTENCIA_ALVO_PPM,
         familia_m=48,
@@ -1230,7 +1230,7 @@ def test_a_diferenca_PIORA_antes_de_melhorar():
             taxa_declarada_bps_micro=297_279,
             dependencia_rho_ppm=RHO_MEDIDO_PPM,
             variancia_desvio_por_barra_bps=DESVIO_BPS,
-            capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+            base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
             duracao_barra_ms=QUINZE_MIN_MS,
             potencia_ppm=dim.POTENCIA_ALVO_PPM,
             familia_m=48,
@@ -1246,7 +1246,7 @@ def test_a_diferenca_PIORA_antes_de_melhorar():
     #
     # A propriedade que nao depende de parametrizacao: existe um vale interior.
     # Ele sai da derivada de `a*n - b*sqrt(n)`, em `sqrt(n) = b/(2a)`.
-    a = 297_279 * CAPITAL_EXPOSTO_CENTS / (1_000_000 * 10_000)
+    a = 297_279 * BASE_DE_NORMALIZACAO_CENTS / (1_000_000 * 10_000)
     b = _dif(IN_SAMPLE_BARRAS)
     detectavel = a * IN_SAMPLE_BARRAS - b  # = b_curva * sqrt(in_sample)
     b_curva = detectavel / math.sqrt(IN_SAMPLE_BARRAS)
@@ -1286,7 +1286,7 @@ def test_taxa_declarada_nula_ou_negativa_recusa():
                 taxa_declarada_bps_micro=taxa,
                 dependencia_rho_ppm=RHO_MEDIDO_PPM,
                 variancia_desvio_por_barra_bps=DESVIO_BPS,
-                capital_exposto_cents=CAPITAL_EXPOSTO_CENTS,
+                base_de_normalizacao_cents=BASE_DE_NORMALIZACAO_CENTS,
                 duracao_barra_ms=QUINZE_MIN_MS,
                 potencia_ppm=dim.POTENCIA_ALVO_PPM,
                 familia_m=48,
@@ -1341,3 +1341,154 @@ def test_a_conferencia_dimensional_explica_a_nao_monotonicidade():
     assert "sharpe" in c["o_numero_comparavel_entre_horizontes"].lower()
     # E o campo antigo nao pode voltar a afirmar monotonicidade.
     assert "ela encolhe" not in c["como_ler_a_tabela"]
+
+
+# ---------------------------------------------------------------------------
+# 13. A base e BASE DE NORMALIZACAO, e nao exposicao real
+# ---------------------------------------------------------------------------
+#
+# > "Confirme o significado dos 80.000 centavos na taxa dimensional. Declare
+# > explicitamente se sao: apenas uma base fixa de normalizacao; ou
+# > exposicao/capital realmente utilizado em cada barra. Se forem base de
+# > normalizacao, nao chame de exposicao real." - o usuario, 2026-09-08
+#
+# **Sao base de normalizacao.** O campo se chamava `capital_exposto_cents`, e o
+# nome mentia: a exposicao verdadeira varia barra a barra - a regra fica fora do
+# mercado parte do tempo (metade da janela, no run 30) e quando esta dentro
+# aplica `fracao_bps` sobre o caixa do momento, que muda com o resultado.
+
+
+def test_a_ida_e_volta_fecha_exatamente():
+    """**`taxa x base x horizonte = efeito esperado`**, que e o teste pedido.
+
+    Se esta identidade nao fechasse, a taxa nao seria a taxa daquele efeito - e
+    todo o resto da tabela estaria medindo outra coisa.
+    """
+    d = dim.dimensionar(**_insumos())
+    volta = (
+        d.taxa_por_barra_bps_micro
+        * d.insumos.base_de_normalizacao_cents
+        * d.insumos.horizonte_declarado_barras
+        // (1_000_000 * 10_000)
+    )
+    assert volta == pytest.approx(EFEITO_MINIMO_CENTS, abs=1), (
+        f"a ida e volta nao fecha: taxa x base x horizonte = {volta}, e o"
+        f" efeito minimo declarado e {EFEITO_MINIMO_CENTS}"
+    )
+
+
+@pytest.mark.parametrize("base", [50_000, 80_000, 100_000, 250_000])
+def test_a_ida_e_volta_fecha_para_QUALQUER_base(base: int):
+    """A identidade nao depende de qual base alguem escolha.
+
+    E o que prova que ela e normalizacao: mudar a base muda a taxa na proporcao
+    inversa, e o efeito reconstruido continua o mesmo.
+    """
+    d = dim.dimensionar(**_insumos(base_de_normalizacao_cents=base))
+    volta = (
+        d.taxa_por_barra_bps_micro
+        * base
+        * d.insumos.horizonte_declarado_barras
+        // (1_000_000 * 10_000)
+    )
+    assert abs(volta - EFEITO_MINIMO_CENTS) <= 1
+
+
+def test_a_base_CANCELA_no_sharpe_e_so_aparece_nos_centavos():
+    """A prova de que ela e normalizacao, e nao um fato economico.
+
+    O Sharpe anualizado minimo detectavel **nao muda** com a base: ela
+    multiplica media e desvio igualmente. O que muda e a coluna de dolares.
+
+    Consequencia pratica: **trocar a base nao muda o veredito.** Se mudasse,
+    escolher a base seria escolher a resposta.
+    """
+    sharpes, efeitos = set(), set()
+    for base in (50_000, 100_000, 400_000):
+        cap = dim.capacidade(
+            barras_disponiveis=IN_SAMPLE_BARRAS,
+            dependencia_rho_ppm=RHO_MEDIDO_PPM,
+            variancia_desvio_por_barra_bps=DESVIO_BPS,
+            base_de_normalizacao_cents=base,
+            duracao_barra_ms=QUINZE_MIN_MS,
+            potencia_ppm=dim.POTENCIA_ALVO_PPM,
+            familia_m=48,
+            fdr_alfa_bps=1_000,
+        )
+        sharpes.add(cap.sharpe_anualizado_milesimos)
+        efeitos.add(cap.menor_efeito_detectavel_cents)
+    assert len(sharpes) == 1, (
+        f"o Sharpe minimo detectavel mudou com a base: {sharpes}. A base e"
+        " normalizacao e nao pode entrar no numero que compara horizontes"
+    )
+    assert len(efeitos) == 3, "e a coluna de dolares TEM de escalar com a base"
+
+
+def test_o_veredito_nao_muda_com_a_base():
+    """O corolario que importa: escolher a base nao escolhe a resposta."""
+    vereditos = {
+        dim.dimensionar(**_insumos(base_de_normalizacao_cents=b)).veredito
+        for b in (50_000, 80_000, 100_000, 250_000, 1_000_000)
+    }
+    assert vereditos == {dim.VEREDITO_NAO_TESTAVEL}
+
+
+def test_o_nome_antigo_nao_volta():
+    """`capital_exposto` afirmava exposicao real, e era falso.
+
+    A exposicao verdadeira varia barra a barra. Um nome que promete o que o
+    campo nao entrega e a forma exata do padrao que este projeto conta vinte e
+    oito vezes - e este ja tinha nascido assim.
+    """
+    # `codigo_sem_prosa`, e nao um filtro meu de linhas. A primeira versao
+    # deste teste tentou pular comentario pelo primeiro caractere da linha e
+    # acusou o DOCSTRING que explica por que o nome mudou - o defeito exato que
+    # `tests/_prosa.py` existe para evitar, e que ja apareceu duas vezes hoje.
+    #
+    # A correcao errada seria apagar a explicacao.
+    from tests._prosa import codigo_sem_prosa
+
+    for modulo in (dim, viabilidade):
+        codigo = codigo_sem_prosa(pathlib.Path(modulo.__file__))
+        assert "capital_exposto" not in codigo, (
+            f"{modulo.__name__} voltou a chamar a base de exposicao: a"
+            " exposicao real varia barra a barra, e um nome que promete o que"
+            " o campo nao entrega e o padrao que este projeto ja conta vinte e"
+            " oito vezes"
+        )
+
+    # E a guarda nao e vazia: ela acha o nome quando ele esta no CODIGO.
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".py", delete=False, encoding="utf-8"
+    ) as arq:
+        arq.write('"""So a prosa cita capital_exposto."""\nx = 1\n')
+        so_prosa = pathlib.Path(arq.name)
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".py", delete=False, encoding="utf-8"
+    ) as arq:
+        arq.write("capital_exposto_cents = 1\n")
+        no_codigo = pathlib.Path(arq.name)
+    assert "capital_exposto" not in codigo_sem_prosa(so_prosa), (
+        "a guarda acusaria a explicacao: e a correcao errada"
+    )
+    assert "capital_exposto" in codigo_sem_prosa(no_codigo), (
+        "guarda vazia: ela nao acha o nome nem no codigo"
+    )
+    so_prosa.unlink()
+    no_codigo.unlink()
+
+
+def test_a_base_e_declarada_no_relatorio_como_o_que_ela_e():
+    """O relatorio diz, com todas as letras, que nao e exposicao real.
+
+    O campo vai para a RESPOSTA da rota, e nao so para o docstring: quem le o
+    JSON nao le o modulo.
+    """
+    import inspect
+
+    fonte = inspect.getsource(viabilidade)
+    assert "o_que_a_base_e" in fonte
+    assert "nao exposicao real" in fonte
+    assert "CANCELA" in fonte

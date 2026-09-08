@@ -49,6 +49,21 @@ antiga continua **calculada e visivel** (`n_minimo_efetivo_pelo_sharpe`), pelo
 mesmo motivo que a D37 manteve a leitura da D29 na tela: apaga-la esconderia
 que houve correcao.
 
+## A base de normalizacao NAO e exposicao real
+
+`base_de_normalizacao_cents` converte centavos em fracao, e **nada mais**. Ela
+se chamava `capital_exposto_cents`, e o nome mentia: a exposicao verdadeira
+varia barra a barra - a regra fica fora do mercado parte do tempo, e quando esta
+dentro aplica `fracao_bps` sobre o caixa do momento.
+
+O que o relatorio usa e `seed_capital_usd_cents`: fixo, declarado, o mesmo em
+todos os horizontes da tabela. Ele **nao afirma** que a estrategia expos isso.
+
+**E a base cancela no numero que compara horizontes.** O Sharpe anualizado nao
+depende dela - ela multiplica media e desvio igualmente. Ela so aparece quando a
+conta volta para centavos, e e por isso que trocar a base muda a coluna de
+dolares e nao muda o veredito.
+
 ## A dependencia entra onde ela morde
 
 `n_minimo` sempre foi expresso em observacoes EFETIVAS, e a conferencia de
@@ -308,7 +323,24 @@ class Insumos:
     variancia_desvio_por_barra_bps: int
     dependencia_rho_ppm: int
     potencia_ppm: int
-    capital_exposto_cents: int
+    #: **BASE DE NORMALIZACAO, e nao exposicao real.** Ela existe para converter
+    #: centavos em fracao, e nada mais.
+    #:
+    #: O usuario mandou declarar qual das duas coisas ela e, e a resposta e a
+    #: primeira. O nome anterior era `capital_exposto_cents`, e ele MENTIA: a
+    #: exposicao verdadeira varia barra a barra - a regra fica fora do mercado
+    #: parte do tempo (no run 30, metade da janela), e quando esta dentro aplica
+    #: `fracao_bps` sobre o caixa do momento, que muda com o resultado.
+    #:
+    #: O relatorio usa `seed_capital_usd_cents` como base: um numero fixo,
+    #: declarado, igual para todos os horizontes da tabela. **Ele nao afirma que
+    #: a estrategia expos isso** - afirma que o efeito minimo esta sendo lido
+    #: como fracao desse valor.
+    #:
+    #: E a base **cancela** no numero que compara horizontes: o Sharpe
+    #: anualizado nao depende dela, porque ela multiplica media e desvio
+    #: igualmente. Ela so aparece na conversao para centavos.
+    base_de_normalizacao_cents: int
     #: O horizonte sobre o qual o efeito minimo foi DECLARADO. Ele define a
     #: taxa por barra, e nao a disponibilidade.
     horizonte_declarado_barras: int
@@ -327,7 +359,7 @@ class Insumos:
             ),
             "dependencia_rho_ppm": self.dependencia_rho_ppm,
             "potencia_ppm": self.potencia_ppm,
-            "capital_exposto_cents": self.capital_exposto_cents,
+            "base_de_normalizacao_cents": self.base_de_normalizacao_cents,
             "horizonte_declarado_barras": self.horizonte_declarado_barras,
             "horizonte_disponivel_barras": self.horizonte_disponivel_barras,
         }
@@ -393,7 +425,7 @@ class Dimensionamento:
         """
         return (
             self.efeito_por_barra_bps_micro
-            * self.insumos.capital_exposto_cents
+            * self.insumos.base_de_normalizacao_cents
             * self.n_bruto_necessario
             // (1_000_000 * 10_000)
         )
@@ -454,7 +486,7 @@ class Dimensionamento:
 def dimensionar(
     *,
     efeito_minimo_cents: int,
-    capital_exposto_cents: int,
+    base_de_normalizacao_cents: int,
     variancia_desvio_por_barra_bps: int,
     dependencia_rho_ppm: int,
     horizonte_barras: int,
@@ -475,7 +507,7 @@ def dimensionar(
 
     A conta, em uma linha:
 
-        efeito_por_barra = efeito_minimo / (capital_exposto * horizonte)
+        efeito_por_barra = efeito_minimo / (base_de_normalizacao * horizonte)
         sharpe_por_barra = efeito_por_barra / desvio_por_barra
         n_efetivo        = ceil( (t / sharpe_por_barra)^2 )
         n_bruto          = ceil( n_efetivo / fator_de_dependencia )
@@ -505,7 +537,7 @@ def dimensionar(
             "o efeito minimo precisa ser positivo: uma hipotese cujo menor"
             " efeito relevante e zero nao afirma nada que valha testar"
         )
-    if capital_exposto_cents <= 0:
+    if base_de_normalizacao_cents <= 0:
         raise DimensionamentoImpossivel("capital exposto precisa ser positivo")
     if variancia_desvio_por_barra_bps <= 0:
         raise DimensionamentoImpossivel(
@@ -531,7 +563,7 @@ def dimensionar(
     # arredondamento aqui aparece multiplicado na amostra exigida.
     efeito_por_barra_bps = Fraction(
         efeito_minimo_cents * 10_000,
-        capital_exposto_cents * horizonte_barras,
+        base_de_normalizacao_cents * horizonte_barras,
     )
     sharpe_barra = efeito_por_barra_bps / variancia_desvio_por_barra_bps
     razao = Fraction(t_micro, 1_000_000) / sharpe_barra
@@ -565,7 +597,7 @@ def dimensionar(
             variancia_desvio_por_barra_bps=variancia_desvio_por_barra_bps,
             dependencia_rho_ppm=dependencia_rho_ppm,
             potencia_ppm=potencia_ppm,
-            capital_exposto_cents=capital_exposto_cents,
+            base_de_normalizacao_cents=base_de_normalizacao_cents,
             horizonte_declarado_barras=horizonte_barras,
             horizonte_disponivel_barras=disponivel,
         ),
@@ -646,7 +678,7 @@ def capacidade(
     barras_disponiveis: int,
     dependencia_rho_ppm: int,
     variancia_desvio_por_barra_bps: int,
-    capital_exposto_cents: int,
+    base_de_normalizacao_cents: int,
     duracao_barra_ms: int,
     potencia_ppm: int | None,
     familia_m: int,
@@ -661,7 +693,7 @@ def capacidade(
         n_efetivo    = barras * fator_de_dependencia
         sharpe_barra = t / sqrt(n_efetivo)
         efeito_barra = sharpe_barra * desvio_por_barra
-        efeito_total = efeito_barra * capital_exposto * barras
+        efeito_total = efeito_barra * base_de_normalizacao * barras
 
     Todo arredondamento vai para CIMA: o menor efeito detectavel e uma
     afirmacao sobre o que o desenho **nao** alcanca, e errar para baixo aqui
@@ -690,7 +722,7 @@ def capacidade(
         raise DimensionamentoImpossivel("horizonte precisa ser positivo")
     if variancia_desvio_por_barra_bps <= 0:
         raise DimensionamentoImpossivel("a variancia precisa ser positiva")
-    if capital_exposto_cents <= 0:
+    if base_de_normalizacao_cents <= 0:
         raise DimensionamentoImpossivel("capital exposto precisa ser positivo")
 
     alfa_ppm = alfa_primeira_rejeicao_ppm(
@@ -710,7 +742,7 @@ def capacidade(
     sharpe_barra_micro = -(-t_micro * 1_000_000 // raiz_micro)
     efeito_barra_micro = sharpe_barra_micro * variancia_desvio_por_barra_bps
     efeito_cents = -(
-        -efeito_barra_micro * capital_exposto_cents * barras_disponiveis
+        -efeito_barra_micro * base_de_normalizacao_cents * barras_disponiveis
         // (1_000_000 * 10_000)
     )
     raiz_bpa_micro = _raiz_micro(poder.barras_por_ano(duracao_barra_ms))
@@ -729,7 +761,7 @@ def capacidade(
         # prometer sensibilidade nem desempenho que nao se mediu.
         esperado = (
             taxa_declarada_bps_micro
-            * capital_exposto_cents
+            * base_de_normalizacao_cents
             * barras_disponiveis
             // (1_000_000 * 10_000)
         )
