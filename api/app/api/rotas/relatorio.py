@@ -13,6 +13,7 @@ from ...dataset import loader as dataset_loader
 from ...relatorio import montar as relatorio_montar
 from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
+from ...relatorio import monitoramento as relatorio_monitoramento
 from ...relatorio import quarentena as relatorio_quarentena
 from ...relatorio import portao_b as relatorio_portao_b
 from ...relatorio import reprodutibilidade as relatorio_reprodutibilidade
@@ -88,6 +89,32 @@ def quarentena(request: Request) -> dict[str, Any]:
     return {
         "existe": True,
         **relatorio_quarentena.montar(conn, config_version_id=atual.id),
+    }
+
+
+@router.get("/monitoramento")
+def monitoramento(request: Request) -> dict[str, Any]:
+    """O monitoramento continuo de §8.8, e a AUSENCIA de sujeito declarada.
+
+    Rota propria pelo mesmo argumento da `/quarentena`: a pergunta e propria -
+    *"o conhecimento em uso continua funcionando?"* -, e na 0C a resposta e
+    que **nao ha conhecimento em uso**. Ela e derivada de consulta a
+    `hypothesis_estado_atual`, e nao de um `if` sobre a fase.
+
+    A duracao da barra sai do `interval_ms` do DATASET, e nao de uma constante:
+    a tolerancia de lacuna da D40 e "1 hora", e quantas barras cabem nela
+    depende do timeframe. Fixar 4 faria o numero parar de descrever no dia em
+    que o timeframe mudasse, e nada acusaria.
+    """
+    conn = _conn(request)
+    ds = dataset_loader.dataset_vigente(conn)
+    if ds is None:
+        return {"existe": False, "motivo": "nenhum dataset ingerido"}
+    return {
+        "existe": True,
+        **relatorio_monitoramento.montar(
+            conn, duracao_barra_ms=ds.interval_ms
+        ),
     }
 
 
@@ -311,6 +338,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # como esquecimento. Um export sem ela mostraria a fase sem a decisao
         # que definiu o que ela pode concluir.
         ("quarentena", "/api/relatorio/quarentena", lambda: quarentena(request)),
+        # `monitoramento` ENTRA pelo mesmo argumento da quarentena, e por um a
+        # mais: o campo que ele publica sempre - "ausencia de alarme nao
+        # comprova edge" - e o unico lugar do pacote que impede a leitura
+        # errada mais provavel de um forward sem alarme.
+        ("monitoramento", "/api/relatorio/monitoramento",
+         lambda: monitoramento(request)),
         # `integridade` ENTRA porque ela e a unica parte do pacote que responde
         # "o substrato que produziu tudo isso continua de pe?" - e um export
         # que mostra resultado sem isso pede confianca no lugar de prova.

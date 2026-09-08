@@ -22,32 +22,10 @@ from app import creditos as creditos_mod
 from app.estatistica import dsr, fdr, pvalor, sharpe
 from app.validador import lote
 
+from ._prosa import codigo_sem_prosa
+
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 QUINZE_MIN_MS = 900_000
-
-
-def codigo_sem_prosa(arquivo: pathlib.Path) -> str:
-    """O código do arquivo, sem comentários e sem literais de texto.
-
-    Existe porque a primeira versão da guarda de separação acusou as próprias
-    docstrings deste projeto: elas mencionam "crédito" exatamente para
-    explicar por que crédito não entra na estatística.
-
-    Uma guarda que proíbe a palavra proíbe também a explicação de por que a
-    palavra é proibida — e aí a saída é apagar o comentário, que é a pior das
-    correções possíveis. O que se quer proibir é o **código** que consulta
-    escassez, e é isso que esta função isola.
-    """
-    import io
-    import tokenize
-
-    pedacos: list[str] = []
-    with arquivo.open("rb") as f:
-        for tok in tokenize.tokenize(f.readline):
-            if tok.type in (tokenize.COMMENT, tokenize.STRING):
-                continue
-            pedacos.append(tok.string)
-    return " ".join(pedacos)
 
 
 # ===========================================================================

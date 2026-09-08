@@ -3463,6 +3463,280 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        28,
+        "incremento 20: o monitoramento continuo, com os limiares congelados",
+        """
+        -- ==================================================================
+        -- O CUSUM DE 8.8, PELO ADR 0035.
+        --
+        -- Quatro tabelas, e cada uma existe por uma garantia que o usuario
+        -- exigiu por escrito na aprovacao da D46:
+        --
+        --   monitor_limiar   os limiares CONGELADOS antes do primeiro tick
+        --   monitor_passo    a serie acumulada, append-only
+        --   monitor_alarme   o alarme LATCHED, que sobrevive a reinicio
+        --   monitor_reteste  a janela POSTERIOR e DISJUNTA
+        --
+        -- Nenhuma guarda mora no Python: o banco recusa. "Garantia que
+        -- depende de boa vontade ja foi violada" (secao 8.5.1).
+        -- ==================================================================
+
+        -- ------------------------------------------------------------------
+        -- 1. OS LIMIARES CONGELADOS
+        --
+        -- Uma linha por ASSUNTO. `assunto` e o que esta sendo monitorado -
+        -- na 0C nada, porque nenhuma candidata foi admitida (ADR 0034).
+        --
+        -- Congelar antes do primeiro tick nao e recomendacao: e `UNIQUE`
+        -- mais dois gatilhos. Recalibrar depois de ver o forward seria
+        -- escolher o limiar olhando o numero, e a quinta pergunta do teste
+        -- de escopo responde "sim" a isso.
+        -- ------------------------------------------------------------------
+        CREATE TABLE monitor_limiar (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            assunto TEXT NOT NULL UNIQUE,
+
+            -- De onde vem o alvo. Os dois pre-registrados e imutaveis
+            -- (secao 8.2), e a demonstracao dimensional do ADR 0035 e sobre
+            -- estes dois campos e mais nenhum.
+            efeito_minimo_cents INTEGER NOT NULL,
+            horizonte_barras    INTEGER NOT NULL CHECK (horizonte_barras > 0),
+
+            -- O alvo e a folga, em MILICENTS POR BARRA. A unidade esta no
+            -- nome porque foi justamente a confusao de unidade que o ADR
+            -- 0035 pegou: `efeito_minimo / n_minimo` da cents por observacao
+            -- EFETIVA, e o CUSUM atualiza por BARRA.
+            alvo_milicents_por_barra  INTEGER NOT NULL,
+            folga_milicents_por_barra INTEGER NOT NULL
+                CHECK (folga_milicents_por_barra >= 0),
+
+            -- Os dois limiares, em MILICENTS. Aninhados por construcao:
+            -- sao quantis da MESMA distribuicao do maximo, e quantil e
+            -- monotono. O CHECK afirma a consequencia, nao a produz.
+            alerta_milicents  INTEGER NOT NULL CHECK (alerta_milicents  > 0),
+            critico_milicents INTEGER NOT NULL CHECK (critico_milicents > 0),
+
+            -- O orcamento de falso alarme de cada um, em ppm, sobre o
+            -- HORIZONTE FINITO. Gravado porque "as barras ficam consumidas
+            -- para AQUELE limiar": remonitorar o mesmo periodo com outro
+            -- orcamento e a olhada extra que o reset daria.
+            prob_alerta_ppm  INTEGER NOT NULL CHECK (prob_alerta_ppm  > 0),
+            prob_critico_ppm INTEGER NOT NULL CHECK (prob_critico_ppm > 0),
+
+            -- A calibracao, inteira. Semente, algoritmo, bloco e repeticoes
+            -- gravados porque R12 exige que o limiar seja reproduzivel entre
+            -- maquinas - e porque um limiar cuja procedencia nao se conhece
+            -- nao e um limiar congelado, e um numero.
+            semente     INTEGER NOT NULL,
+            algoritmo   TEXT    NOT NULL,
+            bloco       INTEGER NOT NULL CHECK (bloco >= 1),
+            repeticoes  INTEGER NOT NULL CHECK (repeticoes >= 1),
+
+            -- A SERIE que calibrou, identificada por hash. Se o in-sample
+            -- congelado mudasse, o hash mudaria e a conferencia recusaria -
+            -- que e a metade da garantia "o bootstrap usa somente o
+            -- in-sample congelado" que o banco consegue dar sozinho.
+            serie_hash  TEXT    NOT NULL,
+            serie_n     INTEGER NOT NULL CHECK (serie_n >= 10),
+
+            -- A identidade do run congelado que produziu a serie. Os mesmos
+            -- campos do criterio 3 do incremento 19: um id sozinho aponta
+            -- para uma linha que pode ter sido reescrita ao redor.
+            hypothesis_id INTEGER REFERENCES hypothesis(id),
+            run_id        INTEGER REFERENCES run(id),
+            run_digest    TEXT    NOT NULL,
+
+            congelado_em TEXT NOT NULL,
+
+            -- Os dois aninhamentos, como restricao de TABELA porque falam de
+            -- duas colunas. Sao consequencia da definicao - quantis da mesma
+            -- distribuicao do maximo, e quantil e monotono -, e o `CHECK`
+            -- afirma a consequencia em vez de produzi-la: se um dia alguem
+            -- calibrar de outro jeito, o banco recusa antes de gravar.
+            CHECK (critico_milicents >= alerta_milicents),
+            CHECK (prob_critico_ppm <= prob_alerta_ppm)
+        );
+
+        CREATE TRIGGER monitor_limiar_sem_update
+        BEFORE UPDATE ON monitor_limiar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'limiar do monitor e congelado antes do primeiro tick: recalibrar depois e escolher o limiar olhando o forward');
+        END;
+
+        CREATE TRIGGER monitor_limiar_sem_delete
+        BEFORE DELETE ON monitor_limiar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'limiar do monitor NAO se apaga: apagar para recalibrar e a mesma coisa que recalibrar');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 2. A SERIE ACUMULADA
+        --
+        -- Uma linha por barra AVALIADA. `observado_milicents` e NULL quando
+        -- a barra esta ausente - e `atualizou = 0` diz que `S` nao mexeu.
+        --
+        -- Barra ausente NAO entra como zero. Zero e uma afirmacao sobre o
+        -- desvio: com alvo positivo e observado zero, `d_t > 0` e o CUSUM
+        -- SOBE, ou seja, a falta de dado empurraria para o alarme (ADR
+        -- 0035, ajuste 4).
+        -- ------------------------------------------------------------------
+        CREATE TABLE monitor_passo (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            assunto TEXT NOT NULL REFERENCES monitor_limiar(assunto),
+
+            t_ms INTEGER NOT NULL,
+
+            observado_milicents INTEGER,
+            atualizou           INTEGER NOT NULL CHECK (atualizou IN (0, 1)),
+
+            -- `d_t` gravado ao lado de `S_t`. Nao e derivavel depois: o alvo
+            -- e a folga vivem no limiar congelado, e reconstruir a conta
+            -- exigiria confiar que ninguem mexeu neles.
+            d_milicents INTEGER,
+            s_milicents INTEGER NOT NULL CHECK (s_milicents >= 0),
+
+            -- O regime em que a barra caiu, pela taxonomia da D40. O CUSUM
+            -- nao roda por regime e nao reseta na transicao; o regime fica
+            -- registrado para o relatorio dizer de onde veio o acumulado.
+            regime TEXT,
+
+            registrado_em TEXT NOT NULL,
+
+            UNIQUE (assunto, t_ms),
+
+            -- Ausente e ausente: sem valor e sem atualizacao, juntos.
+            CHECK (
+                (observado_milicents IS NULL AND atualizou = 0
+                 AND d_milicents IS NULL)
+                OR
+                (observado_milicents IS NOT NULL AND atualizou = 1
+                 AND d_milicents IS NOT NULL)
+            )
+        );
+
+        CREATE TRIGGER monitor_passo_sem_update
+        BEFORE UPDATE ON monitor_passo
+        BEGIN
+            SELECT RAISE(ABORT,
+                'passo do monitor e imutavel: corrija com passo novo, como o estorno no ledger');
+        END;
+
+        CREATE TRIGGER monitor_passo_sem_delete
+        BEFORE DELETE ON monitor_passo
+        BEGIN
+            SELECT RAISE(ABORT,
+                'apagar passo e reiniciar o CUSUM por outro nome: passar no reteste nao apaga historico');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 3. O ALARME, LATCHED
+        --
+        -- `UNIQUE (assunto, nivel)` e o latch: o PRIMEIRO cruzamento vence,
+        -- e um segundo e absorvido pelo banco em vez de sobrescrever o
+        -- primeiro. Sem `UPDATE` e sem `DELETE`, ele sobrevive a reinicio do
+        -- servico porque nunca esteve em memoria.
+        --
+        -- R81: "toda invalidacao gera um registro com o motivo, e o registro
+        -- permanece na base". O `motivo` e NOT NULL e nao vazio.
+        -- ------------------------------------------------------------------
+        CREATE TABLE monitor_alarme (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            assunto TEXT NOT NULL REFERENCES monitor_limiar(assunto),
+
+            nivel TEXT NOT NULL CHECK (nivel IN ('alerta', 'critico')),
+
+            -- Quando cruzou, e com quanto. Os tres juntos porque "cruzou" sem
+            -- o limiar ao lado nao e conferivel por quem le depois.
+            t_ms         INTEGER NOT NULL,
+            s_milicents  INTEGER NOT NULL,
+            limiar_milicents INTEGER NOT NULL,
+
+            -- Barras puladas e maior lacuna ATE o alarme. "Nao alarmou" sobre
+            -- um periodo com metade dos dados ausentes e outra afirmacao - e
+            -- "alarmou" tambem.
+            barras_puladas INTEGER NOT NULL CHECK (barras_puladas >= 0),
+            maior_lacuna   INTEGER NOT NULL CHECK (maior_lacuna >= 0),
+
+            motivo TEXT NOT NULL CHECK (length(trim(motivo)) > 0),
+
+            registrado_em TEXT NOT NULL,
+
+            UNIQUE (assunto, nivel),
+
+            -- Cruzou de verdade. Um alarme com `S` abaixo do limiar seria um
+            -- alarme que ninguem consegue conferir depois.
+            CHECK (s_milicents >= limiar_milicents)
+        );
+
+        CREATE TRIGGER monitor_alarme_sem_update
+        BEFORE UPDATE ON monitor_alarme
+        BEGIN
+            SELECT RAISE(ABORT,
+                'alarme e latched: o primeiro cruzamento vence, e nao se reescreve');
+        END;
+
+        CREATE TRIGGER monitor_alarme_sem_delete
+        BEFORE DELETE ON monitor_alarme
+        BEGIN
+            SELECT RAISE(ABORT,
+                'saber que algo deixou de funcionar, e quando, e conhecimento tao valioso quanto o original (R81): o registro permanece');
+        END;
+
+        -- Cruzar o critico implica ter cruzado o alerta. Um salto grande
+        -- cruza os dois na MESMA barra, e nesse caso o monitor grava os dois,
+        -- alerta primeiro. Um historico com critico e sem alerta afirmaria o
+        -- impossivel - e o banco e quem recusa.
+        CREATE TRIGGER monitor_critico_exige_alerta
+        BEFORE INSERT ON monitor_alarme
+        WHEN NEW.nivel = 'critico'
+             AND NOT EXISTS (
+                 SELECT 1 FROM monitor_alarme
+                 WHERE assunto = NEW.assunto AND nivel = 'alerta'
+             )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'limiares aninhados: cruzar o critico implica ter cruzado o alerta, e o alerta precisa estar registrado antes');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 4. O RETESTE, EM JANELA POSTERIOR E DISJUNTA
+        --
+        -- Secao 8.8: ao cruzar o alerta, "um reteste e agendado". O `CHECK`
+        -- contra o instante do alarme e o que impede o reteste de reusar as
+        -- barras que produziram o alarme - mesma regra que calibracao e
+        -- revalidacao ja seguem (ADR 0027).
+        -- ------------------------------------------------------------------
+        CREATE TABLE monitor_reteste (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            alarme_id INTEGER NOT NULL UNIQUE REFERENCES monitor_alarme(id),
+
+            de_ms             INTEGER NOT NULL,
+            ate_ms_exclusive  INTEGER NOT NULL,
+
+            agendado_em TEXT NOT NULL,
+
+            CHECK (ate_ms_exclusive > de_ms)
+        );
+
+        CREATE TRIGGER monitor_reteste_e_posterior
+        BEFORE INSERT ON monitor_reteste
+        WHEN NEW.de_ms <= (SELECT t_ms FROM monitor_alarme WHERE id = NEW.alarme_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o reteste usa apenas barras POSTERIORES ao alarme: reusar as barras que alarmaram e a mesma olhada duas vezes');
+        END;
+
+        CREATE TRIGGER monitor_reteste_sem_update
+        BEFORE UPDATE ON monitor_reteste
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela de reteste e selada: mover a janela depois e escolher o periodo olhando o resultado');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

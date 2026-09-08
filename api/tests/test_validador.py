@@ -519,23 +519,61 @@ def test_quarentena_e_alcancavel_como_estado(conn: sqlite3.Connection) -> None:
     assert estados.atual(conn, hid).estado == "em_quarentena"
 
 
-def test_nada_na_0b_promove_para_conhecimento_validado() -> None:
-    """Quem satisfaz a quarentena é o forward, e o forward é 0C.
+# Quem pode CITAR `conhecimento_validado` sem promover para ele, com o motivo.
+#
+# A lista existe porque a guarda original proibia a PALAVRA, e o que ela quer
+# proibir é a PROMOÇÃO. O incremento 20 trouxe o primeiro leitor legítimo: §8.8
+# monitora "conhecimento em uso", e para saber quem está em uso é preciso
+# perguntar quem está nesse estado. Ler não é promover.
+#
+# Afiada, e não afrouxada — como `test_o_estado_do_grafo_nao_e_persistido` foi
+# no incremento 10: a exceção é explícita, tem motivo escrito, e a segunda
+# metade do teste confere que quem está nela não usa o estado como ALVO de
+# transição.
+PODEM_LER_CONHECIMENTO_VALIDADO: dict[str, str] = {
+    "monitoramento/monitor.py": (
+        "§8.8 monitora conhecimento EM USO, e `conhecimento_em_uso` lê a view"
+        " derivada para saber quem está nesse estado. Ele nunca é alvo de"
+        " transição aqui: o monitor só move para `em_suspeita` e `invalidado`"
+    ),
+}
 
-    A transição existe; nenhum caminho de código da 0B a dispara. Se algum
-    dispusesse, a 0B estaria promovendo conhecimento sem evidência futura —
-    exatamente o que §8.5 reserva para a 0C.
+
+def test_nada_promove_para_conhecimento_validado() -> None:
+    """Quem satisfaz a quarentena é o forward, e nada no código o dispara.
+
+    A transição existe; nenhum caminho de código a dispara. Se algum
+    dispusesse, estaríamos promovendo conhecimento sem evidência futura —
+    exatamente o que §8.5 reserva para a 0C, e o que a 0C decidiu não fazer
+    (ADR 0034: nenhuma candidata admitida).
     """
-    infratores = [
-        str(a.relative_to(APP))
+    citam = [
+        str(a.relative_to(APP)).replace("\\", "/")
         for a in sorted(APP.rglob("*.py"))
         if a.name != "migrations.py"
         and "conhecimento_validado" in a.read_text(encoding="utf-8")
     ]
+    infratores = [c for c in citam if c not in PODEM_LER_CONHECIMENTO_VALIDADO]
     assert not infratores, (
-        "código da 0B promovendo para conhecimento validado: "
-        + "; ".join(infratores)
+        "código promovendo para conhecimento validado: " + "; ".join(infratores)
     )
+
+    # A guarda não pode virar uma lista que perdoa tudo: quem está nela é
+    # conferido de novo, e agora pelo que importa — o estado nunca aparece
+    # como ALVO de uma transição.
+    for arquivo, _motivo in PODEM_LER_CONHECIMENTO_VALIDADO.items():
+        caminho = APP / arquivo
+        assert caminho.exists(), f"exceção aponta para arquivo inexistente: {arquivo}"
+        texto = caminho.read_text(encoding="utf-8")
+        assert "conhecimento_validado" in texto, (
+            f"{arquivo} está na lista de exceções e não cita o estado:"
+            " exceção morta é exceção que perdoa alguém no futuro sem decisão"
+        )
+        for alvo in ('para="conhecimento_validado"',
+                     "para='conhecimento_validado'"):
+            assert alvo not in texto, (
+                f"{arquivo} usa conhecimento_validado como ALVO de transição"
+            )
 
 
 def test_a_maquina_inteira_da_secao_8_1_esta_no_banco(

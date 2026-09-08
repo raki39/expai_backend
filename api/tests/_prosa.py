@@ -17,7 +17,7 @@ contra `contrato.condicoes_da_config`, e em `agente_estado` contra
 `sql_sem_prosa` mantem literais de UMA LINHA, porque o SQL deste projeto vive
 neles: remove-los deixaria a guarda cega para o que ela procura.
 
-`codigo_sem_prosa` (em `tests/test_estatistica.py`) remove TODO literal, porque
+`codigo_sem_prosa` remove TODO literal, porque
 lá o alvo e uma palavra que pode aparecer em texto qualquer. Sao objetivos
 opostos, e trocar um pelo outro cega uma das duas guardas.
 """
@@ -44,6 +44,31 @@ def sql_sem_prosa(arquivo: pathlib.Path) -> str:
             if tok.type == tokenize.COMMENT:
                 continue
             if tok.type == tokenize.STRING and tok.string.startswith(TRIPLAS):
+                continue
+            pedacos.append(tok.string)
+    return " ".join(pedacos)
+
+
+def codigo_sem_prosa(arquivo: pathlib.Path) -> str:
+    """O codigo do arquivo, sem comentarios e sem literais de texto NENHUM.
+
+    Existe porque a primeira versao da guarda de separacao acusou as proprias
+    docstrings deste projeto: elas mencionam "credito" exatamente para
+    explicar por que credito nao entra na estatistica.
+
+    Uma guarda que proibe a palavra proibe tambem a explicacao de por que a
+    palavra e proibida - e ai a saida e apagar o comentario, que e a pior das
+    correcoes possiveis. O que se quer proibir e o **codigo**.
+
+    Morava em `tests/test_estatistica.py` e veio para ca no incremento 20:
+    este arquivo ja dizia, na propria docstring, que as duas funcoes sao um
+    par - e um par declarado com as metades em arquivos diferentes e a forma
+    do defeito que ele mesmo descreve.
+    """
+    pedacos: list[str] = []
+    with arquivo.open("rb") as f:
+        for tok in tokenize.tokenize(f.readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING):
                 continue
             pedacos.append(tok.string)
     return " ".join(pedacos)

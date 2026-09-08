@@ -35,11 +35,14 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from typing import TypeVar
 
 # Os valores que o ADR 0027 fixou.
 Z_95_UNILATERAL = 1.645
 Z_95_BILATERAL = 1.96
 K_QUANTIL_P10 = 2.92
+T = TypeVar("T", int, float)
+
 REPETICOES = 2_000
 
 # Semente propria, para que o limite inferior seja reproduzivel (regra 13).
@@ -245,6 +248,39 @@ class IntervaloDoQuantil:
     tau: Tau
 
 
+def reamostrar_por_blocos(
+    serie: list[T], n_saida: int, bloco: int, rng: random.Random
+) -> list[T]:
+    """Uma replica do bootstrap ESTACIONARIO de Politis-Romano.
+
+    A cada passo, continua o bloco corrente com probabilidade `1 - 1/b` ou
+    salta para um indice sorteado com probabilidade `1/b`, circularmente.
+    **Blocos contiguos** e o que preserva a dependencia que o embaralhamento
+    simples destruiria - e destruir a dependencia daria intervalo estreito
+    demais, na direcao de aprovar.
+
+    **Uma definicao, num lugar so.** Ela morava dentro de
+    `limite_inferior_do_quantil` e o incremento 20 passou a precisar dela para
+    calibrar o limiar do CUSUM. Reescrever o reamostrador la seria a forma
+    exata do defeito que `ultimo_run_do_agente` ja custou: dois lugares com a
+    mesma consulta, um deles consertado.
+
+    Generica no tipo de propósito: a serie do quantil vem em `float` e a do
+    CUSUM em `int` (milicents), e o reamostrador nao tem opiniao sobre isso.
+    """
+    prob_salto = 1.0 / max(1, bloco)
+    n = len(serie)
+    idx = rng.randrange(n)
+    saida: list[T] = []
+    for _ in range(n_saida):
+        saida.append(serie[idx])
+        if rng.random() < prob_salto:
+            idx = rng.randrange(n)
+        else:
+            idx = (idx + 1) % n
+    return saida
+
+
 def limite_inferior_do_quantil(
     x: list[float], p: float = 0.10, *,
     confianca: float = 0.95,
@@ -274,20 +310,11 @@ def limite_inferior_do_quantil(
     serie = [float(v) for v in x]
     t = tau_hac(serie)
     b = bloco if bloco is not None else comprimento_de_bloco(serie)
-    prob_salto = 1.0 / max(1, b)
 
     rng = random.Random(semente)
     quantis: list[float] = []
     for _ in range(repeticoes):
-        idx = rng.randrange(n)
-        amostra = []
-        for _ in range(n):
-            amostra.append(serie[idx])
-            if rng.random() < prob_salto:
-                idx = rng.randrange(n)
-            else:
-                idx = (idx + 1) % n
-        quantis.append(quantil(amostra, p))
+        quantis.append(quantil(reamostrar_por_blocos(serie, n, b, rng), p))
 
     return IntervaloDoQuantil(
         ponto=quantil(serie, p),
