@@ -506,3 +506,439 @@ def test_avaliar_SEM_limiar_congelado_e_recusado(conn):
     with pytest.raises(admissao.LimiarNaoCongelado) as e:
         admissao.exigir_limiares(conn, 999)
     assert "ANTES do primeiro tick" in str(e.value)
+
+
+# ===========================================================================
+# CRITÉRIO 3: o in-sample vem do run CONGELADO, nunca recalculado (R74)
+# ===========================================================================
+
+
+def _regra(timeframe: str = "15m", lenta: int = 200):
+    from app.regra.schema import CondicoesValidade, CruzamentoMedias, Regra
+
+    return Regra(
+        params=CruzamentoMedias(rapida=50, lenta=lenta),
+        position_fraction_bps=8_000,
+        stop_loss_bps=2_000,
+        condicoes_validade=CondicoesValidade(
+            venue="binance", symbol="BTCUSDT", timeframe=timeframe,
+            fidelity_level=1, regimes_elegiveis=("vol_baixa", "vol_alta"),
+            regimes_minimos=2, regime_permanencia_barras=672,
+        ),
+    )
+
+
+@pytest.fixture
+def cenario_congelavel(conn: sqlite3.Connection):
+    """Uma hipótese e um run com dataset, prontos para congelar."""
+    from app.ledger import livro
+    from app.maos_rapidas import baselines, executor
+    from app.regra import registro
+    from tests.test_creditos import _hipotese
+    from tests.test_maos_rapidas import precos_passeio
+    from tests.test_simulador import criar_dataset
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    versao = conn.execute(
+        "SELECT MIN(id) AS id FROM config_version"
+    ).fetchone()["id"]
+    run_id, _ = livro.abrir_run(
+        conn, config_version_id=int(versao),
+        seed_capital_usd_cents=100_000, agent_id="in-sample",
+    )
+    regra = _regra()
+    rule_id = registro.registrar(conn, regra)
+    executor.rodar(
+        conn, run_id=run_id, dataset_id=dataset_id, regra=regra,
+        rule_id=rule_id, config=baselines.regra_b3.__globals__["ExperimentConfig"](),
+    )
+    livro.encerrar_run(conn, run_id, "concluido")
+    hid = _hipotese(conn, run_id, hash_="h-congelar")
+    return {"hypothesis_id": hid, "run_id": run_id, "regra": regra}
+
+
+def test_o_in_sample_e_CONGELADO_com_os_sete_campos(conn, cenario_congelavel):
+    """Um id sozinho aponta para uma linha que pode ter sido reescrita ao
+    redor. O que amarra o resultado é o CONJUNTO."""
+    from app.quarentena import congelado as cong
+
+    c = cong.congelar(
+        conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+        run_id=cenario_congelavel["run_id"], regra=cenario_congelavel["regra"],
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=100_000,
+    )
+    assert c.run_digest and len(c.run_digest) == 64
+    assert c.content_hash == "h-congelar"
+    assert "cruzamento_medias" in c.abordagem_assinatura
+    assert c.abordagem_versao == cong.ASSINATURA_VERSAO
+    assert "+" in c.identidade_executavel, "config_hash + perfil"
+    assert (c.dataset_sha256 is None) != (c.snapshot_sha256 is None), (
+        "exatamente uma fonte, nunca as duas"
+    )
+    assert c.timeframe == "15m"
+
+
+def test_o_congelado_NAO_SE_SUBSTITUI_por_um_run_mais_favoravel(
+    conn, cenario_congelavel
+):
+    """A palavra do usuário: não pode ser substituído depois por outro mais
+    favorável. Trocar a base de comparação é trocar o critério."""
+    from app.ledger import livro
+    from app.quarentena import congelado as cong
+
+    cong.congelar(
+        conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+        run_id=cenario_congelavel["run_id"], regra=cenario_congelavel["regra"],
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=100_000,
+    )
+    versao = conn.execute(
+        "SELECT MIN(id) AS id FROM config_version"
+    ).fetchone()["id"]
+    outro, _ = livro.abrir_run(
+        conn, config_version_id=int(versao),
+        seed_capital_usd_cents=100_000, agent_id="in-sample-melhor",
+    )
+    livro.encerrar_run(conn, outro, "concluido")
+
+    with pytest.raises(cong.JaCongelado) as e:
+        cong.congelar(
+            conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+            run_id=outro, regra=cenario_congelavel["regra"],
+            metrica_primaria="excesso_sobre_b3_cents",
+            metrica_valor_cents=999_999,
+        )
+    assert "Nao se substitui" in str(e.value) or "nao se substitui" in str(e.value).lower()
+    assert "mais favoravel" in str(e.value)
+
+
+def test_o_congelado_e_IMUTAVEL_no_banco(conn, cenario_congelavel):
+    from app.quarentena import congelado as cong
+
+    cong.congelar(
+        conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+        run_id=cenario_congelavel["run_id"], regra=cenario_congelavel["regra"],
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=100_000,
+    )
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        conn.execute(
+            "UPDATE quarentena_congelado SET metrica_valor_cents = 1"
+        )
+    assert "olhando o resultado" in str(e.value)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM quarentena_congelado")
+
+
+def test_conferir_RECUSA_divergencia_de_identidade(conn, cenario_congelavel):
+    """Config ou perfil de calibração mudaram, e o preço executado com eles.
+
+    Não é aviso: é recusa. Avaliar com divergência compararia o forward contra
+    um in-sample que não é o que gerou a hipótese.
+    """
+    from app.calibracao import perfil as perfil_mod
+    from app.quarentena import congelado as cong
+
+    cong.congelar(
+        conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+        run_id=cenario_congelavel["run_id"], regra=cenario_congelavel["regra"],
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=100_000,
+    )
+    assert cong.conferir(conn, cenario_congelavel["hypothesis_id"])
+
+    # Um perfil aparece no run DEPOIS do congelamento. `run` é imutável, então
+    # o caminho normal não permite isso - por SQL cru, para exercitar a
+    # conferência.
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000,
+        overrides=[perfil_mod.Override("vol_baixa", 1_674, 500, 163)],
+    )
+    conn.execute("DROP TRIGGER IF EXISTS run_sem_update")
+    conn.execute(
+        "UPDATE run SET calibracao_perfil_hash = ? WHERE id = ?",
+        (p.hash, cenario_congelavel["run_id"]),
+    )
+    with pytest.raises(cong.DivergenciaDoCongelado) as e:
+        cong.conferir(conn, cenario_congelavel["hypothesis_id"])
+    assert "identidade_executavel" in str(e.value)
+    assert "preco executado" in str(e.value)
+
+
+def test_conferir_RECUSA_versao_de_assinatura_diferente(
+    conn, cenario_congelavel, monkeypatch
+):
+    """Se o esquema da assinatura mudar, "cruzamento_medias com stop" passa a
+    nomear outra coisa - e o congelado sobreviveria calado."""
+    from app.quarentena import congelado as cong
+
+    cong.congelar(
+        conn, hypothesis_id=cenario_congelavel["hypothesis_id"],
+        run_id=cenario_congelavel["run_id"], regra=cenario_congelavel["regra"],
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=100_000,
+    )
+    monkeypatch.setattr(cong, "ASSINATURA_VERSAO", 2)
+    with pytest.raises(cong.DivergenciaDoCongelado) as e:
+        cong.conferir(conn, cenario_congelavel["hypothesis_id"])
+    assert "abordagem_versao" in str(e.value)
+    assert "nao descreve mais o mecanismo" in str(e.value)
+
+
+def test_conferir_SEM_congelado_recusa_em_vez_de_recalcular(conn):
+    from app.quarentena import congelado as cong
+
+    with pytest.raises(cong.DivergenciaDoCongelado) as e:
+        cong.conferir(conn, 999)
+    assert "ANTES do primeiro tick" in str(e.value)
+
+
+def test_a_avaliacao_NAO_recalcula_o_in_sample():
+    """R74, como guarda de código: o valor vem do congelado.
+
+    `veredito.avaliar` recebe `metrica_in_sample_cents` como MEDIÇÃO - ela não
+    tem conexão, não tem `conn` e não consegue recalcular nada.
+    """
+    import inspect
+
+    from app.quarentena import veredito
+
+    assinatura = inspect.signature(veredito.avaliar)
+    assert set(assinatura.parameters) == {"m", "lim"}
+    assert "conn" not in inspect.getsource(veredito.avaliar)
+    assert "sqlite3" not in inspect.getsource(veredito)
+
+
+# ===========================================================================
+# CRITÉRIO 5: timeframe cria hipótese nova, e NÃO abordagem nova (R75)
+# ===========================================================================
+
+
+def test_trocar_o_TIMEFRAME_cria_hipotese_nova():
+    """`content_hash` cobre `condicoes_validade`, e o timeframe está lá."""
+    a = _regra(timeframe="15m")
+    b = _regra(timeframe="1h")
+    assert a.hash() != b.hash(), (
+        "mudar o timeframe tem de produzir hipótese nova, com crédito novo"
+    )
+
+
+def test_trocar_o_timeframe_NAO_cria_abordagem_nova():
+    """A distinção que o usuário fixou.
+
+    O mecanismo é o mesmo: cruzamento de médias com stop. Mudar a grade em que
+    ele roda muda a hipótese - não muda o que a estratégia FAZ.
+    """
+    a = abordagem_mod.assinatura_de_regra(_regra(timeframe="15m"))
+    b = abordagem_mod.assinatura_de_regra(_regra(timeframe="1h"))
+    assert a == b, (
+        "o timeframe entrou na assinatura estrutural: uma estratégia rejeitada "
+        "trocaria só a grade e entraria como abordagem nova"
+    )
+    assert "timeframe" not in a and "15m" not in a and "1h" not in a
+
+
+def test_a_rejeitada_NAO_entra_trocando_so_o_TIMEFRAME(conn):
+    """O disfarce que a garantia 1 e o critério 5 fecham juntos.
+
+    Ela precisa voltar à 0B, mantendo a linhagem e a contabilização das
+    tentativas - e não reentrar aqui com outra grade.
+    """
+    hid = _hipotese_minima(conn, "h-tf")
+    r15 = _regra(timeframe="15m")
+    abordagem_mod.rejeitar(
+        conn,
+        params=r15.params.model_dump(mode="json"),
+        extras={"position_fraction_bps": r15.position_fraction_bps,
+                "stop_loss_bps": r15.stop_loss_bps},
+        hypothesis_id=hid, motivo="Portao B: cinco criterios independentes",
+    )
+
+    r1h = _regra(timeframe="1h")
+    with pytest.raises(abordagem_mod.AbordagemRejeitada) as e:
+        abordagem_mod.exigir_nao_rejeitada(
+            conn,
+            params=r1h.params.model_dump(mode="json"),
+            extras={"position_fraction_bps": r1h.position_fraction_bps,
+                    "stop_loss_bps": r1h.stop_loss_bps},
+        )
+    assert "DESCARTADA" in str(e.value)
+    assert "0B" in str(e.value)
+
+
+# ===========================================================================
+# Garantia 4: a assinatura é do SISTEMA, e o agente não a fabrica
+# ===========================================================================
+
+
+def test_a_assinatura_vem_da_REGRA_VALIDADA_e_nao_de_um_dict_livre():
+    """O agente não pode declarar campo a mais: `extra="forbid"` na família e
+    na regra, e `Params` é união DISCRIMINADA sobre o catálogo fechado."""
+    import pydantic
+    import pytest as _pytest
+
+    from app.regra.schema import CruzamentoMedias, Regra
+
+    with _pytest.raises(pydantic.ValidationError):
+        CruzamentoMedias(rapida=50, lenta=200, campo_inventado=1)
+    with _pytest.raises(pydantic.ValidationError):
+        Regra(
+            params=CruzamentoMedias(rapida=50, lenta=200),
+            condicoes_validade=_regra().condicoes_validade,
+            campo_inventado=1,
+        )
+
+
+def test_familia_FORA_do_catalogo_nao_fabrica_abordagem(conn):
+    """Sem isto, qualquer texto novo produziria uma abordagem nova - e
+    "abordagem nova" é o que o bloqueio existe para impedir que se fabrique."""
+    with pytest.raises(abordagem_mod.FamiliaDesconhecida) as e:
+        abordagem_mod.assinatura_de({"familia": "tese_genial_nova", "x": 1})
+    assert "catalogo fechado" in str(e.value)
+
+
+def test_o_catalogo_da_abordagem_bate_com_o_SCHEMA():
+    """Duas listas fechadas em arquivos diferentes divergem.
+
+    O incremento 11b registrou isso com as categorias de parada: a lista do
+    Python e a do gatilho comparadas por teste, porque a divergência derruba o
+    run com `IntegrityError` DEPOIS de o dinheiro ter saído.
+    """
+    from app.regra.schema import BandaDesvio, BreakoutCanal, CruzamentoMedias
+
+    do_schema = {
+        m.model_fields["familia"].default
+        for m in (CruzamentoMedias, BandaDesvio, BreakoutCanal)
+    }
+    assert set(abordagem_mod.FAMILIAS_DO_CATALOGO) == do_schema
+
+
+def test_campo_declarado_e_NAO_USADO_nao_fabrica_abordagem_nova():
+    """`stop_loss_bps=None` é ausência, e o schema não aceita zero.
+
+    Então não existe "declarado mas não usado" com valor neutro - a única
+    diferença possível é presença contra ausência, e essa É de mecanismo.
+    """
+    import pydantic
+    import pytest as _pytest
+
+    from app.regra.schema import CruzamentoMedias, Regra
+
+    with _pytest.raises(pydantic.ValidationError):
+        Regra(
+            params=CruzamentoMedias(rapida=50, lenta=200),
+            stop_loss_bps=0,
+            condicoes_validade=_regra().condicoes_validade,
+        )
+
+    com = abordagem_mod.assinatura_de_regra(_regra())
+    sem = abordagem_mod.assinatura_de_regra(
+        Regra(
+            params=CruzamentoMedias(rapida=50, lenta=200),
+            position_fraction_bps=8_000,
+            condicoes_validade=_regra().condicoes_validade,
+        )
+    )
+    assert com != sem, "tirar o stop muda o MECANISMO, e não só o valor"
+    assert "stop_loss_bps" in com and "stop_loss_bps" not in sem
+
+
+# ===========================================================================
+# Garantia 5 do ADR 0034: o relatório DECLARA a ausência
+# ===========================================================================
+
+CABECALHO_Q = {"Authorization": "Bearer token-de-teste-0a"}
+
+
+def test_o_relatorio_DECLARA_que_nenhuma_candidata_foi_admitida(client):
+    """Uma ausência que ninguém declara vira silêncio, e silêncio é lido como
+    esquecimento."""
+    r = client.get("/api/relatorio/quarentena", headers=CABECALHO_Q)
+    assert r.status_code == 200
+    c = r.json()
+    assert c["existe"] is True
+    assert c["nenhuma_candidata_admitida"] is True
+    assert c["candidatas_admitidas"] == 0
+    assert "ADR 0034" in c["decisao"]
+    assert "Portao B rejeitou" in c["por_que"]
+
+
+def test_o_relatorio_diz_que_o_B3_foi_SO_controle_negativo(client):
+    r = client.get("/api/relatorio/quarentena", headers=CABECALHO_Q)
+    b3 = r.json()["b3"]
+    assert b3["papel"] == "CONTROLE NEGATIVO do proprio encanamento"
+    assert b3["tem_pre_registro"] is False
+    assert b3["consome_credito"] is False
+    assert b3["entra_em_familia"] is False
+    assert b3["conta_no_dsr"] is False
+    assert b3["pode_ser_promovido"] is False
+    assert "estrutural" in b3["fronteira"]
+
+
+def test_o_relatorio_lista_o_MOTIVO_de_cada_exclusao(client, conn):
+    hid = _hipotese_minima(conn, "h-relatorio")
+    r15 = _regra()
+    abordagem_mod.rejeitar(
+        conn,
+        params=r15.params.model_dump(mode="json"),
+        extras={"position_fraction_bps": r15.position_fraction_bps,
+                "stop_loss_bps": r15.stop_loss_bps},
+        hypothesis_id=hid,
+        motivo="Portao B: cinco criterios independentes",
+    )
+    corpo = client.get("/api/relatorio/quarentena", headers=CABECALHO_Q).json()
+    rejeitadas = corpo["abordagens_rejeitadas"]
+    assert len(rejeitadas) == 1
+    a = rejeitadas[0]
+    assert "cruzamento_medias" in a["assinatura"]
+    assert "cinco criterios" in a["motivo"]
+    assert a["bloqueia_variacao_parametrica"] is True
+    assert a["bloqueia_variacao_textual"] is True
+    assert a["bloqueia_troca_de_timeframe"] is True
+    assert "0B" in a["volta_legitima"]
+
+
+def test_a_declaracao_e_DERIVADA_de_consulta_e_nao_uma_frase(client, conn):
+    """Se fosse frase, sobreviveria intacta ao dia em que uma candidata
+    entrasse - e é o mesmo argumento das onze condições do Portão A."""
+    from app.quarentena import congelado as cong
+
+    antes = client.get(
+        "/api/relatorio/quarentena", headers=CABECALHO_Q
+    ).json()
+    assert antes["nenhuma_candidata_admitida"] is True
+
+    # Um congelado aparece (só a suíte consegue: `admitir` recusa sempre).
+    from app.ledger import livro
+    from app.maos_rapidas import baselines, executor
+    from app.regra import registro
+    from tests.test_creditos import _hipotese
+    from tests.test_maos_rapidas import precos_passeio
+    from tests.test_simulador import criar_dataset
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    versao = conn.execute(
+        "SELECT MIN(id) AS id FROM config_version"
+    ).fetchone()["id"]
+    run_id, _ = livro.abrir_run(
+        conn, config_version_id=int(versao),
+        seed_capital_usd_cents=100_000, agent_id="in-sample-declaracao",
+    )
+    regra = _regra()
+    executor.rodar(
+        conn, run_id=run_id, dataset_id=dataset_id, regra=regra,
+        rule_id=registro.registrar(conn, regra),
+        config=baselines.regra_b3.__globals__["ExperimentConfig"](),
+    )
+    livro.encerrar_run(conn, run_id, "concluido")
+    hid = _hipotese(conn, run_id, hash_="h-declaracao")
+    cong.congelar(
+        conn, hypothesis_id=hid, run_id=run_id, regra=regra,
+        metrica_primaria="excesso_sobre_b3_cents", metrica_valor_cents=1,
+    )
+
+    depois = client.get(
+        "/api/relatorio/quarentena", headers=CABECALHO_Q
+    ).json()
+    assert depois["nenhuma_candidata_admitida"] is False, (
+        "a declaração não acompanhou o dado: ela é frase, e não consulta"
+    )
+    assert depois["candidatas_admitidas"] == 1
+    assert depois["veredito"] is None
+    assert depois["conferencia_do_congelado"][0]["confere"] is True

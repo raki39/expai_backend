@@ -13,6 +13,7 @@ from ...dataset import loader as dataset_loader
 from ...relatorio import montar as relatorio_montar
 from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
+from ...relatorio import quarentena as relatorio_quarentena
 from ...relatorio import portao_b as relatorio_portao_b
 from ...relatorio import reprodutibilidade as relatorio_reprodutibilidade
 from ...relatorio import texto as relatorio_texto
@@ -67,6 +68,26 @@ router = APIRouter(prefix="/api/relatorio", tags=["relatorio"])
 def relatorio(request: Request, run_id: int | None = None) -> dict[str, Any]:
     """O relatorio de fechamento em JSON. `run_id` ausente usa o ultimo run."""
     return relatorio_montar.montar(_conn(request), run_id)
+
+
+@router.get("/quarentena")
+def quarentena(request: Request) -> dict[str, Any]:
+    """O estado da quarentena, e a AUSENCIA declarada (ADR 0034, garantia 5).
+
+    Rota propria porque a pergunta e propria: o `/api/relatorio` fecha a 0A e
+    o `/portao-a` pergunta se o protocolo rejeita defeito. Esta pergunta "o
+    que entrou no forward, e por que nao entrou mais nada" - e juntar as tres
+    faria um relatorio de fase antiga responder pela fase corrente, que e o
+    defeito que `/api/health` ja cometeu com o campo `fase`.
+    """
+    conn = _conn(request)
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        return {"existe": False, "motivo": "configuracao nao inicializada"}
+    return {
+        "existe": True,
+        **relatorio_quarentena.montar(conn, config_version_id=atual.id),
+    }
 
 
 @router.get("/portao-a")
@@ -284,6 +305,11 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # export com o resultado e sem a calibracao mostraria o numero sem a
         # regua que o sustenta.
         ("calibracao", "/api/calibracao", lambda: calibracao_estado(request)),
+        # `quarentena` ENTRA porque a garantia 5 do ADR 0034 e sobre RELATO:
+        # uma ausencia que ninguem declara vira silencio, e silencio e lido
+        # como esquecimento. Um export sem ela mostraria a fase sem a decisao
+        # que definiu o que ela pode concluir.
+        ("quarentena", "/api/relatorio/quarentena", lambda: quarentena(request)),
         ("ledger", "/api/ledger", lambda: ledger_estado(request)),
         ("ledger_transacoes", "/api/ledger/transacoes",
          lambda: ledger_transacoes(request, limite=200)),

@@ -48,6 +48,15 @@ log = logging.getLogger(__name__)
 # entra na assinatura; o conteudo, nunca.
 CAMPOS_DE_FORMA = ("position_fraction_bps", "stop_loss_bps")
 
+# O catalogo FECHADO da D5. Nao e uma lista solta: ela e conferida contra
+# o schema por teste, para que uma familia nova no catalogo quebre aqui em
+# vez de passar como abordagem desconhecida.
+FAMILIAS_DO_CATALOGO = ("cruzamento_medias", "banda_desvio", "breakout_canal")
+
+
+class FamiliaDesconhecida(Exception):
+    """A familia nao esta no catalogo fechado da D5."""
+
 
 class AbordagemRejeitada(Exception):
     """A assinatura casa com uma abordagem ja descartada.
@@ -71,6 +80,39 @@ def _agora() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def forma_de_regra(regra) -> dict:
+    """A forma a partir da `Regra` VALIDADA. Entrada canonica.
+
+    **O agente nao pode fabricar assinatura**, e a garantia e do schema, nao
+    desta funcao:
+
+    - `Params` e uniao DISCRIMINADA sobre tres familias fechadas (D5), cada
+      uma com `extra="forbid"` e campos fixos. Campo a mais e RECUSADO pelo
+      pydantic antes de chegar aqui;
+    - `Regra` tambem tem `extra="forbid"`;
+    - `stop_loss_bps` e `None` ou `>= 1`. Nao existe "declarado e nao usado"
+      com valor zero - o schema nao aceita.
+
+    Entao os graus de liberdade do agente sao: qual familia (enum de tres), os
+    VALORES dos parametros, e se o stop existe. A assinatura pega exatamente o
+    primeiro e o terceiro, que sao o mecanismo, e ignora o segundo.
+    """
+    return forma_da_regra(
+        regra.params.model_dump(mode="json"),
+        {
+            "position_fraction_bps": regra.position_fraction_bps,
+            "stop_loss_bps": regra.stop_loss_bps,
+        },
+    )
+
+
+def assinatura_de_regra(regra) -> str:
+    """A assinatura a partir da `Regra` validada. **Use esta.**"""
+    return json.dumps(
+        forma_de_regra(regra), sort_keys=True, separators=(",", ":")
+    )
+
+
 def forma_da_regra(params: dict, extras: dict | None = None) -> dict:
     """A FORMA: a familia e quais campos estao em uso. Nunca os valores.
 
@@ -83,6 +125,17 @@ def forma_da_regra(params: dict, extras: dict | None = None) -> dict:
     """
     juntos = {**params, **(extras or {})}
     familia = str(juntos.get("familia") or juntos.get("family") or "")
+
+    # A FAMILIA E CONFERIDA contra o catalogo fechado da D5. Sem isto, um
+    # `params_json` com familia inventada produziria assinatura de uma
+    # abordagem que nao existe - e "abordagem nova" e exatamente o que o
+    # bloqueio da garantia 1 existe para impedir que alguem fabrique.
+    if familia and familia not in FAMILIAS_DO_CATALOGO:
+        raise FamiliaDesconhecida(
+            f"{familia!r} nao esta no catalogo fechado {FAMILIAS_DO_CATALOGO}. "
+            f"Assinatura de abordagem so se deriva de familia que existe - "
+            f"senao qualquer texto novo fabricaria uma abordagem nova"
+        )
 
     # Os parametros da FAMILIA entram por NOME, e nunca por valor: e o nome
     # que diz qual mecanismo esta em jogo (`rapida`/`lenta` e cruzamento de

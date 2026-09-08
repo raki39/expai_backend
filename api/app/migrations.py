@@ -3382,6 +3382,87 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        27,
+        "incremento 19: o in-sample congelado, com os sete campos",
+        """
+        -- ==================================================================
+        -- O IN-SAMPLE CONGELADO. Criterio 3 do incremento 19 (R74).
+        --
+        -- "O in-sample da comparacao e lido do run CONGELADO, nunca
+        -- recalculado."
+        --
+        -- E o motivo esta na palavra que o usuario usou: o run congelado nao
+        -- pode ser SUBSTITUIDO depois por outro mais favoravel. Sem esta
+        -- tabela, "o in-sample" seria uma consulta - e uma consulta devolve o
+        -- que existe HOJE, entao rodar o in-sample de novo com sorte melhor
+        -- mudaria a base de comparacao do forward sem ninguem decidir.
+        --
+        -- SETE CAMPOS, e nao so o `run_id`. Um id sozinho aponta para uma
+        -- linha que pode ter sido reescrita ao redor; o que amarra o
+        -- resultado e o CONJUNTO:
+        --
+        --   run_digest ............ o resultado economico daquele run
+        --   content_hash .......... a identidade do pre-registro
+        --   abordagem ............. o mecanismo, com a versao do esquema
+        --   identidade_executavel . config_hash + perfil de calibracao
+        --   fonte (dataset/snap) .. sobre que dado ele rodou
+        --   timeframe ............. em que grade
+        --
+        -- A avaliacao RECUSA divergencia em qualquer um deles. Recalcular em
+        -- silencio com o estado atual e o defeito que este projeto conta
+        -- dezoito vezes, e aqui ele valeria dinheiro.
+        -- ==================================================================
+        CREATE TABLE quarentena_congelado (
+            hypothesis_id INTEGER PRIMARY KEY REFERENCES hypothesis(id),
+
+            run_id     INTEGER NOT NULL REFERENCES run(id),
+            run_digest TEXT    NOT NULL,
+
+            content_hash TEXT NOT NULL,
+
+            abordagem_assinatura TEXT    NOT NULL REFERENCES abordagem(assinatura),
+            abordagem_versao     INTEGER NOT NULL,
+
+            identidade_executavel TEXT NOT NULL,
+
+            -- Exatamente UMA das duas. O run historico tem dataset; o run ao
+            -- vivo tem snapshot (ADR 0029), e os gatilhos da migracao 17 ja
+            -- impoem isso do lado do `run`.
+            dataset_sha256  TEXT,
+            snapshot_sha256 TEXT,
+
+            timeframe TEXT NOT NULL,
+
+            -- A metrica do in-sample, gravada com o resto. Sem ela a
+            -- comparacao teria de recalcular - que e exatamente o que R74
+            -- proibe.
+            metrica_primaria      TEXT    NOT NULL,
+            metrica_valor_cents   INTEGER NOT NULL,
+
+            congelado_em TEXT NOT NULL,
+
+            CHECK (
+                (dataset_sha256 IS NOT NULL AND snapshot_sha256 IS NULL)
+                OR (dataset_sha256 IS NULL AND snapshot_sha256 IS NOT NULL)
+            )
+        );
+
+        CREATE TRIGGER quarentena_congelado_sem_update
+        BEFORE UPDATE ON quarentena_congelado
+        BEGIN
+            SELECT RAISE(ABORT,
+                'in-sample congelado NAO se substitui: trocar por um run mais favoravel depois e escolher a base de comparacao olhando o resultado');
+        END;
+
+        CREATE TRIGGER quarentena_congelado_sem_delete
+        BEFORE DELETE ON quarentena_congelado
+        BEGIN
+            SELECT RAISE(ABORT,
+                'in-sample congelado NAO se apaga: apagar para recongelar e a mesma coisa que substituir');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
