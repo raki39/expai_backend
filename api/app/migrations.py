@@ -3266,6 +3266,122 @@ MIGRACOES: list[tuple[int, str, str]] = [
             REFERENCES calibracao_perfil(hash);
         """,
     ),
+    (
+        26,
+        "incremento 19: a abordagem como objeto, e os limiares congelados",
+        """
+        -- ==================================================================
+        -- A ABORDAGEM COMO OBJETO. ADR 0034, garantia 1.
+        --
+        -- `content_hash` pega a copia IDENTICA e nao pega a MAQUIADA: trocar
+        -- 50/200 por 50/210 produz hash diferente e a MESMA abordagem. Era o
+        -- unico bloqueio que existia, e ele nao bastava.
+        --
+        -- A `assinatura` e o MECANISMO sem os numeros: a familia do catalogo
+        -- fechado mais a forma da regra (quais campos estao em uso). O
+        -- `enunciado` fica FORA de proposito - reescrever a frase nao muda o
+        -- mecanismo, e foi exatamente o formato do controle de duplicacao
+        -- disfarcada que o Portao A barrou.
+        --
+        -- LINHAGEM: rejeitada uma vez, toda hipotese cuja assinatura casa com
+        -- ela herda o bloqueio. Nao e proibicao eterna - uma mudanca
+        -- realmente material de mecanismo volta como REPROJETO, passando
+        -- novamente pela 0B, e nunca entrando direto na 0C.
+        -- ==================================================================
+        CREATE TABLE abordagem (
+            assinatura TEXT PRIMARY KEY,
+
+            familia TEXT NOT NULL,
+            -- A forma da regra, em JSON canonico: quais campos estao em uso,
+            -- sem os VALORES deles. E o que distingue mecanismo de parametro.
+            forma_json TEXT NOT NULL,
+
+            estado TEXT NOT NULL CHECK (estado IN ('aberta', 'rejeitada')),
+
+            -- De onde veio a rejeicao. Nao e prosa: e a hipotese e o portao
+            -- que a reprovaram, para que "esta abordagem esta descartada"
+            -- tenha como ser conferido.
+            rejeitada_por_hypothesis_id INTEGER REFERENCES hypothesis(id),
+            rejeitada_em                TEXT,
+            motivo                      TEXT,
+
+            criado_em TEXT NOT NULL,
+
+            CHECK (
+                estado = 'aberta' OR (
+                    rejeitada_por_hypothesis_id IS NOT NULL
+                    AND rejeitada_em IS NOT NULL
+                    AND motivo IS NOT NULL
+                )
+            )
+        );
+
+        -- Apenas por acrescimo no que importa: uma abordagem pode ir de
+        -- `aberta` a `rejeitada`, e NUNCA o contrario. Reabrir uma abordagem
+        -- rejeitada e o disfarce que a garantia 1 existe para impedir - e a
+        -- volta legitima e um reprojeto pela 0B, com assinatura NOVA.
+        CREATE TRIGGER abordagem_nao_reabre
+        BEFORE UPDATE ON abordagem
+        BEGIN
+            SELECT CASE
+                WHEN OLD.estado = 'rejeitada' AND NEW.estado = 'aberta' THEN
+                    RAISE(ABORT, 'abordagem rejeitada NAO reabre: a volta legitima e um reprojeto pela 0B, com assinatura nova e pre-registro proprio')
+                WHEN OLD.assinatura <> NEW.assinatura OR OLD.familia <> NEW.familia
+                     OR OLD.forma_json <> NEW.forma_json THEN
+                    RAISE(ABORT, 'a assinatura de uma abordagem e a identidade dela: mudar equivale a inventar que era outra')
+            END;
+        END;
+
+        CREATE TRIGGER abordagem_sem_delete
+        BEFORE DELETE ON abordagem
+        BEGIN
+            SELECT RAISE(ABORT,
+                'abordagem e apenas por acrescimo: apagar a rejeitada devolveria a porta que a rejeicao fechou');
+        END;
+
+        -- ==================================================================
+        -- OS LIMIARES DA QUARENTENA, CONGELADOS. ADR 0034, garantia 4.
+        --
+        -- Congelados antes do primeiro tick pelo mesmo motivo que os cortes de
+        -- regime (ADR 0026): com so o B3 rodando, NADA testa os limiares na
+        -- direcao positiva, e um afrouxamento feito "para ver o pipeline
+        -- funcionar" FICA - a proxima candidata de verdade entraria numa regua
+        -- ja cedida.
+        --
+        -- Gravados UMA vez. O `UNIQUE` e quem faz disso estrutura.
+        -- ==================================================================
+        CREATE TABLE quarentena_limiar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            config_version_id INTEGER NOT NULL REFERENCES config_version(id),
+
+            -- Nenhum limiar de dias em codigo de decisao (R73): eles vivem
+            -- aqui, e o codigo os LE.
+            periodo_minimo_barras   INTEGER NOT NULL CHECK (periodo_minimo_barras > 0),
+            regimes_minimos         INTEGER NOT NULL CHECK (regimes_minimos >= 1),
+            magnitude_minima_ppm    INTEGER NOT NULL CHECK (magnitude_minima_ppm > 0),
+            reserva_maxima_barras   INTEGER NOT NULL CHECK (reserva_maxima_barras > 0),
+
+            congelado_em TEXT NOT NULL,
+
+            UNIQUE (config_version_id)
+        );
+
+        CREATE TRIGGER quarentena_limiar_sem_update
+        BEFORE UPDATE ON quarentena_limiar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'limiar da quarentena e congelado: reduzi-lo para o pipeline promover algo e ajustar a regua ao resultado');
+        END;
+
+        CREATE TRIGGER quarentena_limiar_sem_delete
+        BEFORE DELETE ON quarentena_limiar
+        BEGIN
+            SELECT RAISE(ABORT,
+                'limiar da quarentena e congelado: apagar para regravar e a mesma coisa que reduzir');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
