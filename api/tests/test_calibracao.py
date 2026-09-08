@@ -1710,3 +1710,71 @@ def test_o_CACHE_ja_inclui_o_perfil_POR_CONSTRUCAO(conn, cfg):
         "se o contexto deixar de derivar o custo da config, este teste tem de "
         "ser revisto junto"
     )
+
+
+def test_a_REANCORAGEM_nao_perde_o_perfil_de_calibracao(conn, cfg):
+    """Achado antes de a primeira reancoragem pós-ADR-0033 acontecer.
+
+    "Reancorar não muda nenhum valor" inclui o perfil - e ele não está no
+    payload, vive numa coluna. Uma reancoragem que o deixasse de fora
+    produziria versão nova com `NULL`, e o simulador voltaria à BASE em todo
+    regime **sem avisar**.
+
+    Risco zero no momento em que foi achado: não há perfil em produção porque
+    a calibração ainda não rodou. Depois do piloto seria perda silenciosa.
+    """
+    from app.calibracao import perfil as perfil_mod
+    from app.config import service as config_service
+    from app.settings import get_settings
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000,
+        overrides=[perfil_mod.Override("vol_baixa", 1_674, 500, 163)],
+    )
+    v2 = config_service.criar_versao(
+        conn, get_settings(), {}, author="t", note="perfil",
+        calibracao_perfil_hash=p.hash,
+    )
+    assert perfil_mod.da_config_version(conn, v2.id) is not None
+
+    # Força a deriva de schema que a reancoragem existe para resolver. Ela
+    # NÃO é simulável por `UPDATE`: `config_version` é imutável por gatilho.
+    # O caminho real é um campo novo no schema, que este teste não pode criar
+    # - então ele pula, e a guarda de assinatura logo abaixo é quem sustenta.
+    import sqlite3 as _s
+    try:
+        conn.execute(
+            "UPDATE config_version SET config_hash = 'derivado' WHERE id = ?",
+            (v2.id,),
+        )
+    except _s.IntegrityError:
+        pytest.skip(
+            "config_version e imutavel: a deriva de schema real nao e "
+            "simulavel por UPDATE, e este teste cobre o caminho pela "
+            "assinatura abaixo"
+        )
+
+    v3 = config_service.reancorar(conn, get_settings(), author="t")
+    assert perfil_mod.da_config_version(conn, v3.id) is not None, (
+        "a reancoragem perdeu o perfil: o simulador voltaria a base em todo "
+        "regime, sem avisar"
+    )
+    assert perfil_mod.da_config_version(conn, v3.id).hash == p.hash
+
+
+def test_reancorar_PASSA_o_perfil_para_inserir_versao():
+    """A guarda que não depende de simular deriva de schema.
+
+    `config_version` é imutável por gatilho, então forçar a deriva num teste
+    não é possível pelo caminho normal - e um teste que só passa por `skip`
+    não guarda nada.
+    """
+    import inspect
+
+    from app.config import service as config_service
+
+    fonte = inspect.getsource(config_service.reancorar)
+    assert "calibracao_perfil_hash=_perfil_da_versao(conn, atual.id)" in fonte, (
+        "reancorar tem de repassar o perfil vigente, senão a versão nova "
+        "nasce com NULL"
+    )

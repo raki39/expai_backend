@@ -94,10 +94,13 @@ def test_health_reporta_substrato(client: TestClient) -> None:
     assert corpo["config_version"] == 1
     assert corpo["volume_gravavel"] is True
     assert corpo["run_ativo"] is None
-    # A fase corrente, e nao uma constante que sobreviveu a virada. Este
-    # assert existe para o campo nao poder mudar sem alguem decidir: ele
-    # acompanha um aviso sobre o que pode ser afirmado.
-    assert corpo["fase"] == "0B"
+    # A fase DERIVADA, e nao um literal que pina a constante contra ela
+    # mesma. A versao anterior deste assert dizia `== "0B"` e passou os quatro
+    # dias em que `/api/health` anunciou a fase errada - um teste que fixa o
+    # valor errado guarda exatamente o erro.
+    from app import fase as fase_mod
+
+    assert corpo["fase"] == fase_mod.fase_derivada()
 
 
 # -------------------------------------- criterio 12: segredo nao vaza
@@ -825,6 +828,10 @@ def test_a_fase_vem_de_um_lugar_so(monkeypatch, ambiente) -> None:
     """
     import pathlib as _p
 
+    from app.fase import INCREMENTOS_POR_FASE
+
+    FASES_CONHECIDAS = tuple(INCREMENTOS_POR_FASE)
+
     app_dir = _p.Path(__file__).resolve().parents[1] / "app"
     infratores: list[str] = []
     for arquivo in sorted(app_dir.rglob("*.py")):
@@ -836,15 +843,24 @@ def test_a_fase_vem_de_um_lugar_so(monkeypatch, ambiente) -> None:
             despida = linha.strip()
             if despida.startswith("#"):
                 continue
-            if '"fase":' in despida and ("0A" in despida or "0B" in despida):
+            # As fases vem de `INCREMENTOS_POR_FASE`, e nao de uma lista
+            # literal aqui: esta varredura procurava apenas "0A" e "0B", entao
+            # um `"fase": "0C"` escrito a mao PASSARIA. A lista da guarda nao
+            # tinha crescido com o projeto - a mesma forma de `BLOCOS`.
+            if '"fase":' in despida and any(
+                f in despida for f in FASES_CONHECIDAS
+            ):
                 infratores.append(f"{arquivo.name}:{n}")
     assert not infratores, (
         "fase escrita a mao fora de `app/fase.py`: " + "; ".join(infratores)
     )
 
+    # E a constante e conferida contra a DERIVADA, e nao contra um literal.
+    # A versao anterior dizia `== "0B"`, e por isso passou os quatro dias em
+    # que a api anunciou a fase errada.
     from app import fase
 
-    assert fase.FASE == "0B"
+    assert fase.FASE == fase.fase_derivada()
 
 
 # ===========================================================================
@@ -920,8 +936,20 @@ def test_o_que_e_so_diagnostico_vive_em_diagnostico() -> None:
     """
     from app.api.rotas import diagnostico
 
+    # Lista EXPLICITA, e cada entrada exigiu uma decisao: o criterio de
+    # `diagnostico` e "nao participa de run nenhum, e nada do experimento a
+    # le". Uma rota que entrasse aqui sem passar por esse teste diluiria o
+    # unico dominio da api que promete NAO fazer parte do experimento.
     caminhos = {r.path for r in diagnostico.router.routes}
-    assert caminhos == {"/api/diagnostico/sentinela"}
+    assert caminhos == {
+        # Incremento 0: prova que o volume persiste entre deploys.
+        "/api/diagnostico/sentinela",
+        # Incremento 19: as cinco conferencias de integridade. Ela LE o que o
+        # experimento gravou, e nao escreve nada nem alimenta decisao alguma -
+        # e a mesma natureza da sentinela, um nivel acima. Se um dia ela
+        # passar a ser insumo de algum criterio, sai daqui.
+        "/api/diagnostico/integridade",
+    }
 
     # E nenhum modulo do experimento serve sentinela.
     from app.api.rotas import MODULOS
@@ -953,3 +981,46 @@ def test_a_dependencia_de_token_vive_no_router_raiz() -> None:
             f"{modulo.__name__} declara dependencia propria; a do token vive"
             " no router raiz, e uma so"
         )
+
+
+def test_a_FASE_e_conferida_contra_a_DERIVADA_das_migracoes() -> None:
+    """A centralização resolveu DIVERGÊNCIA e não resolveu ENVELHECIMENTO.
+
+    `FASE` ficou em `"0B"` da abertura da 0C (2026-09-04) até 2026-09-08 —
+    quatro dias, três incrementos e onze ADRs. Os três lugares que a citam
+    concordavam perfeitamente: **todos errados juntos**.
+
+    Agora ela é derivada do maior incremento aplicado nas migrações, que é o
+    único ponto da `api` que muda a cada incremento sem ninguém precisar
+    lembrar. Migração de um incremento de outra fase quebra este teste até
+    alguém decidir.
+    """
+    from app import fase as fase_mod
+
+    derivada = fase_mod.fase_derivada()
+    assert derivada is not None, (
+        f"as migrações chegaram ao incremento "
+        f"{fase_mod.maior_incremento_aplicado()}, fora de toda faixa "
+        f"declarada em INCREMENTOS_POR_FASE. Uma fase nova começou, e a "
+        f"virada é uma DECISÃO: declare a faixa"
+    )
+    assert fase_mod.FASE == derivada, (
+        f"`FASE` diz {fase_mod.FASE} e o maior incremento aplicado "
+        f"({fase_mod.maior_incremento_aplicado()}) implica {derivada}. O campo "
+        f"`fase` acompanha o aviso sobre o que pode ser AFIRMADO"
+    )
+
+
+def test_o_AVISO_fala_da_fase_que_a_constante_declara() -> None:
+    """Errar o rótulo é descrever errado o que o resultado significa.
+
+    O `AVISO` da 0B dizia *"o Portão A é o produto da fase"* — verdadeiro na
+    0B e falso na 0C, onde o produto é o forward contínuo e a garantia é que
+    **nenhuma candidata foi admitida**.
+    """
+    from app import fase as fase_mod
+
+    assert fase_mod.FASE in fase_mod.AVISO
+    for outra in fase_mod.INCREMENTOS_POR_FASE:
+        if outra != fase_mod.FASE:
+            assert f"Fase {outra}" not in fase_mod.AVISO

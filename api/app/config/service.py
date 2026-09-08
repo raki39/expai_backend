@@ -370,6 +370,17 @@ def reancorar(
     quem comparar runs atraves desta versao precisa saber disso.
 
     Nao muda nenhum valor. Para tambem alterar algo, use `criar_versao` depois.
+
+    ## O PERFIL DE CALIBRACAO ATRAVESSA (ADR 0033)
+
+    "Nao muda nenhum valor" inclui o perfil, e ele **nao esta no payload** -
+    vive numa coluna, para nao mexer no hash das versoes gravadas. Uma
+    reancoragem que o deixasse de fora produziria versao nova com `NULL`, e o
+    simulador voltaria a BASE em todo regime **sem avisar**.
+
+    Achado antes de a primeira reancoragem pos-ADR-0033 acontecer, e com risco
+    zero no momento: nao ha perfil em producao porque a calibracao ainda nao
+    rodou. Depois de ~2026-09-18 seria perda silenciosa de calibracao.
     """
     linha = conn.execute(
         "SELECT * FROM config_version ORDER BY id DESC LIMIT 1"
@@ -427,6 +438,9 @@ def reancorar(
             "reancoragem: o schema da configuracao mudou e o hash gravado "
             "deixou de descrever a config"
         ),
+        # O perfil vigente atravessa. Ver o docstring: sem isto a reancoragem
+        # perderia a calibracao por regime em silencio.
+        calibracao_perfil_hash=_perfil_da_versao(conn, atual.id),
     )
 
 

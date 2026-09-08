@@ -195,6 +195,7 @@ porque, misturada com as rotas do experimento, parecia parte dele.
 | Método | Rota | Função |
 |---|---|---|
 | POST | `/api/diagnostico/sentinela` | grava marcador de persistência |
+| GET | `/api/diagnostico/integridade` | as cinco conferências **derivadas de consulta**: migrações, hashes e identidades, contabilidade, dado ao vivo, e que **nenhum run trocou de config** |
 | GET | `/api/diagnostico/sentinela` | lista marcadores |
 
 Sem `/docs`, `/redoc` ou `/openapi.json`: a superfície é consumida pelo proxy

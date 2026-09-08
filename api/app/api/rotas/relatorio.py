@@ -53,6 +53,7 @@ from .aovivo import (
     listar_snapshots as aovivo_snapshots,
 )
 from .dataset import dataset_atual, separacao_de_dados
+from .diagnostico import integridade as diagnostico_integridade
 from .diagnostico import sentinela_listar
 from .ledger import ledger_estado, ledger_transacoes
 from .simulador import execucoes_listar, simulador_estado
@@ -310,6 +311,11 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # como esquecimento. Um export sem ela mostraria a fase sem a decisao
         # que definiu o que ela pode concluir.
         ("quarentena", "/api/relatorio/quarentena", lambda: quarentena(request)),
+        # `integridade` ENTRA porque ela e a unica parte do pacote que responde
+        # "o substrato que produziu tudo isso continua de pe?" - e um export
+        # que mostra resultado sem isso pede confianca no lugar de prova.
+        ("integridade", "/api/diagnostico/integridade",
+         lambda: diagnostico_integridade(request)),
         ("ledger", "/api/ledger", lambda: ledger_estado(request)),
         ("ledger_transacoes", "/api/ledger/transacoes",
          lambda: ledger_transacoes(request, limite=200)),

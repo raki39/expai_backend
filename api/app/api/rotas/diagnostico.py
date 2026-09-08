@@ -36,3 +36,23 @@ def sentinela_listar(request: Request) -> dict[str, Any]:
         "total": len(linhas),
         "items": [dict(linha) for linha in linhas],
     }
+
+
+@router.get("/integridade")
+def integridade(request: Request) -> dict[str, Any]:
+    """As cinco conferencias, todas DERIVADAS de consulta.
+
+    Pedida depois de uma reancoragem, e o motivo e a quinta: a reancoragem
+    cria `config_version` NOVA, e a pergunta certa nao e se ela existe - e se
+    algum run ANTIGO passou a apontar para ela.
+
+    Ele nao pode: `run.config_version_id` nasce com o run e `config_version` e
+    imutavel por gatilho. Mas "nao pode" e afirmacao sobre o desenho, e esta
+    rota MEDE - que e a diferenca que este projeto inteiro persegue.
+
+    Fica em `diagnostico` porque nao participa de run nenhum e nada do
+    experimento a le. Ela prova o substrato, como a sentinela.
+    """
+    from ...relatorio import integridade as mod
+
+    return mod.montar(_conn(request))
