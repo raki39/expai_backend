@@ -3233,6 +3233,39 @@ MIGRACOES: list[tuple[int, str, str]] = [
             REFERENCES calibracao_perfil(hash);
         """,
     ),
+    (
+        25,
+        "incremento 18: o perfil entra na identidade do run",
+        """
+        -- ==================================================================
+        -- O PERFIL DE CALIBRACAO NA IDENTIDADE DO RUN.
+        --
+        -- `config_hash` SOZINHO DEIXOU DE IDENTIFICAR O COMPORTAMENTO. Desde
+        -- o ADR 0033 o perfil vive fora do payload, entao duas versoes com
+        -- payload identico tem o MESMO `config_hash` e executam com precos
+        -- diferentes - foi exatamente o que a demonstracao produziu:
+        -- `ebf441d4db65` nas duas, e `vol_baixa` a 1,674 numa e a 1,000 na
+        -- outra.
+        --
+        -- A identidade efetiva passa a ser o PAR:
+        --
+        --     config_hash + calibracao_perfil_hash
+        --
+        -- POR QUE NA TABELA `run`, se `config_version_id` ja determina o
+        -- perfil por transitividade: porque a identidade que todo resultado
+        -- publica tem de ser legivel SEM percorrer uma cadeia. Um digest que
+        -- depende de um join para significar o que significa e um digest que
+        -- alguem vai comparar errado.
+        --
+        -- NULL nas linhas antigas, e `identidade.SEM_PERFIL` e a
+        -- representacao canonica disso na string de identidade - nunca a
+        -- string "None", que colidiria com um perfil chamado None.
+        -- ==================================================================
+        ALTER TABLE run
+            ADD COLUMN calibracao_perfil_hash TEXT
+            REFERENCES calibracao_perfil(hash);
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

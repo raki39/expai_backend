@@ -227,11 +227,26 @@ def abrir_run(
     if seed_capital_usd_cents <= 0:
         raise TransacaoInvalida("capital semente precisa ser positivo")
 
+    # O PERFIL DE CALIBRACAO ENTRA NA IDENTIDADE DO RUN.
+    #
+    # `config_hash` sozinho parou de identificar o comportamento quando o ADR
+    # 0033 pos o perfil fora do payload: duas versoes com payload identico tem
+    # o mesmo `config_hash` e executam com precos diferentes.
+    #
+    # Gravado AQUI, no nascimento, e nao lido depois da config vigente: um run
+    # e identificado pelo que ele USOU. E a mesma disciplina de
+    # `condicoes_do_run`.
+    from ..calibracao.identidade import perfil_da_config_version
+
+    perfil_hash = perfil_da_config_version(conn, config_version_id)
+
     with bloco_atomico(conn, "abrir_run"):
         cur = conn.execute(
             "INSERT INTO run (agent_id, state, config_version_id, created_at,"
-            " updated_at, casa_run_id) VALUES (?, 'executando', ?, ?, ?, ?)",
-            (agent_id, config_version_id, agora(), agora(), casa_run_id),
+            " updated_at, casa_run_id, calibracao_perfil_hash)"
+            " VALUES (?, 'executando', ?, ?, ?, ?, ?)",
+            (agent_id, config_version_id, agora(), agora(), casa_run_id,
+             perfil_hash),
         )
         run_id = int(cur.lastrowid)
         tx_id = registrar(

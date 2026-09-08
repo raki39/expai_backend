@@ -38,6 +38,7 @@ from typing import Sequence
 from ..config.schema import ExperimentConfig
 from ..ledger import livro
 from ..dataset.loader import BarraCarregada
+from ..calibracao import identidade
 from ..maos_rapidas import baselines, executor
 from ..regra.registro import registrar_baseline
 
@@ -112,6 +113,13 @@ def _uma_passada(
         "idas_e_voltas": resultado["idas_e_voltas"],
         "equity_final_cents": resultado["equity_final_cents"],
         "config_hash": config_hash,
+        # A IDENTIDADE EXECUTAVEL, e nao so o `config_hash`.
+        #
+        # Desde o ADR 0033 o perfil de calibracao vive FORA do payload, entao
+        # duas versoes com payload identico tem o mesmo `config_hash` e
+        # executam com precos diferentes. Afirmar R12 comparando so o
+        # `config_hash` provaria menos do que a frase promete.
+        "identidade": identidade.do_run(conn, run_id),
     }
 
 
@@ -158,6 +166,9 @@ def provar(
     hash_estavel = (
         primeira["config_hash"] == segunda["config_hash"] == terceira["config_hash"]
     )
+    identidade_estavel = (
+        primeira["identidade"] == segunda["identidade"] == terceira["identidade"]
+    )
 
     prova = {
         "mesma_semente": {
@@ -175,10 +186,18 @@ def provar(
         },
         "config_hash": primeira["config_hash"],
         "config_hash_igual_nas_tres": hash_estavel,
+        "identidade_executavel": primeira["identidade"],
+        "identidade_igual_nas_tres": identidade_estavel,
         "operacoes_por_passada": OPERACOES_DA_PROVA,
-        # As duas metades e a estabilidade do hash. Qualquer uma falsa e a
-        # prova nao vale - e o campo diz qual, em vez de so dizer "falhou".
-        "provado": bool(iguais and difere and hash_estavel),
+        # As duas metades, a estabilidade do hash E a da IDENTIDADE. Qualquer
+        # uma falsa e a prova nao vale - e o campo diz qual, em vez de so
+        # dizer "falhou".
+        #
+        # A identidade entrou porque `config_hash` sozinho parou de descrever
+        # o comportamento: sem ela, tres passadas sob perfis de calibracao
+        # diferentes reportariam "hash igual nas tres" e a prova afirmaria uma
+        # reprodutibilidade que nao houve.
+        "provado": bool(iguais and difere and hash_estavel and identidade_estavel),
     }
     log.info(
         "reprodutibilidade.prova",

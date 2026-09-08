@@ -1525,3 +1525,188 @@ def test_SEM_perfil_nenhum_regime_e_calibrado(conn, cfg):
     f = perfil_mod.fidelidade(None, ["vol_baixa"])
     assert f.conclusiva is False
     assert f.regimes_nao_calibrados == ["vol_baixa"]
+
+
+# ===========================================================================
+# A IDENTIDADE EXECUTÁVEL
+#
+# `config_hash` sozinho parou de identificar o comportamento quando o ADR 0033
+# pôs o perfil FORA do payload. A identidade efetiva é o par.
+# ===========================================================================
+
+
+def test_a_identidade_e_o_PAR_e_ha_UMA_definicao():
+    from app.calibracao import identidade
+
+    assert identidade.identidade_executavel("abc", "def") == "abc+def"
+    assert identidade.identidade_executavel("abc", None) == "abc+sem-perfil"
+
+
+def test_SEM_PERFIL_tem_representacao_CANONICA():
+    """Não é `None`, não é "", não é "null".
+
+    A string de identidade fica sempre bem formada - comparar duas nunca
+    precisa de caso especial. E `sem-perfil` **diz** o que significa: um campo
+    vazio num relatório é lido como "faltou preencher".
+    """
+    from app.calibracao import identidade
+
+    assert identidade.SEM_PERFIL == "sem-perfil"
+    a = identidade.identidade_executavel("h", None)
+    assert a.endswith(identidade.SEM_PERFIL)
+    assert "None" not in a and "null" not in a
+    assert a != "h+" and a != "h"
+
+
+def test_perfis_DIFERENTES_dao_identidades_diferentes_com_o_MESMO_config_hash(
+    conn, cfg
+):
+    """A garantia que o usuário pediu, no ponto exato.
+
+    Este é o cenário real medido na demonstração: as versões 1 e 2 saíram com
+    o **mesmo** `config_hash` (`ebf441d4db65`) e executam com preços
+    diferentes. Sem o par, dois runs assim reportariam a mesma identidade.
+    """
+    from app.calibracao import identidade
+    from app.calibracao import perfil as perfil_mod
+    from app.config import service as config_service
+    from app.ledger import livro
+    from app.settings import get_settings
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+    )
+    v2 = config_service.criar_versao(
+        conn, get_settings(), {}, author="teste", note="perfil",
+        calibracao_perfil_hash=p.hash,
+    )
+
+    # O payload é idêntico - é essa a premissa do teste.
+    assert v2.config_hash == cfg.config_hash
+
+    run_sem, _ = livro.abrir_run(
+        conn, config_version_id=cfg.id, seed_capital_usd_cents=100_000,
+        agent_id="ident-sem",
+    )
+    livro.encerrar_run(conn, run_sem, "concluido")
+    run_com, _ = livro.abrir_run(
+        conn, config_version_id=v2.id, seed_capital_usd_cents=100_000,
+        agent_id="ident-com",
+    )
+    livro.encerrar_run(conn, run_com, "concluido")
+
+    id_sem = identidade.do_run(conn, run_sem)
+    id_com = identidade.do_run(conn, run_com)
+
+    assert id_sem != id_com, (
+        "mesmo config_hash e perfis diferentes deram a MESMA identidade - o "
+        "par não está sendo usado"
+    )
+    assert id_sem.endswith(identidade.SEM_PERFIL)
+    assert id_com.endswith(p.hash)
+
+
+def test_o_run_PERSISTE_o_perfil_que_usou(conn, cfg):
+    """Do run, e não da config vigente: um run antigo continua identificado
+    pelo que ele usou, e não pelo que passou a valer depois."""
+    from app.calibracao import perfil as perfil_mod
+    from app.config import service as config_service
+    from app.ledger import livro
+    from app.settings import get_settings
+
+    run_antigo, _ = livro.abrir_run(
+        conn, config_version_id=cfg.id, seed_capital_usd_cents=100_000,
+        agent_id="antes",
+    )
+    livro.encerrar_run(conn, run_antigo, "concluido")
+
+    p = perfil_mod.gravar(
+        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_alta", 2_000)])
+    config_service.criar_versao(
+        conn, get_settings(), {}, author="t", note="perfil",
+        calibracao_perfil_hash=p.hash,
+    )
+
+    gravado = conn.execute(
+        "SELECT calibracao_perfil_hash FROM run WHERE id = ?", (run_antigo,)
+    ).fetchone()["calibracao_perfil_hash"]
+    assert gravado is None, (
+        "o run antigo passou a citar um perfil que não existia quando ele rodou"
+    )
+
+
+def test_perfis_diferentes_dao_DIGESTS_diferentes(conn, cfg):
+    """O digest é dos LANÇAMENTOS, então ele muda por consequência: preços
+    diferentes produzem caixa diferente.
+
+    Aqui a consequência é verificada de ponta a ponta, e não assumida - a
+    diferença entre "deveria mudar" e "muda".
+    """
+    from decimal import Decimal
+
+    from app.ledger import livro
+    from app.maos_rapidas import baselines, executor
+    from app.regra import registro
+    from tests.test_maos_rapidas import precos_passeio
+    from tests.test_simulador import criar_dataset
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    barras = executor.carregar_janela(conn, dataset_id)
+
+    def uma_passada(spread: Decimal, agente: str) -> str:
+        c = cfg.config.model_copy(update={"spread_bps": spread})
+        run_id, _ = livro.abrir_run(
+            conn, config_version_id=cfg.id,
+            seed_capital_usd_cents=c.seed_capital_usd_cents, agent_id=agente,
+        )
+        regra = baselines.regra_b3(c)
+        rule_id = registro.registrar(conn, regra)
+        executor.rodar(conn, run_id=run_id, dataset_id=dataset_id, regra=regra,
+                       rule_id=rule_id, config=c, barras=barras)
+        livro.encerrar_run(conn, run_id, "concluido")
+        return executor.digest_do_run(conn, run_id)
+
+    base = uma_passada(Decimal("1"), "digest-base")
+    override = uma_passada(Decimal("1.674"), "digest-override")
+    assert base != override, (
+        "o override de regime não mudou o digest: o preço não chegou ao ledger"
+    )
+
+
+def test_a_prova_de_R12_exige_a_IDENTIDADE_estavel(conn, cfg):
+    """Sem isto, três passadas sob perfis diferentes reportariam "hash igual
+    nas três" e a prova afirmaria uma reprodutibilidade que não houve."""
+    from pathlib import Path
+
+    fonte = Path("app/relatorio/reprodutibilidade.py").read_text(encoding="utf-8")
+    assert "identidade_igual_nas_tres" in fonte
+    assert "and identidade_estavel" in fonte, (
+        "a identidade tem de entrar na conjunção que decide `provado`"
+    )
+
+
+def test_o_CACHE_ja_inclui_o_perfil_POR_CONSTRUCAO(conn, cfg):
+    """E por isso o perfil NÃO é pregado na chave.
+
+    A chave do cache é o hash do **pedido inteiro** - sistema, mensagem,
+    schema, modelo e teto. Se o prompt algum dia passar a depender do perfil,
+    a chave segue sozinha; pregar o hash do perfil por fora invalidaria toda
+    entrada existente e custaria dinheiro real na próxima execução, sem
+    proteger nada que a construção já não proteja.
+
+    **O limite, declarado:** `contexto.py` monta o custo de giro que o agente
+    lê a partir de `config.spread_bps` - a BASE. Sob o ADR 0033 o custo
+    executado num regime calibrado difere disso. Na 0C não importa: o agente
+    não formula hipótese (regra 1 reescrita) e a candidata é congelada. Na
+    Fase 1 importa, e fica registrado aqui em vez de descoberto lá.
+    """
+    from pathlib import Path
+
+    fonte = Path("app/cerebro/cache.py").read_text(encoding="utf-8")
+    assert "hash do pedido INTEIRO" in fonte
+
+    contexto = Path("app/cerebro/contexto.py").read_text(encoding="utf-8")
+    assert "config.spread_bps" in contexto, (
+        "se o contexto deixar de derivar o custo da config, este teste tem de "
+        "ser revisto junto"
+    )

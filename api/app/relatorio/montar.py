@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 from ..cerebro import avaliacao, ciclo, propostas
 from .. import fase as fase_mod
+from ..calibracao import identidade
 from ..config import service as config_service
 from ..dataset import loader as dataset_loader
 from ..ledger import livro
@@ -313,6 +314,19 @@ def montar(conn: sqlite3.Connection, run_id: int | None = None) -> dict:
         "config": {
             "version_id": versao.id if versao else None,
             "config_hash": versao.config_hash if versao else None,
+            # A IDENTIDADE EXECUTAVEL, e nao so o `config_hash`.
+            #
+            # Desde o ADR 0033 duas versoes com payload identico tem o MESMO
+            # `config_hash` e executam com precos diferentes - o perfil de
+            # calibracao vive fora do payload. Publicar so o hash convidaria a
+            # comparar dois resultados como se fossem do mesmo experimento.
+            "identidade_executavel": (
+                identidade.do_run(conn, run["id"])
+                if run and run.get("id") else None
+            ),
+            "calibracao_perfil_hash": (
+                run.get("calibracao_perfil_hash") if run else None
+            ),
             "material": versao.material if versao else None,
             "author": versao.author if versao else None,
             "created_at": versao.created_at if versao else None,
