@@ -21,6 +21,7 @@ import pytest
 from app.cerebro import avaliacao, ciclo
 from app.config.schema import ExperimentConfig
 from app.ledger.livro import carteira
+from app.migrations import MIGRACOES
 from app.maos_rapidas import baselines
 from app.relatorio import montar, reprodutibilidade, texto, vinculo
 from tests.test_cerebro import (
@@ -1225,3 +1226,97 @@ def test_a_rota_do_agente_informa_quantas_reflexoes_houve(
     corpo = client.get("/api/agente").json()
     assert corpo["reflexoes"] == resultado.reflexoes
     assert corpo["reflexoes"] > 0
+
+
+# ===========================================================================
+# O QUE O RELATORIO DE INTEGRIDADE CONFERE E DERIVADO DAS MIGRACOES
+#
+# O incremento 20 acrescentou a migracao 28 -- quatro tabelas e nove gatilhos --
+# e `ESTRUTURA_ESPERADA` ficou na 27. O relatorio respondeu `integras: true`
+# em producao sobre uma estrutura que tinha deixado de descrever o sistema, no
+# modulo cuja unica funcao e conferir integridade.
+#
+# Uma lista literal envelhece calada. Estes testes a comparam com o que as
+# migracoes de fato criam, entao migracao nova QUEBRA A SUITE ate alguem
+# decidir -- que e o unico jeito de isto nao depender de memoria.
+# ===========================================================================
+
+
+def _estrutura_ate(ate: int) -> tuple[set[str], set[str]]:
+    """Tabelas e gatilhos de um banco migrado ate `ate`, inclusive."""
+    import app.store as store_mod
+
+    todas = list(store_mod.MIGRACOES)
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        store_mod.MIGRACOES = [m for m in todas if m[0] <= ate]
+        store_mod.migrar(conn)
+    finally:
+        store_mod.MIGRACOES = todas
+    tabelas = {
+        str(r["name"])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    gatilhos = {
+        str(r["name"])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    return tabelas, gatilhos
+
+
+def test_toda_tabela_da_0c_esta_declarada_no_relatorio_de_integridade():
+    """Nenhuma tabela nova escapa da conferencia."""
+    from app.relatorio.integridade import (
+        ESTRUTURA_ESPERADA,
+        PRIMEIRA_MIGRACAO_CONFERIDA,
+    )
+
+    antes, _ = _estrutura_ate(PRIMEIRA_MIGRACAO_CONFERIDA - 1)
+    depois, _ = _estrutura_ate(max(n for n, _d, _s in MIGRACOES))
+    criadas = depois - antes
+    assert criadas, "guarda vazia: nenhuma tabela foi criada na faixa"
+
+    declaradas = {t for lista in ESTRUTURA_ESPERADA.values() for t in lista}
+    faltando = sorted(criadas - declaradas)
+    assert not faltando, (
+        "tabelas criadas pelas migracoes da 0C e NAO conferidas por"
+        f" `/api/diagnostico/integridade`: {faltando}."
+        " Acrescente-as a ESTRUTURA_ESPERADA -- um relatorio que responde"
+        " `integras: true` sem olhar para elas afirma mais do que verificou"
+    )
+    sobrando = sorted(declaradas - depois)
+    assert not sobrando, (
+        f"ESTRUTURA_ESPERADA cita tabelas que nao existem: {sobrando}"
+    )
+
+
+def test_todo_gatilho_da_0c_esta_declarado_no_relatorio_de_integridade():
+    """E os gatilhos importam MAIS que as tabelas.
+
+    Se um gatilho sumir, a tabela continua existindo e a garantia nao -- e essa
+    e a forma de falha que o relatorio existe para pegar.
+    """
+    from app.relatorio.integridade import (
+        GATILHOS_ESPERADOS,
+        PRIMEIRA_MIGRACAO_CONFERIDA,
+    )
+
+    _, antes = _estrutura_ate(PRIMEIRA_MIGRACAO_CONFERIDA - 1)
+    _, depois = _estrutura_ate(max(n for n, _d, _s in MIGRACOES))
+    criados = depois - antes
+    assert criados, "guarda vazia: nenhum gatilho foi criado na faixa"
+
+    faltando = sorted(criados - set(GATILHOS_ESPERADOS))
+    assert not faltando, (
+        "gatilhos criados pelas migracoes da 0C e NAO conferidos por"
+        f" `/api/diagnostico/integridade`: {faltando}"
+    )
+    sobrando = sorted(set(GATILHOS_ESPERADOS) - depois)
+    assert not sobrando, (
+        f"GATILHOS_ESPERADOS cita gatilhos que nao existem: {sobrando}"
+    )

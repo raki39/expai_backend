@@ -38,6 +38,8 @@ ESTRUTURA_ESPERADA = {
     25: [],  # ALTER TABLE
     26: ["abordagem", "quarentena_limiar"],
     27: ["quarentena_congelado"],
+    28: ["monitor_limiar", "monitor_passo", "monitor_alarme",
+         "monitor_reteste"],
 }
 
 COLUNAS_ESPERADAS = {
@@ -63,7 +65,26 @@ GATILHOS_ESPERADOS = [
     "abordagem_nao_reabre", "abordagem_sem_delete",
     "quarentena_limiar_sem_update", "quarentena_limiar_sem_delete",
     "quarentena_congelado_sem_update", "quarentena_congelado_sem_delete",
+    "monitor_limiar_sem_update", "monitor_limiar_sem_delete",
+    "monitor_passo_sem_update", "monitor_passo_sem_delete",
+    "monitor_alarme_sem_update", "monitor_alarme_sem_delete",
+    "monitor_critico_exige_alerta",
+    "monitor_reteste_e_posterior", "monitor_reteste_sem_update",
 ]
+
+# A migracao a partir da qual estas listas valem. Abaixo dela esta o substrato
+# das fases 0A e 0B, ja coberto pelas suites daquelas fases.
+#
+# O numero existe para que `tests/test_relatorio.py` possa DERIVAR o que
+# deveria estar aqui - aplicando as migracoes ate esta fronteira e depois todas,
+# e comparando a diferenca com o que estas listas declaram.
+#
+# **Isto nasceu de uma falha real.** O incremento 20 acrescentou a migracao 28
+# com quatro tabelas e nove gatilhos, e estas listas ficaram na 27. O relatorio
+# de producao respondeu `integras: true` sobre uma estrutura que tinha deixado
+# de descrever o sistema - no modulo cuja unica funcao e conferir integridade.
+# Vigesima segunda ocorrencia do padrao.
+PRIMEIRA_MIGRACAO_CONFERIDA = 19
 
 
 def _nomes(conn: sqlite3.Connection, tipo: str) -> set[str]:
