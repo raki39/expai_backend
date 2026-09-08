@@ -110,10 +110,23 @@ async def principal() -> int:
     # ADR 0032, requisito 6: sela os dias que fecharam sem manifesto. Um
     # processo morto antes da virada nao selou nada, e sem isto um reinicio a
     # meia-noite deixaria um dia inteiro sem identidade.
-    selados = entrega.selar_no_boot(DESTINO, prefixo)
-    if selados:
-        log.info("coletor.selados_no_boot",
-                 extra={"arquivos": [p.name for p in selados]})
+    #
+    # **E ela NAO PODE derrubar o boot.** Em 2026-09-08 ela derrubou: um
+    # arquivo com bloco deflate danificado levantou `zlib.error` dentro do
+    # manifesto, a excecao subiu ate aqui, e o processo entrou em ciclo de
+    # crash - ou seja, o coletor parou de COLETAR por causa de um arquivo de
+    # um dia que ja passou.
+    #
+    # A regra e a mesma que ja vale para a entrega, e agora esta nos dois
+    # lugares: *a coleta segue*. Selo e entrega sao derivados e refaziveis a
+    # partir do bruto; a coleta e a unica parte que nao volta.
+    try:
+        selados = entrega.selar_no_boot(DESTINO, prefixo)
+        if selados:
+            log.info("coletor.selados_no_boot",
+                     extra={"arquivos": [p.name for p in selados]})
+    except Exception:
+        log.exception("coletor.selagem_no_boot_quebrou")
 
     destino_da_entrega = entrega.destino_do_ambiente(dict(os.environ))
 

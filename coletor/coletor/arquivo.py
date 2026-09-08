@@ -15,12 +15,16 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import os
 import time
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+log = logging.getLogger("coletor")
 
 # Intervalo de descarga do buffer do gzip, EM SEGUNDOS.
 #
@@ -170,6 +174,91 @@ def volume_montado(destino: Path) -> bool:
         return False
 
 
+@dataclass
+class Percurso:
+    """Como o fluxo gzip terminou. Preenchido ENQUANTO ele e percorrido.
+
+    Existe porque a pergunta "este arquivo termina limpo?" estava escrita
+    **duas vezes** - em `integridade` e em `manifesto` -, e as duas com
+    `gzip.open` dentro de um `try` que nao cobria `zlib.error`.
+
+    Foi essa lacuna que derrubou o coletor em producao em 2026-09-08:
+
+        zlib.error: Error -3 while decompressing data: invalid block type
+
+    A excecao escapou porque **`gzip.BadGzipFile` e um `OSError` e
+    `zlib.error` NAO E** - ela herda de `Exception` direto. Um
+    `except (EOFError, OSError, gzip.BadGzipFile)` pega o membro sem marcador
+    de fim e nao pega o bloco deflate danificado no meio, que e o que um
+    SIGKILL no meio de uma escrita produz.
+
+    E a ironia estava a trinta linhas: `ler` foi escrita exatamente para esse
+    caso e trata `zlib.error` sob um comentario dizendo *"lixo no meio do
+    fluxo"*. **O leitor sabia; a conferencia ao lado dele nao.**
+    """
+
+    limpo: bool = False
+    bytes_descomprimidos: int = 0
+
+
+# "gzip, janela de 32k". Constante de modulo porque o numero aparece na
+# travessia e em nenhum outro lugar - e um valor magico repetido em duas
+# funcoes e o comeco de duas funcoes que discordam.
+WBITS_GZIP = 31
+
+
+def _descomprimir(bruto: bytes, p: Percurso) -> Iterator[bytes]:
+    """Descomprime o que der, membro a membro, e registra ONDE parou.
+
+    **Uma travessia, e nao duas.** `ler` e `varrer` usam esta funcao; antes,
+    cada uma tinha a sua ideia de "acabou", e elas podiam discordar sobre o
+    mesmo arquivo - o leitor entregando linhas de um arquivo que a conferencia
+    chamava de ilegivel.
+
+    Membros concatenados sao tratados: reabrir o arquivo em modo `ab` depois de
+    um restart cria um membro gzip novo, e ignorar isso perderia todo o dado
+    posterior ao primeiro restart do dia.
+    """
+    d = zlib.decompressobj(WBITS_GZIP)
+    while bruto:
+        try:
+            saida = d.decompress(bruto)
+        except zlib.error:
+            # Lixo no meio do fluxo. Tudo que saiu antes continua valendo, e
+            # `limpo` fica False - que e o fato, e nao uma suspeita.
+            return
+        if saida:
+            p.bytes_descomprimidos += len(saida)
+            yield saida
+        if not d.eof:
+            # Entrada consumida sem terminar o membro: e o truncamento.
+            return
+        bruto = d.unused_data
+        if not bruto:
+            p.limpo = True
+            return
+        d = zlib.decompressobj(WBITS_GZIP)
+
+
+def varrer(caminho: Path) -> Percurso:
+    """Percorre o arquivo inteiro so para saber COMO ele termina.
+
+    **Nao levanta.** Arquivo inexistente, vazio, truncado ou com bloco
+    danificado no meio sao todos respondidos como FATO no `Percurso`, e nao
+    como excecao. Quem chama isto esta perguntando sobre a integridade do
+    arquivo - devolver excecao faz a pergunta derrubar quem a fez, que e
+    exatamente o que aconteceu no boot do coletor.
+    """
+    p = Percurso()
+    try:
+        bruto = caminho.read_bytes()
+    except OSError:
+        return p
+    for _ in _descomprimir(bruto, p):
+        pass
+    return p
+
+
 def ler(caminho: Path) -> Iterator[dict[str, Any]]:
     """Le um arquivo do coletor, TOLERANDO truncamento no fim.
 
@@ -196,36 +285,21 @@ def ler(caminho: Path) -> Iterator[dict[str, Any]]:
     linha cortada no meio nao e um registro - e completar por conta seria
     inventar dado, que e o que nenhuma parte deste projeto faz.
     """
-    WBITS_GZIP = 31
     resto = b""
     try:
         bruto = caminho.read_bytes()
     except OSError:
         return
-    d = zlib.decompressobj(WBITS_GZIP)
-    while bruto:
-        try:
-            saida = d.decompress(bruto)
-        except zlib.error:
-            # Lixo no meio do fluxo. Tudo que saiu antes continua valendo.
-            break
-        if saida:
-            resto += saida
-            *completas, resto = resto.split(b"\n")
-            for linha in completas:
-                if linha.strip():
-                    try:
-                        yield json.loads(linha)
-                    except ValueError:
-                        # Linha corrompida no corte. Descartada, nao adivinhada.
-                        continue
-        if not d.eof:
-            # Entrada consumida sem terminar o membro: e o truncamento.
-            break
-        bruto = d.unused_data
-        if not bruto:
-            break
-        d = zlib.decompressobj(WBITS_GZIP)
+    for saida in _descomprimir(bruto, Percurso()):
+        resto += saida
+        *completas, resto = resto.split(b"\n")
+        for linha in completas:
+            if linha.strip():
+                try:
+                    yield json.loads(linha)
+                except ValueError:
+                    # Linha corrompida no corte. Descartada, nao adivinhada.
+                    continue
     # `resto` sem quebra de linha e registro incompleto, descartado de proposito.
 
 
@@ -239,14 +313,13 @@ def integridade(caminho: Path) -> dict[str, Any]:
     linhas = 0
     for _ in ler(caminho):
         linhas += 1
-    truncado = False
-    try:
-        with gzip.open(caminho, "rb") as f:
-            while f.read(1 << 20):
-                pass
-    except (EOFError, OSError, gzip.BadGzipFile):
-        truncado = True
-    return {"caminho": str(caminho), "linhas": linhas, "truncado": truncado}
+    p = varrer(caminho)
+    return {
+        "caminho": str(caminho),
+        "linhas": linhas,
+        "truncado": not p.limpo,
+        "bytes_descomprimidos": p.bytes_descomprimidos,
+    }
 
 
 # ===========================================================================
@@ -296,13 +369,11 @@ def manifesto(caminho: Path) -> dict[str, Any]:
             ultimo = ns
         linhas += 1
 
-    truncado = False
-    try:
-        with gzip.open(caminho, "rb") as f:
-            while f.read(1 << 20):
-                pass
-    except (EOFError, OSError, gzip.BadGzipFile):
-        truncado = True
+    # `bytes_descomprimidos` diz ATE ONDE o arquivo foi legivel, e nao apenas
+    # que ele nao esta inteiro. E o que torna a auditoria do requisito 7
+    # possivel sobre um arquivo danificado: sem o numero, "truncado" e um
+    # adjetivo.
+    p = varrer(caminho)
 
     return {
         "arquivo": caminho.name,
@@ -311,7 +382,8 @@ def manifesto(caminho: Path) -> dict[str, Any]:
         "linhas": linhas,
         "primeiro_ns": primeiro,
         "ultimo_ns": ultimo,
-        "truncado": truncado,
+        "truncado": not p.limpo,
+        "bytes_descomprimidos": p.bytes_descomprimidos,
         "selado_em": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
@@ -361,7 +433,23 @@ def selar_dias_fechados(diretorio: Path, prefixo: str, hoje: str) -> list[Path]:
         dia = arquivo.name[len(prefixo) + 1:-len(".jsonl.gz")]
         if dia >= hoje:
             continue
-        if not caminho_do_manifesto(arquivo).exists():
+        if caminho_do_manifesto(arquivo).exists():
+            continue
+        try:
             escrever_manifesto(arquivo)
-            selados.append(arquivo)
+        except Exception:
+            # UM arquivo ruim nao pode custar o selo de todos os outros.
+            #
+            # Antes, a excecao subia daqui ate o boot e derrubava o processo -
+            # e o processo que morre no boot nao COLETA. A entrega e o selo sao
+            # derivados e refaziveis; a coleta e a unica parte que nao volta, e
+            # e por isso que ela nunca pode ser refem de nenhuma das duas.
+            #
+            # Nao ha selo silencioso: sem manifesto, `conferir_manifesto`
+            # devolve `None` - "nao ha manifesto" -, que e o fato.
+            log.exception(
+                "coletor.selagem_falhou", extra={"arquivo": arquivo.name}
+            )
+            continue
+        selados.append(arquivo)
     return selados

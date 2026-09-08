@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -542,3 +543,131 @@ def test_o_ATRASO_vai_em_toda_volta(tmp_path):
     assert r["enviadas"] == 3
     assert r["atraso_instantes"] == 0, "entregou tudo o que fechou"
     assert r["ultimo_entregue_ms"] == T0 + 2 * GRADE
+
+
+# ===========================================================================
+# O BLOCO DEFLATE DANIFICADO NO MEIO — o crash de 2026-09-08
+#
+# `zlib.error: Error -3 while decompressing data: invalid block type`, no boot,
+# em ciclo. A causa e uma so e ela e de TIPO: `gzip.BadGzipFile` e um
+# `OSError`; `zlib.error` NAO E - herda de `Exception` direto. O `try` que
+# protegia a conferencia listava os tres primeiros e nao o quarto.
+#
+# E a ironia: `ler` foi escrita para exatamente esse caso e trata `zlib.error`
+# sob um comentario dizendo "lixo no meio do fluxo". O leitor sabia; a
+# conferencia ao lado dele nao.
+# ===========================================================================
+
+
+def _com_bloco_danificado(caminho: Path) -> None:
+    """Vira um bit no MEIO do fluxo deflate.
+
+    Diferente de truncar: truncar deixa o membro sem marcador de fim e levanta
+    `EOFError`/`BadGzipFile`, que o `try` antigo pegava. Danificar um bloco
+    levanta `zlib.error`, que ele nao pegava - e e o que um SIGKILL no meio de
+    uma escrita produz.
+    """
+    b = bytearray(caminho.read_bytes())
+    b[len(b) // 2] ^= 0xFF
+    caminho.write_bytes(bytes(b))
+
+
+def test_manifesto_de_arquivo_com_bloco_danificado_NAO_levanta(tmp_path):
+    """A regressao exata da producao: isto levantava `zlib.error`."""
+    caminho = escrever(tmp_path, [linha_amostra(T0 + i) for i in range(200)])[0]
+    _com_bloco_danificado(caminho)
+
+    m = arquivo.manifesto(caminho)
+    assert m["truncado"] is True
+    assert len(m["sha256"]) == 64
+    assert m["bytes_descomprimidos"] >= 0
+
+
+def test_integridade_de_arquivo_com_bloco_danificado_NAO_levanta(tmp_path):
+    """A mesma conferencia estava escrita duas vezes, com o mesmo buraco."""
+    caminho = escrever(tmp_path, [linha_amostra(T0 + i) for i in range(200)])[0]
+    _com_bloco_danificado(caminho)
+    assert arquivo.integridade(caminho)["truncado"] is True
+
+
+def test_zlib_error_nao_e_OSError():
+    """A premissa do defeito, afirmada em teste em vez de em comentario.
+
+    Se um dia `zlib.error` passar a herdar de `OSError`, este teste quebra e
+    alguem decide - em vez de a guarda ficar redundante em silencio.
+    """
+    import zlib
+
+    assert not issubclass(zlib.error, OSError)
+    assert issubclass(gzip.BadGzipFile, OSError)
+
+
+def test_um_arquivo_ruim_NAO_impede_o_selo_dos_outros(tmp_path):
+    """A coleta nao pode ser refem do selo de um dia que ja passou."""
+    ontem = arquivo.dia_utc((T0 - 86_400_000) * 1_000_000)
+    anteontem = arquivo.dia_utc((T0 - 2 * 86_400_000) * 1_000_000)
+    hoje = arquivo.dia_utc(T0 * 1_000_000)
+
+    ruim = escrever(tmp_path, [linha_amostra(T0 + i) for i in range(200)],
+                    dia=anteontem)[0]
+    _com_bloco_danificado(ruim)
+    escrever(tmp_path, [linha_amostra(T0)], dia=ontem)
+
+    selados = arquivo.selar_dias_fechados(tmp_path, "bookticker-btcusdt", hoje)
+    assert [p.name for p in selados] == [
+        f"bookticker-btcusdt-{anteontem}.jsonl.gz",
+        f"bookticker-btcusdt-{ontem}.jsonl.gz",
+    ], "os dois selam: o danificado sela DECLARANDO o dano"
+
+
+def test_selo_que_falha_de_verdade_nao_derruba_a_varredura(tmp_path, monkeypatch):
+    """E se `escrever_manifesto` levantar por outro motivo (disco cheio)?
+
+    O dia seguinte continua sendo selado, e nao ha selo silencioso: sem
+    manifesto, `conferir_manifesto` devolve `None` - "nao ha manifesto".
+    """
+    ontem = arquivo.dia_utc((T0 - 86_400_000) * 1_000_000)
+    anteontem = arquivo.dia_utc((T0 - 2 * 86_400_000) * 1_000_000)
+    hoje = arquivo.dia_utc(T0 * 1_000_000)
+    primeiro = escrever(tmp_path, [linha_amostra(T0)], dia=anteontem)[0]
+    escrever(tmp_path, [linha_amostra(T0)], dia=ontem)
+
+    real = arquivo.escrever_manifesto
+
+    def falha_no_primeiro(caminho: Path):
+        if caminho.name == primeiro.name:
+            raise OSError("No space left on device")
+        return real(caminho)
+
+    monkeypatch.setattr(arquivo, "escrever_manifesto", falha_no_primeiro)
+    selados = arquivo.selar_dias_fechados(tmp_path, "bookticker-btcusdt", hoje)
+
+    assert [p.name for p in selados] == [f"bookticker-btcusdt-{ontem}.jsonl.gz"]
+    assert arquivo.conferir_manifesto(primeiro) is None
+
+
+def test_o_leitor_e_a_conferencia_nao_discordam(tmp_path):
+    """Uma travessia so: `ler` e `varrer` usam o mesmo `_descomprimir`.
+
+    Antes eram duas ideias de "acabou" - `zlib.decompressobj` no leitor e
+    `gzip.open` na conferencia -, e elas podiam discordar sobre o mesmo
+    arquivo. Aqui o arquivo danificado tem de dar linhas legiveis E `truncado`
+    ao mesmo tempo, sem contradicao.
+    """
+    caminho = escrever(tmp_path, [linha_amostra(T0 + i) for i in range(200)])[0]
+    intacto = arquivo.varrer(caminho)
+    assert intacto.limpo is True
+    assert intacto.bytes_descomprimidos > 0
+
+    _com_bloco_danificado(caminho)
+    danificado = arquivo.varrer(caminho)
+    assert danificado.limpo is False
+    assert danificado.bytes_descomprimidos <= intacto.bytes_descomprimidos
+    # O leitor entrega exatamente o que a travessia disse que da para ler.
+    assert sum(1 for _ in arquivo.ler(caminho)) == arquivo.integridade(caminho)["linhas"]
+
+
+def test_varrer_de_arquivo_inexistente_e_fato_e_nao_excecao(tmp_path):
+    p = arquivo.varrer(tmp_path / "nao-existe.jsonl.gz")
+    assert p.limpo is False
+    assert p.bytes_descomprimidos == 0
