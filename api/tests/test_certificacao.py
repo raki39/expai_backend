@@ -449,3 +449,29 @@ def test_a_suite_prepara_as_PROPRIAS_precondicoes_na_copia(conn, cenario_cru):
     # E NADA disso alcancou o banco oficial.
     assert _foto(conn) == antes
     assert conn.execute("SELECT COUNT(*) FROM hypothesis").fetchone()[0] == 0
+
+
+def test_o_tamanho_da_copia_SOMA_o_wal(conn, cenario):
+    """4.096 bytes para um banco com 70.080 barras é impossível.
+
+    **Medido em produção em 2026-09-09.** A primeira versão lia
+    `stat().st_size` do arquivo principal logo depois do `backup()`, e em
+    `journal_mode=WAL` o backup escreve no `-wal`: o principal fica vazio até o
+    checkpoint. O campo chamava-se `bytes_copiados` e continha *o tamanho do
+    arquivo principal antes do checkpoint* — errando para BAIXO, e subestimando
+    o custo operacional em toda medição.
+    """
+    from app.certificacao import laboratorio
+
+    with laboratorio.laboratorio_descartavel(conn) as copia:
+        principal = copia.caminho.stat().st_size
+        total = copia.bytes_em_disco()
+        assert total >= principal
+        # O banco de teste tem dataset, runs e ledger: dezenas de KB, no minimo.
+        assert total > 50_000, (
+            f"a copia mediu {total} bytes, o que nao cabe um dataset - o `-wal`"
+            " nao esta sendo somado"
+        )
+
+    cert = _certificar(conn, cenario)
+    assert cert.manifesto["custo_operacional"]["bytes_da_copia"] > 50_000

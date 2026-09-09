@@ -223,7 +223,10 @@ def executar(
         )
         casos = [_caso_canonico(c) for c in resultado.controles]
         micros_copia = copia.micros_para_copiar
-        bytes_copia = copia.bytes_copiados
+        # DEPOIS da suite: o custo em disco e o pico, e nao o do instante da
+        # copia. E somando o `-wal`, senao ele mede 4 KB - ver
+        # `Copia.bytes_em_disco`.
+        bytes_copia = copia.bytes_em_disco()
     micros_suite = (time.perf_counter_ns() - inicio) // 1_000 - micros_copia
 
     # 7. A conferencia. RECUSA, e nao aviso.

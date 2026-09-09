@@ -49,8 +49,30 @@ class Copia:
 
     conn: sqlite3.Connection
     caminho: pathlib.Path
-    bytes_copiados: int
     micros_para_copiar: int
+
+    def bytes_em_disco(self) -> int:
+        """O tamanho REAL, somando o `-wal` e o `-shm`.
+
+        **Medido em produção em 2026-09-09**: a primeira versão lia
+        `destino.stat().st_size` logo depois do `backup()` e publicou
+        **4.096 bytes** para uma cópia do banco de produção, que tem 70.080
+        barras e 79 runs. O número é impossível, e a causa é o WAL: em
+        `journal_mode=WAL` o `backup()` escreve no `-wal`, e o arquivo
+        principal segue vazio até o checkpoint.
+
+        Era a mesma forma de sempre — um campo chamado `bytes_copiados` que
+        continha *o tamanho do arquivo principal antes do checkpoint*. E ele
+        errava para BAIXO, subestimando o custo operacional em toda medição.
+
+        Chamável, e não campo: o tamanho **cresce** enquanto a suíte roda, e
+        congelá-lo na criação mediria o instante errado de novo.
+        """
+        return sum(
+            p.stat().st_size
+            for p in self.caminho.parent.glob(self.caminho.name + "*")
+            if p.is_file()
+        )
 
 
 @contextlib.contextmanager
@@ -76,10 +98,7 @@ def laboratorio_descartavel(oficial: sqlite3.Connection):
     micros = (time.perf_counter_ns() - inicio) // 1_000
     try:
         yield Copia(
-            conn=alvo,
-            caminho=destino,
-            bytes_copiados=destino.stat().st_size,
-            micros_para_copiar=micros,
+            conn=alvo, caminho=destino, micros_para_copiar=micros
         )
     finally:
         alvo.close()
