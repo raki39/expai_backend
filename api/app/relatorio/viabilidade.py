@@ -260,6 +260,98 @@ VALIDACAO_DA_VARIANCIA = {
 }
 
 
+def _variancia_do_estimador(
+    conn: sqlite3.Connection, ds, in_sample, *, base_cents: int
+) -> dict:
+    """A variancia e a dependencia do objeto que a D48 dimensiona.
+
+    **Da serie de EXCESSO quando o par existe**, e da serie do MERCADO so como
+    ultimo recurso - e nesse caso dizendo, no proprio campo, que os numeros
+    seguem nao validados.
+
+    O par e (candidata do agente, B3) sob a MESMA identidade executavel. Sem
+    candidata admitida na 0C, ele nao existe hoje: a D38 decidiu que nenhuma
+    entra. Entao este caminho fica construido e exercitado pela suite, e passa
+    a valer sozinho no dia em que houver uma.
+    """
+    from ..maos_rapidas import executor, series as series_mod
+    from ..hipotese import registro as hipotese_registro
+
+    do_mercado = loader.retornos_bps_entre(
+        conn, ds.id, in_sample.from_ms, in_sample.to_ms_exclusive - 1
+    )
+    fallback = {
+        "fonte": "MERCADO",
+        "pertence_ao_estimador": False,
+        "desvio_bps": _desvio_por_barra_bps(do_mercado),
+        "rho_ppm": poder.autocorrelacao_lag1_ppm(do_mercado),
+        "amostra": do_mercado,
+        "por_que": (
+            "nao ha par (candidata, B3) comparavel: a D38 decidiu que nenhuma"
+            " candidata entra no forward da 0C, entao a serie de excesso nao"
+            " tem sujeito. Os numeros seguem NAO VALIDADOS"
+        ),
+    }
+
+    candidata = conn.execute(
+        "SELECT h.run_id AS run FROM hypothesis h"
+        " WHERE h.agente_origem = ? ORDER BY h.id DESC LIMIT 1",
+        (hipotese_registro.AGENTE_ORIGEM,),
+    ).fetchone()
+    b3 = conn.execute(
+        "SELECT id FROM run WHERE agent_id LIKE 'baseline-B3%'"
+        " ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if candidata is None or b3 is None:
+        return fallback
+
+    try:
+        barras = executor.carregar_janela(conn, ds.id)
+        ex = series_mod.excesso_incremental(
+            conn,
+            candidata_run_id=int(candidata["run"]),
+            b3_run_id=int(b3["id"]),
+            barras=barras,
+        )
+    except series_mod.SeriesIncompativeis as erro:
+        # A recusa e INFORMATIVA, e nao um `except` que engole. Datasets,
+        # timeframes ou identidades executaveis diferentes nao produzem excesso
+        # comparavel, e o relatorio diz qual dos tres.
+        return {**fallback, "por_que": f"par recusado: {erro}"}
+    if not ex.reconstroi_a_diferenca or len(ex.incremental_cents) < 2:
+        return {
+            **fallback,
+            "por_que": (
+                "a serie de excesso nao reconstroi a diferenca final, ou e"
+                " curta demais: usa-la dimensionaria outro efeito"
+            ),
+        }
+
+    # A serie de excesso vem em CENTAVOS por barra. A conta da D48 padroniza o
+    # efeito pela dispersao NA MESMA UNIDADE do efeito - e o efeito minimo
+    # tambem esta em centavos -, entao a conversao para bps sobre a base
+    # acontece dentro de `dimensionar`, com a base que ele ja recebe.
+    #
+    # O desvio vai em bps sobre a base para casar com a interface existente.
+    em_bps = [
+        v * 10_000 // max(1, base_cents) for v in ex.incremental_cents
+    ]
+    return {
+        "fonte": "EXCESSO (candidata - B3)",
+        "pertence_ao_estimador": True,
+        "desvio_bps": _desvio_por_barra_bps(em_bps),
+        "rho_ppm": poder.autocorrelacao_lag1_ppm(list(ex.incremental_cents)),
+        "amostra": em_bps,
+        "comparador": ex.b3.como_dict(),
+        "reconstroi_a_diferenca": ex.reconstroi_a_diferenca,
+        "por_que": (
+            "a serie de excesso incremental entre a candidata e o B3, na mesma"
+            " grade e ao mesmo preco de marcacao. A soma dela reconstroi a"
+            " diferenca final exatamente"
+        ),
+    }
+
+
 def _desvio_por_barra_bps(retornos: list[int]) -> int:
     """A variancia da D48, medida - e arredondada para BAIXO.
 
@@ -381,11 +473,20 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
     # conjunto que uma hipotese usa para ser testada. Medi-las na reserva seria
     # olhar dado selado para dimensionar; medi-las na exploracao descreveria
     # outro periodo.
-    retornos = loader.retornos_bps_entre(
-        conn, ds.id, in_sample.from_ms, in_sample.to_ms_exclusive - 1
+    # A VARIANCIA vem da serie de EXCESSO quando o par candidata/B3 existe -
+    # CORRECAO BLOQUEANTE 1. O efeito minimo declarado e
+    # `excesso_sobre_b3_cents`, e padroniza-lo pela volatilidade do MERCADO
+    # estima o objeto errado: a dispersao da diferenca depende de quanto as
+    # duas estrategias se movem JUNTAS.
+    #
+    # Sem o par, o relatorio NAO cai de volta na serie do mercado em silencio:
+    # ele diz que nao ha par e mantem os numeros marcados como nao validados.
+    medida = _variancia_do_estimador(
+        conn, ds, in_sample, base_cents=cfg.seed_capital_usd_cents
     )
-    desvio_bps = _desvio_por_barra_bps(retornos)
-    rho_ppm = poder.autocorrelacao_lag1_ppm(retornos)
+    desvio_bps = medida["desvio_bps"]
+    rho_ppm = medida["rho_ppm"]
+    retornos = medida["amostra"]
     if desvio_bps <= 0:
         return {
             "disponivel": False,
@@ -589,7 +690,13 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             ),
         },
         "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
-        "numeros_validados": False,
+        "fonte_da_variancia": {
+            k: v for k, v in medida.items() if k != "amostra"
+        },
+        # Os numeros so voltam a valer quando a variancia pertence ao
+        # estimador. Enquanto o par (candidata, B3) nao existir, ela vem
+        # do mercado e o campo continua `false` - derivado, e nao fixo.
+        "numeros_validados": bool(medida["pertence_ao_estimador"]),
         "conclusao": CONCLUSAO,
         "conclusao_sustentada": _sustenta(horizontes, hipoteses),
         "opcoes_prospectivas": OPCOES_PROSPECTIVAS,

@@ -157,6 +157,66 @@ def _duracao_barra_ms(conn: sqlite3.Connection, run_id: int) -> int:
     return int(linha["ms"])
 
 
+#: A METODOLOGIA ESTATISTICA, versionada. Valores historicos nao sao alterados
+#: em silencio: eles ficam, com o rotulo do que os produziu.
+#:
+#: > "Versione a metodologia estatistica. Nao altere silenciosamente valores
+#: > historicos: marque p-valores, DSR e relatorios de viabilidade anteriores
+#: > como `invalidado_por_serie_incorreta` ou supersedido." - o usuario
+#:
+#: **Nada aqui e persistido, e por isso o rotulo e a unica marca possivel.** O
+#: p-valor e o DSR sao RECALCULADOS do banco a cada leitura
+#: (`parecer_derivado`), o que foi decisao do incremento 10 - o veredito e
+#: funcao do pre-registro imutavel e de tabelas append-only. Entao "invalidar o
+#: historico" nao e apagar linha: e garantir que ninguem cite um numero sem
+#: saber sob qual serie ele foi produzido.
+METODOLOGIA_V1 = {
+    "versao": 1,
+    "serie": "retornos do MERCADO na janela executada",
+    "estado": "invalidado_por_serie_incorreta",
+    "ate": "2026-09-08",
+    "por_que": (
+        "a serie nao conhecia a estrategia: media o desempenho do DATASET entre"
+        " a primeira e a ultima execucao. Medido: uma regra que perdeu 16% do"
+        " capital num mercado que subiu 198,8% recebia Sharpe +25,78 e p-valor"
+        " de 846 ppm, contra um limiar de primeira rejeicao de 467 ppm"
+    ),
+    "o_que_isso_invalida": (
+        "todo p-valor submetido ao BY, todo Sharpe realizado e todo DSR"
+        " calculados ate 2026-09-08, e os numeros de capacidade da D48 que"
+        " usaram a variancia do mercado"
+    ),
+    "o_que_isso_NAO_invalida": (
+        "os criterios 1 a 5 do Portao B, que sao FATOS DO LEDGER e nao dependem"
+        " desta serie; e o A1b, que sintetiza a propria serie da estrategia com"
+        " um Sharpe implantado e nunca passou pelo caminho contaminado"
+    ),
+}
+
+METODOLOGIA_V2 = {
+    "versao": 2,
+    "serie": "retorno por barra da EQUITY da estrategia, em grade comum",
+    "estado": "vigente",
+    "desde": "2026-09-08",
+    "por_que": (
+        "e a serie que a definicao do Sharpe realizado e do DSR pedem: o que a"
+        " ESTRATEGIA rendeu, com custos de execucao e de pensamento dentro, e"
+        " nao o que o preco fez"
+    ),
+    "modulo": "app/maos_rapidas/series.retorno_da_estrategia",
+}
+
+METODOLOGIA_VIGENTE = METODOLOGIA_V2
+METODOLOGIAS = (METODOLOGIA_V1, METODOLOGIA_V2)
+
+
+def _serie_da_estrategia(conn: sqlite3.Connection, run_id: int) -> list[int]:
+    """Delega para `series.serie_do_run`. UMA definicao, dois leitores."""
+    from ..maos_rapidas import series as series_mod
+
+    return series_mod.serie_do_run(conn, run_id)
+
+
 def _julgar(
     conn: sqlite3.Connection, hypothesis_id: int, run_id: int
 ) -> tuple[veredito_mod.Veredito, dict]:
@@ -168,12 +228,19 @@ def _julgar(
     pre = _pre_registro(hip)
     duracao = _duracao_barra_ms(conn, run_id)
     bruto = executor.barras_expostas(conn, run_id, duracao)
+    # A serie da ESTRATEGIA, e nao a do mercado. CORRECAO BLOQUEANTE 1,
+    # 2026-09-08: `retornos_do_run` devolve os retornos do DATASET na janela
+    # executada, e nao a equity da estrategia - entao `n_efetivo`, o p-valor e
+    # o DSR mediam o MERCADO.
+    #
+    # Medido antes de corrigir: uma regra que perdeu 16% do capital num mercado
+    # que subiu 198,8% recebia Sharpe +25,78 e p-valor de 846 ppm, contra um
+    # limiar de primeira rejeicao de 467. O Sharpe da equity dela era -17,06.
+    #
+    # A serie continua sendo UMA, lida do mesmo lugar pelas duas partes - a
+    # correcao do run 30 nao foi desfeita, so trocou de objeto.
     efetivo = poder.efetivo_de_bruto(
-        # A MESMA serie que a autoavaliacao do agente le. As duas
-        # produziam numeros diferentes para `n_efetivo`, e e ele que
-        # decide entre `refutada` e `inconclusiva` (§14.4).
-        executor.retornos_do_run(conn, run_id),
-        bruto,
+        _serie_da_estrategia(conn, run_id), bruto
     )
 
     realizado = veredito_mod.observar(
@@ -258,7 +325,7 @@ def _estatistica_do_run(
     O que este docstring garante enquanto isso e que ninguem leia
     `sharpe_por_observacao` como desempenho da candidata.
     """
-    retornos = executor.retornos_do_run(conn, run_id)
+    retornos = _serie_da_estrategia(conn, run_id)
     try:
         m = sharpe_mod.momentos(retornos)
     except sharpe_mod.AmostraCurta as erro:
@@ -277,13 +344,16 @@ def _estatistica_do_run(
         "disponivel": True,
         # A ressalva vai JUNTO do numero. Uma ressalva longe do numero que ela
         # qualifica e uma ressalva que ninguem le com ele - a licao da D47.
-        "serie_medida": "retornos do MERCADO na janela executada",
-        "nao_e_o_desempenho_da_estrategia": (
-            "RASTREADO em 2026-09-08: `retornos_do_run` devolve a serie do"
-            " DATASET entre a primeira e a ultima execucao, e nao a equity da"
-            " estrategia. Medido em cenario sintetico: uma regra que perdeu 16%"
-            " do capital recebeu Sharpe +25,78 e p-valor de 846 ppm. CORRECAO"
-            " BLOQUEANTE antes do relatorio definitivo da 0C"
+        "serie_medida": (
+            "retorno por barra da EQUITY da estrategia, em grade comum"
+        ),
+        "metodologia": METODOLOGIA_VIGENTE,
+        "corrigido_em": (
+            "2026-09-08: ate a metodologia v1 esta serie era a do MERCADO na"
+            " janela executada. Medido: uma regra que perdeu 16% do capital"
+            " recebia Sharpe +25,78 e p-valor de 846 ppm, contra um limiar de"
+            " 467. Todo resultado estatistico anterior esta"
+            f" {METODOLOGIA_V1['estado']}"
         ),
         "momentos": m.como_dict(duracao_barra_ms),
         "teste": teste.como_dict(),

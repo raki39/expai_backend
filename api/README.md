@@ -38,7 +38,7 @@ O bind é `0.0.0.0` (IPv4), que é o que o proxy público da Railway usa. Sobrep
 .venv/Scripts/python.exe -m pytest
 ```
 
-**1.123 testes**, 5 pulados (os que gastam dinheiro com LLM real, ligados por
+**1.138 testes**, 6 pulados (os que gastam dinheiro com LLM real, ligados por
 `RODAR_TESTES_DE_REDE=1`). O número não é enfeite: várias das guardas existem
 porque um defeito passou por elas antes, e o comentário de cada uma diz qual.
 

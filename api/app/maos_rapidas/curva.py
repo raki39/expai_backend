@@ -67,8 +67,19 @@ class Ponto:
         }
 
 
-def _valor_da_posicao_cents(quantity_sats: int, preco: int) -> int:
-    """Posicao avaliada ao preco dado. Para BAIXO, como toda receita."""
+def valor_da_posicao_cents(quantity_sats: int, preco: int) -> int:
+    """Posicao avaliada ao preco dado. Para BAIXO, como toda receita.
+
+    **Publica desde 2026-09-08**, e por um defeito meu: ao escrever
+    `series.equity_por_barra` eu reescrevi esta conta e usei `10^8` onde o
+    divisor e `DIVISOR_NOCIONAL` (10^14). A equity explodiu em seis ordens
+    de grandeza e o desvio do excesso saiu em bilhoes de centavos por
+    barra.
+
+    A garantia que o usuario exigiu e "mesmo preco de marcacao para
+    candidata e B3" - e ela nao sobrevive a duas implementacoes da
+    marcacao. Uma funcao, dois usuarios.
+    """
     return quantity_sats * preco // DIVISOR_NOCIONAL
 
 
@@ -138,7 +149,7 @@ def curva_do_run(
                 Ponto(
                     open_time_ms=barra.open_time_ms,
                     patrimonio_cents=caixa
-                    + _valor_da_posicao_cents(posicao, barra.close),
+                    + valor_da_posicao_cents(posicao, barra.close),
                     posicao_sats=posicao,
                 )
             )

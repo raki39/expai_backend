@@ -421,6 +421,63 @@ NAO_RESPONDE = [
 ]
 
 
+#: A certificacao estatistica do Portao A, REABERTA em 2026-09-08.
+#:
+#: > "A certificacao estatistica do Portao A deve ficar temporariamente
+#: > reaberta/aguardando_revalidacao." - o usuario
+#:
+#: **E ela nao esta toda contaminada, e dizer qual metade importa.** O
+#: rastreamento separou:
+#:
+#: | controle | passa pelo caminho contaminado? | por que |
+#: |---|---|---|
+#: | **A1a** | **SIM** | e injetado "pelo mesmo caminho das reais" e chega a `promocao.avaliar_in_sample`, que lia a serie do mercado |
+#: | **A1b** | **NAO** | ele SINTETIZA a propria serie da estrategia (`series.nula` / `series.com_sinal`) com um Sharpe implantado, e nunca tocou `retornos_do_run` |
+#:
+#: Entao o calibre das nulas (1 promocao em 200 lotes) e as duas medidas de
+#: poder (3,25% e 28,67%) **nao dependem da serie corrigida**. O que aguarda
+#: reexecucao sao os seis controles deterministicos de A1a.
+#:
+#: Isso e uma afirmacao verificavel, e nao uma esperanca: ha teste conferindo
+#: que `a1b/calibre.py` nao importa `retornos_do_run` nem `series.serie_do_run`.
+REABERTA = "reaberta_aguardando_revalidacao"
+CERTIFICADA = "certificada"
+
+_ESTADO_DA_CERTIFICACAO = REABERTA
+
+
+def _certificacao_estatistica() -> dict:
+    """O estado da certificacao, e o que exatamente aguarda reexecucao."""
+    return {
+        "estado": _ESTADO_DA_CERTIFICACAO,
+        "desde": "2026-09-08",
+        "por_que": (
+            "CORRECAO BLOQUEANTE 1: ate a metodologia v1, o p-valor e o DSR"
+            " mediam o MERCADO na janela executada, e nao a estrategia. Os"
+            " controles que passam pelo caminho real precisam ser reexecutados"
+            " sob a serie corrigida"
+        ),
+        "aguarda_reexecucao": [
+            "a1a: os seis controles deterministicos, injetados pelo mesmo"
+            " caminho das reais - eles chegam a `promocao.avaliar_in_sample`",
+            "a avaliacao da hipotese 41, com o MESMO pre-registro",
+        ],
+        "nao_precisa_de_reexecucao": [
+            "a1b: ele SINTETIZA a propria serie da estrategia, com um Sharpe"
+            " implantado, e nunca leu `retornos_do_run`. O calibre das nulas"
+            " (1 promocao em 200 lotes) e as duas medidas de poder (3,25% e"
+            " 28,67%) nao dependem da serie corrigida",
+            "os criterios A2, A3 e A4 - baseline negativo, vazamento e"
+            " reconciliacao do ledger sao fatos do ledger e da estrutura",
+        ],
+        "a_reexecucao_NAO_e": (
+            "hipotese nova, tentativa nova, credito novo nem uso novo de"
+            " holdout. E a MESMA hipotese sob a metodologia corrigida - o"
+            " contador global do DSR nao se move, e o pre-registro e o mesmo"
+        ),
+    }
+
+
 def montar(
     conn: sqlite3.Connection,
     *,
@@ -503,6 +560,10 @@ def montar(
         "condicoes": condicoes,
         "reprovando": reprovando,
         "pendentes": pendentes,
+        # A CERTIFICACAO ESTATISTICA esta REABERTA desde 2026-09-08, e por
+        # isso ela vem antes de `passa`: quem le o portao tem de saber que
+        # metade dele aguarda reexecucao antes de ler o booleano.
+        "certificacao_estatistica": _certificacao_estatistica(),
         # TRES resultados, e nao dois. `None` continua diferente de `False`;
         # o que ele deixa de ser e diferente de "aprovado".
         "passa": not reprovando and not pendentes,

@@ -28,6 +28,7 @@ from ..config.schema import ExperimentConfig
 from ..dataset import loader
 from ..ledger import livro
 from ..maos_rapidas import baselines, executor
+from ..maos_rapidas import series as series_mod
 from ..regra import registro as registro_de_regra
 from ..regra.schema import Regra
 from ..settings import Settings
@@ -329,7 +330,11 @@ def rodar(
         # havia duas, e elas discordavam - 11.023 aqui contra 10.976 la, no
         # mesmo run 30. A independencia de §8.1 e de JUIZO, e nao de
         # aritmetica sobre um fato dos dados (regra 16).
-        retornos_bps=executor.retornos_do_run(conn, run_id),
+        # A serie da ESTRATEGIA, a mesma que o validador le
+        # (`series.serie_do_run`). Trocar so um dos lados devolveria a
+        # divergencia de `n_efetivo` do run 30 - e a guarda daquela
+        # vez acusou isto na primeira tentativa desta correcao.
+        retornos_bps=series_mod.serie_do_run(conn, run_id),
         duracao_barra_ms=(
             int(barras[1].open_time_ms - barras[0].open_time_ms)
             if len(barras) >= 2

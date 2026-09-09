@@ -211,29 +211,20 @@ def test_retornos_do_run_e_serie_de_MERCADO_e_nao_de_excesso(conn, run_b3):
     assert sum(serie) != simulador.caixa_cents(conn, run_id) - SEMENTE_USD
 
 
-def test_nao_existe_serie_de_excesso_por_barra_e_isso_e_declarado():
-    """A ausência, fixada — para que ninguém a suponha presente.
+def test_a_serie_de_excesso_por_barra_AGORA_EXISTE():
+    """Ela era a ausência declarada; virou CORREÇÃO BLOQUEANTE 1 e foi
+    construída em 2026-09-08.
 
-    Excesso é diferença entre DOIS runs, e eles não compartilham grade: o
-    agente e o B3 executam em instantes diferentes, com giros diferentes. Só os
-    dois **finais** existem para subtrair.
-
-    Se algum dia alguém construir essa série, este teste falha e a pessoa
-    decide o que ele deve passar a afirmar — em vez de a ausência sumir calada.
+    O teste anterior afirmava a ausência com a instrução de virar a asserção
+    contrária no dia em que alguém a construísse. Este é esse dia.
     """
-    import app.maos_rapidas.curva as c
-    import app.maos_rapidas.executor as e
+    from app.maos_rapidas import series
 
-    nomes = set(dir(c)) | set(dir(e))
-    suspeitos = sorted(
-        n for n in nomes
-        if "excesso" in n.lower() and ("serie" in n.lower() or "barra" in n.lower())
-    )
-    assert not suspeitos, (
-        f"apareceu algo que parece série de excesso por barra: {suspeitos}."
-        " Se foi construído de propósito, este teste deve virar a asserção"
-        " contrária, com a identidade que ele reconstrói escrita ao lado"
-    )
+    assert hasattr(series, "excesso_incremental")
+    assert hasattr(series, "retorno_da_estrategia")
+    assert hasattr(series, "serie_do_run")
+    # E as duas continuam sendo DUAS: forçá-las a uma repetiria o erro.
+    assert series.retorno_da_estrategia is not series.excesso_incremental
 
 
 def test_o_excesso_do_portao_B_e_diferenca_de_dois_CAIXAS(conn, cenario):
@@ -276,30 +267,49 @@ def test_o_excesso_do_portao_B_e_diferenca_de_dois_CAIXAS(conn, cenario):
 # esquecido nem descoberto de novo do zero.
 
 
-def test_a_variancia_da_D48_e_do_MERCADO_e_nao_do_estimador(conn):
-    """RASTREIO 1 e 2: variancia, autocorrelacao e `n_efetivo` da D48.
+def test_a_variancia_da_D48_vem_do_ESTIMADOR_quando_ha_par(conn):
+    """RASTREIO 1 e 2, **depois da correção**.
 
-    `viabilidade.montar` mede `desvio_bps` e `rho_ppm` sobre
-    `loader.retornos_bps_entre` — a serie de fechamento a fechamento do
-    DATASET, **a mesma para qualquer estrategia sobre a mesma janela**.
+    Este teste nasceu afirmando o defeito — que a variância vinha da série do
+    MERCADO — com a instrução de virar a asserção contrária quando alguém
+    corrigisse. A correção veio em 2026-09-08, e ele virou.
 
-    O efeito minimo declarado e `excesso_sobre_b3_cents`. Padronizar um efeito
-    de DIFERENCA pela volatilidade do MERCADO estima o objeto errado: a
-    variancia da diferenca depende de quanto as duas estrategias se movem
-    juntas, e nao de quanto o mercado se move.
+    `_variancia_do_estimador` agora busca o par (candidata, B3) e usa a **série
+    de excesso incremental**. Sem par ele **não cai de volta no mercado em
+    silêncio**: declara a fonte e mantém os números não validados.
     """
     import inspect
 
     from app.relatorio import viabilidade
 
-    fonte = inspect.getsource(viabilidade.montar)
-    assert "loader.retornos_bps_entre" in fonte, (
-        "a fonte da variancia mudou: refaca o rastreio antes de mexer neste"
-        " teste"
+    fonte = inspect.getsource(viabilidade._variancia_do_estimador)
+    assert "excesso_incremental" in fonte, (
+        "a variancia deixou de vir da serie de excesso: o efeito minimo e"
+        " `excesso_sobre_b3_cents`, e a volatilidade do mercado estima outro"
+        " objeto"
     )
-    assert viabilidade.VALIDACAO_DA_VARIANCIA[
-        "pertence_ao_estimador_do_efeito"
-    ] is False
+    # E a queda para o mercado é DECLARADA, nunca silenciosa.
+    assert '"fonte": "MERCADO"' in fonte
+    assert "pertence_ao_estimador" in fonte
+
+
+def test_sem_par_o_relatorio_DIZ_que_caiu_no_mercado(conn):
+    """A queda é informativa, e ela mantém os números inválidos.
+
+    Na 0C não há candidata (D38), então o par não existe — e o relatório tem de
+    dizer isso em vez de usar a série errada calado.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import viabilidade
+
+    r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    if not r.get("disponivel"):
+        pytest.skip("sem dataset: a fonte da variancia nao chega a ser medida")
+    fonte = r["fonte_da_variancia"]
+    assert fonte["pertence_ao_estimador"] is False
+    assert fonte["fonte"] == "MERCADO"
+    assert "D38" in fonte["por_que"] or "par" in fonte["por_que"]
+    assert r["numeros_validados"] is False
 
 
 def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn):
@@ -321,37 +331,59 @@ def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn):
     assert "BLOQUEANTE" in v["correcao"]
 
 
-def test_o_pvalor_que_vai_ao_BY_mede_o_MERCADO(conn, run_b3):
-    """RASTREIO 3 e 4: o p-valor e o DSR.
+def test_o_pvalor_que_vai_ao_BY_mede_a_ESTRATEGIA(conn, run_b3):
+    """RASTREIO 3 e 4, **depois da correção**.
 
-    `promocao._estatistica_do_run` calcula os momentos sobre
-    `executor.retornos_do_run`, que e a serie do DATASET. Entao o "Sharpe
-    realizado", o p-valor que BY ordena e o DSR que o consome medem o
-    **mercado** na janela executada.
+    Nasceu afirmando o defeito: `_estatistica_do_run` calculava os momentos
+    sobre `executor.retornos_do_run`, a série do DATASET. Medido então: um
+    mercado que subiu 198,8% dava Sharpe **+25,78** a uma regra que **perdeu
+    16% do capital**, com p-valor de 846 ppm contra um limiar de 467.
 
-    Medido em cenario sintetico: mercado subindo 198,8%, regra girando 164
-    vezes e terminando com 83.741 contra 100.000 de semente — **perdeu 16%** —
-    recebeu Sharpe **+25,78** e p-valor de **846 ppm**, contra um limiar de
-    primeira rejeicao de 467 ppm. O Sharpe da equity dela e **-17,06**.
+    Agora ele afirma a correção. E a metodologia é **versionada**: a v1 fica
+    registrada como `invalidado_por_serie_incorreta`, sem apagar nada.
     """
     import inspect
 
     from app.validador import promocao
 
     fonte = inspect.getsource(promocao._estatistica_do_run)
-    assert "executor.retornos_do_run" in fonte
-    assert "MERCADO" in fonte, (
-        "a declaracao de que esta serie e do mercado sumiu do modulo que a usa"
-    )
+    assert "_serie_da_estrategia" in fonte
+    # A guarda de codigo contra `retornos_do_run` vive em
+    # `test_series.test_garantia_9`, com `codigo_sem_prosa` - repeti-la
+    # aqui com `getsource` acusaria o COMENTARIO que explica a correcao,
+    # que e a terceira vez que caio nisso hoje.
 
-    # E a ressalva vai na RESPOSTA, junto do numero que ela qualifica.
+    assert promocao.METODOLOGIA_V1["estado"] == "invalidado_por_serie_incorreta"
+    assert promocao.METODOLOGIA_VIGENTE["versao"] == 2
+    assert "EQUITY" in promocao.METODOLOGIA_VIGENTE["serie"]
+
     run_id, _ds, _cfg, _r = run_b3
     est = promocao._estatistica_do_run(
         conn, run_id, duracao_barra_ms=900_000, n_efetivo=100
     )
     if est.get("disponivel"):
-        assert "MERCADO" in est["serie_medida"]
-        assert "BLOQUEANTE" in est["nao_e_o_desempenho_da_estrategia"]
+        assert "EQUITY" in est["serie_medida"]
+        assert est["metodologia"]["versao"] == 2
+
+
+def test_a_metodologia_v1_fica_REGISTRADA_e_nao_apagada():
+    """> "Não altere silenciosamente valores históricos."
+
+    Nada é persistido — p-valor e DSR são recalculados a cada leitura —, então
+    "invalidar o histórico" não é apagar linha: é garantir que ninguém cite um
+    número sem saber sob qual série ele nasceu.
+
+    E a v1 diz o que ela **não** invalida, que é a metade que importa para não
+    jogar fora resultado bom junto.
+    """
+    from app.validador import promocao
+
+    v1 = promocao.METODOLOGIA_V1
+    assert v1["estado"] == "invalidado_por_serie_incorreta"
+    assert "846 ppm" in v1["por_que"] or "+25,78" in v1["por_que"]
+    assert "FATOS DO LEDGER" in v1["o_que_isso_NAO_invalida"]
+    assert "A1b" in v1["o_que_isso_NAO_invalida"]
+    assert len(promocao.METODOLOGIAS) == 2
 
 
 def test_o_CUSUM_ainda_NAO_TEM_produtor_do_observado(conn):
