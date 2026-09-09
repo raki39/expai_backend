@@ -51,39 +51,101 @@ def _obrigatoria():
 # ---------------------------------------------------------------------------
 
 
-def test_o_dominio_sai_da_semente_e_do_horizonte_e_nao_de_constante():
-    """Nenhum dos três limites é digitado: todos saem de insumo declarado."""
-    teto = SEMENTE * escala.TETO_MULTIPLO_DA_SEMENTE_BPS // 10_000
-    assert escala.dominio(
-        "patrimonio_final_cents",
-        semente_cents=SEMENTE,
-        horizonte_barras=HORIZONTE,
-    ) == (0, teto)
-    # Excesso é diferença entre dois patrimônios: simétrico.
-    assert escala.dominio(
-        "excesso_sobre_b3_cents",
-        semente_cents=SEMENTE,
-        horizonte_barras=HORIZONTE,
-    ) == (-teto, teto)
-    # Uma ida e uma volta gastam duas barras — o máximo é aritmética.
-    assert escala.dominio(
-        "idas_e_voltas", semente_cents=SEMENTE, horizonte_barras=HORIZONTE
-    ) == (0, HORIZONTE // 2)
+def test_o_dominio_ESTRUTURAL_nao_depende_da_semente():
+    """Nenhum limite imposto pelo simulador é função do capital semente.
+
+    Foi assumir que era que produziu o defeito: a primeira versão publicava
+    `[0, 3 × semente]` como *domínio observável*. Não é — se o ativo triplicar,
+    o patrimônio passa de 3× sem alavancagem nenhuma. A assinatura de
+    `dominio_estrutural` **não recebe a semente**, e é isso que torna o erro
+    impossível de repetir.
+    """
+    import inspect
+
+    assinatura = inspect.signature(escala.dominio_estrutural)
+    assert "semente_cents" not in assinatura.parameters, (
+        "nenhum limite ESTRUTURAL depende da semente; receber a semente aqui"
+        " reabre a porta para confundir politica com impossibilidade"
+    )
 
 
-def test_o_dominio_acompanha_a_semente_em_vez_de_fixar_um_numero():
-    """Dobrar a semente dobra o teto — se não acompanhasse, seria constante."""
-    _, teto_1 = escala.dominio(
-        "patrimonio_final_cents",
-        semente_cents=SEMENTE,
-        horizonte_barras=HORIZONTE,
+def test_o_teto_do_patrimonio_NAO_EXISTE_e_isso_e_declarado():
+    """`None` significa *não há limite a afirmar*, e não *zero* nem *infinito*.
+
+    Uma posição long pode ultrapassar qualquer múltiplo da semente se o ativo
+    valorizar, e ganhos sucessivos compõem. Qualquer teto derivado da janela
+    observada seria dado do in-sample entrando numa conferência de
+    pré-registro, e inválido para qualquer outra janela.
+    """
+    piso, teto = escala.dominio_estrutural(
+        "patrimonio_final_cents", horizonte_barras=HORIZONTE
     )
-    _, teto_2 = escala.dominio(
-        "patrimonio_final_cents",
-        semente_cents=SEMENTE * 2,
-        horizonte_barras=HORIZONTE,
-    )
-    assert teto_2 == teto_1 * 2
+    assert piso == 0, "o piso E estrutural: long/flat sem alavancagem"
+    assert teto is None, "o teto NAO e estrutural: depende do caminho de precos"
+
+
+def test_o_excesso_nao_tem_limite_estrutural_de_lado_nenhum():
+    """Diferença de dois patrimônios sem teto — e perder do baseline é normal."""
+    assert escala.dominio_estrutural(
+        "excesso_sobre_b3_cents", horizonte_barras=HORIZONTE
+    ) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# A PROVA do único teto estrutural que existe
+# ---------------------------------------------------------------------------
+
+
+def test_idas_e_voltas_e_no_maximo_CEIL_das_barras_por_dois():
+    """`ceil(B / 2)`, e a prova tem duas metades verificadas no executor.
+
+    1. **No máximo uma execução por barra de decisão** — o laço de
+       `executor.rodar` é `for i in range(ultima_decidivel + 1)`, a venda por
+       stop faz `continue`, e o resto é `if ENTRAR ... elif SAIR`, ramos
+       exclusivos;
+    2. **compras e vendas alternam estritamente** — `comprar` exige
+       `not aberta` e põe `aberta = True`; só `vender` devolve `False`.
+
+    Logo a sequência mais densa é `C V C V C …`, que começa e pode terminar em
+    compra: `ceil(B / 2)`.
+    """
+    for barras, esperado in ((0, 0), (1, 1), (2, 1), (5, 3), (6, 3), (21_024, 10_512)):
+        piso, teto = escala.dominio_estrutural(
+            "idas_e_voltas", horizonte_barras=barras
+        )
+        assert (piso, teto) == (0, esperado), barras
+
+
+def test_CEIL_e_nao_FLOOR_e_a_primeira_versao_errava_o_impar():
+    """Em 5 barras cabem 3 compras: `C V C V C`.
+
+    A primeira versão usava `B // 2` = 2 e **recusaria uma cláusula legítima**
+    em horizonte ímpar — um domínio apertado demais mente na direção de dar
+    trabalho, como as guardas de regex estreito já mentiram três vezes.
+    """
+    _, teto = escala.dominio_estrutural("idas_e_voltas", horizonte_barras=5)
+    assert teto == 3
+    assert teto != 5 // 2
+
+
+def test_as_DUAS_metades_da_prova_estao_no_executor():
+    """A prova é sobre código real, então ela quebra se o código mudar.
+
+    Um docstring afirmando a propriedade sobreviveria a qualquer regressão sem
+    mudar uma letra — é a forma do `BLOCOS` e do comentário de `braco.py`.
+    """
+    import inspect
+
+    from app.maos_rapidas import executor
+
+    fonte = inspect.getsource(executor.rodar)
+    # (1) uma execucao por barra: o `continue` depois da venda por stop.
+    assert "continue" in fonte
+    # (2) alternancia: `comprar` sob `not aberta`, e o ramo de saida e `elif`.
+    assert "not aberta" in fonte
+    assert "elif sinal == Sinal.SAIR and aberta" in fonte
+    # E `idas_e_voltas` conta COMPRAS, e nao metade das execucoes.
+    assert "side = 'compra'" in inspect.getsource(executor.idas_e_voltas)
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +153,13 @@ def test_o_dominio_acompanha_a_semente_em_vez_de_fixar_um_numero():
 # ---------------------------------------------------------------------------
 
 
-def test_o_caso_REAL_da_hipotese_41_e_recusado():
+def test_o_caso_REAL_da_hipotese_41_e_FORA_DA_ESCALA_e_nao_impossivel():
     """`patrimonio_final_cents < 950000` sobre semente de 100.000.
 
-    O número exato que está gravado em produção. Se este teste passar a
-    aceitá-lo, a correção foi desfeita.
+    O número exato que está gravado em produção. Recusado — e recusado pela
+    **política**, não por impossibilidade: `ForaDaEscalaEconomica`, e não
+    `ClausulaNaoInformativa`. Se este teste voltar a esperar *"dispara
+    sempre"*, o erro de 2026-09-09 foi refeito.
     """
     bruto = _pre(
         _obrigatoria(),
@@ -104,15 +168,18 @@ def test_o_caso_REAL_da_hipotese_41_e_recusado():
             bps=95_000, semente_cents=SEMENTE,
         ),
     )
-    # A cláusula gravada vale exatamente 950.000 centavos.
     assert bruto.condicoes_falseamento[1].valor == 950_000
 
-    with pytest.raises(escala.ClausulaNaoInformativa) as erro:
+    with pytest.raises(escala.ForaDaEscalaEconomica) as erro:
         escala.conferir(
             bruto, semente_cents=SEMENTE, horizonte_barras=HORIZONTE
         )
-    assert "dispara SEMPRE" in str(erro.value)
-    assert "300000" in str(erro.value)  # o maximo observavel
+    texto = str(erro.value)
+    assert "faixa economica admissivel" in texto
+    assert "POLITICA pre-declarada" in texto
+    # E ela NAO pode dizer nenhuma das duas coisas que exigiriam prova.
+    assert "dispara SEMPRE" not in texto
+    assert "impossivel" not in texto.lower() or "nada e impossivel" in texto
 
 
 def test_a_conferencia_alcanca_a_clausula_SECUNDARIA():
@@ -131,8 +198,10 @@ def test_a_conferencia_alcanca_a_clausula_SECUNDARIA():
         escala.conferir(
             bruto, semente_cents=SEMENTE, horizonte_barras=HORIZONTE
         )
+    # ESTA pode dizer "nunca dispara": o teto de `idas_e_voltas` e provado.
     assert "idas_e_voltas" in str(erro.value)
-    assert "nunca dispara" in str(erro.value)
+    assert "NUNCA dispara" in str(erro.value)
+    assert "ESTRUTURAL" in str(erro.value)
 
 
 def test_a_clausula_EM_ESCALA_passa():
@@ -279,9 +348,40 @@ def test_o_diagnostico_publica_sem_corrigir():
         [boa, ruim], semente_cents=SEMENTE, horizonte_barras=HORIZONTE
     )
     assert len(fora) == 1
-    assert fora[0]["metrica"] == "patrimonio_final_cents"
-    assert fora[0]["dominio"] == [0, 300_000]
-    assert fora[0]["nao_fortalece_veredito"] is True
+    d = fora[0]
+    assert d["metrica"] == "patrimonio_final_cents"
+    assert d["classificacao"] == "fora_da_escala_economica"
+    assert d["dominio_estrutural"] == [0, None]
+    assert d["faixa_economica_admissivel"] == [0, 300_000]
+    assert d["nao_fortalece_veredito"] is True
+    # E o campo que impede a leitura errada vai JUNTO.
+    assert "NAO afirma que o valor e impossivel" in d["o_que_isso_NAO_afirma"]
+
+
+def test_o_diagnostico_separa_as_DUAS_classes():
+    """A mesma função, dois vereditos diferentes, e cada um diz o que é."""
+    estrutural = ClausulaFalseamento(
+        metrica="idas_e_voltas", comparador="maior_que", valor=20_000
+    )
+    politica = ClausulaFalseamento(
+        metrica="patrimonio_final_cents",
+        comparador="menor_que",
+        valor=950_000,
+        valor_bps_da_semente=95_000,
+    )
+    por_classe = {
+        d["classificacao"]: d
+        for d in escala.diagnosticar(
+            [estrutural, politica],
+            semente_cents=SEMENTE,
+            horizonte_barras=HORIZONTE,
+        )
+    }
+    assert set(por_classe) == {"nao_informativa", "fora_da_escala_economica"}
+    # A estrutural PODE afirmar impossibilidade; a de politica nao.
+    assert "NUNCA dispara" in por_classe["nao_informativa"]["por_que"]
+    assert por_classe["nao_informativa"]["o_que_isso_NAO_afirma"] is None
+    assert por_classe["fora_da_escala_economica"]["o_que_isso_NAO_afirma"]
 
 
 def test_o_dominio_do_run_e_o_da_SEMENTE_DELE():
@@ -300,6 +400,8 @@ def test_o_dominio_do_run_e_o_da_SEMENTE_DELE():
     assert escala.diagnosticar(
         [ruim], semente_cents=100_000, horizonte_barras=HORIZONTE
     )
+    # Com semente de 1.000.000 o limiar passa a ser 95% dela, e a FAIXA o
+    # admite. O dominio estrutural nao mudou - ele nunca dependeu da semente.
     assert not escala.diagnosticar(
         [ruim], semente_cents=1_000_000, horizonte_barras=HORIZONTE
     )
@@ -362,8 +464,12 @@ def test_o_bloco_de_escala_carrega_OS_QUATRO_itens_exigidos():
     assert "10000 bps do caixa" in texto
     assert "sem alavancagem" in texto
     # E os dois dominios, para que o limiar nasca dentro deles.
-    assert f"de 0 a {HORIZONTE // 2}" in texto
-    assert "300000 centavos" in texto
+    # O teto ESTRUTURAL de idas e voltas, que e ceil(B / 2).
+    assert f"de 0 a {(HORIZONTE + 1) // 2}" in texto
+    # E a faixa de patrimonio, dita como FAIXA e nao como teto do simulador.
+    assert "300000" in texto
+    assert "ADMISSIVEL" in texto
+    assert "Nao e um teto do simulador" in texto
     assert "valor_bps_da_semente" in texto
 
 
@@ -419,7 +525,7 @@ def test_a_clausula_nao_informativa_nao_refuta():
         _Realizado(),
         n_efetivo=1,
         n_minimo=1,
-        clausulas_nao_informativas=frozenset({tautologica.como_texto()}),
+        clausulas_sem_voto={tautologica.como_texto(): "nao_informativa"},
     )
     assert com_marca.veredito != "refutada"
 
@@ -429,7 +535,8 @@ def test_a_clausula_nao_informativa_nao_refuta():
         if c["metrica"] == "idas_e_voltas"
     ][0]
     assert linha["disparou"] is True
-    assert linha["nao_informativa"] is True
+    assert linha["nao_fortalece_veredito"] is True
+    assert linha["classificacao"] == "nao_informativa"
 
 
 def test_o_A1a_barra_a_clausula_tautologica():
@@ -445,8 +552,11 @@ def test_o_A1a_barra_a_clausula_tautologica():
     assert len(tentativas) == 2
     tauto = [t for t in tentativas if "tautologica" in t.o_que][0]
     assert tauto.barrada is True
-    assert "ClausulaNaoInformativa" in tauto.mecanismo
-    assert "dispara SEMPRE" in tauto.mecanismo
+    # Pela POLITICA, e nao por impossibilidade - o teto do patrimonio nao e
+    # estrutural, e o controle existe para provar que a faixa recusa.
+    assert "ForaDaEscalaEconomica" in tauto.mecanismo
+    assert "faixa economica admissivel" in tauto.mecanismo
+    assert "dispara SEMPRE" not in tauto.mecanismo
 
     # E ela NÃO abriu família nova: a lista continua com as seis do documento.
     assert catalogo.QUANTAS == 6

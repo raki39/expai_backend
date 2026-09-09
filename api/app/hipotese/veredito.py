@@ -176,14 +176,18 @@ class ClausulaConferida:
     clausula: ClausulaFalseamento
     observado: int | None
     disparou: bool | None
-    #: A clausula nao consegue ser verdadeira E falsa no dominio da metrica.
+    #: Esta clausula NAO pode fortalecer veredito, e o campo ao lado diz por que.
     #:
     #: A hipotese 41 declarou `patrimonio_final_cents < 950000` sobre uma
-    #: semente de 100.000 centavos: ela dispara em qualquer run possivel. O
-    #: pre-registro e imutavel (§8.2), entao a linha nao pode ser corrigida -
-    #: o que se pode e publicar que ela nao informa, e **nao deixar o
-    #: `disparou` dela fortalecer veredito nenhum**.
-    nao_informativa: bool = False
+    #: semente de 100.000 centavos. O pre-registro e imutavel (§8.2), entao a
+    #: linha nao pode ser corrigida - o que se pode e publicar o que ela e, e
+    #: **nao deixar o `disparou` dela decidir nada**.
+    nao_fortalece_veredito: bool = False
+    #: `nao_informativa` (limite ESTRUTURAL provado: ela nao consegue ser as
+    #: duas coisas) ou `fora_da_escala_economica` (POLITICA pre-declarada: o
+    #: limiar e legivel e fala de outra escala). As duas autorizam frases
+    #: diferentes, e juntar as duas num booleano so foi o defeito de ontem.
+    classificacao: str | None = None
     por_que_nao_conferida: str | None = None
 
     def como_dict(self) -> dict:
@@ -194,7 +198,8 @@ class ClausulaConferida:
             "valor": self.clausula.valor,
             "observado": self.observado,
             "disparou": self.disparou,
-            "nao_informativa": self.nao_informativa,
+            "nao_fortalece_veredito": self.nao_fortalece_veredito,
+            "classificacao": self.classificacao,
             "por_que_nao_conferida": self.por_que_nao_conferida,
         }
 
@@ -238,7 +243,7 @@ def emitir(
     *,
     n_efetivo: int,
     n_minimo: int,
-    clausulas_nao_informativas: frozenset[str] = frozenset(),
+    clausulas_sem_voto: dict[str, str] | None = None,
 ) -> Veredito:
     """Deriva o veredito. Nenhum ramo aqui escreve uma conclusao a mao."""
     clausulas: list[ClausulaConferida] = []
@@ -262,7 +267,10 @@ def emitir(
                 clausula=c,
                 observado=observado,
                 disparou=c.disparou(observado),
-                nao_informativa=c.como_texto() in clausulas_nao_informativas,
+                nao_fortalece_veredito=(
+                    c.como_texto() in (clausulas_sem_voto or {})
+                ),
+                classificacao=(clausulas_sem_voto or {}).get(c.como_texto()),
             )
         )
 
@@ -320,7 +328,7 @@ def emitir(
     factuais = [
         c for c in clausulas
         if c.disparou
-        and not c.nao_informativa
+        and not c.nao_fortalece_veredito
         and c.clausula.metrica in METRICAS_FACTUAIS
     ]
     if factuais:
@@ -355,7 +363,7 @@ def emitir(
     # possivel - `patrimonio_final_cents < 950000` sobre semente de 100.000 -
     # nao observou nada: deixa-la refutar seria chamar de evidencia uma linha
     # que nao podia dar outra resposta.
-    dispararam = [c for c in clausulas if c.disparou and not c.nao_informativa]
+    dispararam = [c for c in clausulas if c.disparou and not c.nao_fortalece_veredito]
     if dispararam:
         return _refutada(
             dispararam,

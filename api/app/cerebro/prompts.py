@@ -274,8 +274,11 @@ def bloco_de_escala(
     """
     from ..hipotese import escala
 
-    teto = (
-        capital_semente_cents * escala.TETO_MULTIPLO_DA_SEMENTE_BPS // 10_000
+    # A FAIXA ECONOMICA admissivel, e nao um teto do simulador. O prompt tem
+    # de dizer qual das duas coisas e: nao ha teto estrutural de patrimonio,
+    # porque uma posicao long ultrapassa qualquer multiplo se o ativo valorizar.
+    _, teto = escala.faixa_economica(
+        "patrimonio_final_cents", semente_cents=capital_semente_cents
     )
     linhas = [
         "Escala e unidades (LEIA ANTES DE DECLARAR QUALQUER LIMIAR):",
@@ -286,8 +289,11 @@ def bloco_de_escala(
         " (nunca fracao, nunca a unidade da moeda)",
         f"  posicao maxima por operacao: {fracao_maxima_bps} bps do caixa do"
         " momento; long/flat, sem alavancagem e sem venda a descoberto",
-        f"  patrimonio possivel: de 0 a ~{teto} centavos",
-        f"  idas e voltas possiveis: de 0 a {horizonte_barras // 2}"
+        f"  faixa de patrimonio ADMISSIVEL para declarar limiar: 0 a {teto}"
+        " centavos. Nao e um teto do simulador - e a escala deste experimento;"
+        " um limiar fora dela e recusado por irrelevancia, e nao por ser"
+        " impossivel",
+        f"  idas e voltas possiveis: de 0 a {(horizonte_barras + 1) // 2}"
         f" (a janela tem {horizonte_barras} barras, e uma ida mais uma volta"
         " gastam duas)",
         "",

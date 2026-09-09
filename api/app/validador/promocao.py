@@ -276,27 +276,25 @@ def _julgar(
     # e PUBLICAR que ela nao informa e tirar dela o direito de fortalecer
     # veredito. A rejeicao dela segue de pe pelos criterios legitimos.
     semente = _semente_do_run(conn, run_id)
-    nao_informativas = frozenset(
-        d["clausula"]
-        for d in escala.diagnosticar(
-            pre.condicoes_falseamento,
-            semente_cents=semente,
-            horizonte_barras=int(hip["horizonte_barras"] or 1),
-        )
+    sem_escala = escala.diagnosticar(
+        pre.condicoes_falseamento,
+        semente_cents=semente,
+        horizonte_barras=int(hip["horizonte_barras"] or 1),
     )
+    # Cada clausula sem voto carrega POR QUE nao vota: `nao_informativa` e
+    # afirmacao sobre o mundo (limite estrutural provado), e
+    # `fora_da_escala_economica` e afirmacao sobre a nossa regua. As duas
+    # tiram o voto; so a primeira autoriza dizer "dispara sempre".
+    sem_voto = {d["clausula"]: d["classificacao"] for d in sem_escala}
     v = veredito_mod.emitir(
         pre,
         realizado,
         n_efetivo=efetivo.efetivo,
         n_minimo=hip["n_minimo"],
-        clausulas_nao_informativas=nao_informativas,
+        clausulas_sem_voto=sem_voto,
     )
     detalhe = v.como_dict()
-    detalhe["clausulas_nao_informativas"] = escala.diagnosticar(
-        pre.condicoes_falseamento,
-        semente_cents=semente,
-        horizonte_barras=int(hip["horizonte_barras"] or 1),
-    )
+    detalhe["clausulas_sem_voto"] = sem_escala
     detalhe["amostra"]["n_bruto"] = efetivo.bruto
     detalhe["amostra"]["autocorrelacao_ppm"] = efetivo.autocorrelacao_ppm
     detalhe["run_id"] = run_id
