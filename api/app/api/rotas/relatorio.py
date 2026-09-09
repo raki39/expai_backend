@@ -176,6 +176,29 @@ def portao_a(request: Request) -> dict[str, Any]:
     meta = dataset_loader.dataset_vigente(conn)
     lote_id, equivalencia = _lote_a_certificar(conn, atual)
     lote = config_service.versao_por_id(conn, lote_id) or atual
+
+    # A CERTIFICACAO da config VIGENTE, ao lado do lote historico. Sao duas
+    # perguntas, e junta-las foi o que este relatorio ja fez errado uma vez:
+    #
+    #   lote_certificado    o Portao A passou sobre a evidencia da 0B (cv6)
+    #   certificacao        os cinco escopos foram recertificados na vigente
+    #
+    # A segunda NAO substitui a primeira. O lote e o experimento; a
+    # certificacao e o laboratorio. Um pode passar sem o outro.
+    from ...certificacao import alvo as alvo_mod
+    from ...certificacao import escopos as escopos_mod
+
+    try:
+        o_alvo = alvo_mod.montar(
+            conn,
+            dataset_hash=getattr(meta, "sha256", None) if meta else None,
+        )
+        certificacao = escopos_mod.composicao(
+            conn, o_alvo["alvo_de_certificacao_hash"]
+        )
+    except ValueError as erro:
+        certificacao = {"disponivel": False, "por_que": str(erro)}
+
     return {
         "existe": True,
         # QUAL lote este portao certifica, antes de qualquer condicao. Um
@@ -184,6 +207,7 @@ def portao_a(request: Request) -> dict[str, Any]:
             **equivalencia,
             "hipoteses_no_lote": lote_congelado.quantas_no_lote(conn, lote_id),
         },
+        "certificacao_da_vigente": certificacao,
         **relatorio_portao_a.montar(
             conn,
             config_version_id=lote_id,

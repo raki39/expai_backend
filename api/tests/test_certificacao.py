@@ -649,3 +649,36 @@ def test_o_a2_roda_o_SEGUNDO_giro_e_certifica(conn, cenario):
     assert por_chave["b1_negativo"]["contido"] is True
     assert por_chave["b1_proporcional_ao_giro"]["contido"] is True
     assert "metade de" in cert.manifesto["preparo_do_laboratorio"]["a2_segundo_giro"]
+
+
+def test_o_portao_a_publica_a_certificacao_da_VIGENTE_ao_lado_do_lote(
+    conn, cenario, client
+):
+    """Duas perguntas, e juntá-las já foi erro deste relatório uma vez.
+
+    `lote_certificado` responde *"o Portão A passou sobre a evidência?"* —
+    sobre o lote, que é o experimento. `certificacao_da_vigente` responde
+    *"o laboratório de hoje foi recertificado?"* — os cinco escopos sobre o
+    alvo atual. Uma **não** substitui a outra: o lote da cv6 continua
+    `passa=True` mesmo com a vigente não certificada, e vice-versa.
+    """
+    cert_do_teste = _certificar(conn, cenario)
+    r = client.get("/api/relatorio/portao-a")
+    assert r.status_code == 200
+    corpo = r.json()
+    assert "lote_certificado" in corpo
+    assert "certificacao_da_vigente" in corpo
+
+    cert = corpo["certificacao_da_vigente"]
+    assert set(cert["escopos"]) == {"a1a", "a1b", "a2", "a3", "a4"}
+    assert cert["passa"] is False
+
+    # E o certificado que este teste produziu NAO aparece: ele foi selado com
+    # `dataset_hash="a"*64`, e a rota monta o alvo com o hash REAL do dataset.
+    # Alvos diferentes nao compoem - e ver isso aqui e melhor que afirma-lo.
+    assert cert["alvo_de_certificacao_hash"] != cert_do_teste.alvo_hash
+    assert cert["escopos"]["a1a"]["estado"] == "pendente"
+    # E o lote historico segue respondendo por conta propria.
+    assert corpo["lote_certificado"]["estado"] in (
+        "equivalentes", "vigente_nao_certificada"
+    )
