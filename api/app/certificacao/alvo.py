@@ -55,6 +55,18 @@ ENTRADAS = (
     "app.b4.braco",
     "app.maos_rapidas.baselines",
     "app.relatorio.portao_a",
+    # O PROPRIO ARNES da certificacao. 2026-09-09.
+    #
+    # Medido: duas certificacoes da cv9 sairam com o MESMO `alvo_hash` tendo o
+    # arnes mudado entre elas - a correcao de `bytes_em_disco` foi para o ar no
+    # meio, e o alvo nao se moveu. Um certificado produzido por um arnes
+    # diferente e um certificado diferente, e sem isto a reutilizacao por
+    # identidade devolveria o certificado antigo para um mecanismo novo.
+    #
+    # Nao ha auto-referencia: o hash e sobre o CONTEUDO dos arquivos, e nenhum
+    # arquivo contem o proprio hash.
+    "app.certificacao.suite",
+    "app.certificacao.laboratorio",
 )
 
 #: A raiz do pacote, para resolver `app.x.y` em arquivo.

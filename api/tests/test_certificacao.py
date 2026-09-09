@@ -475,3 +475,26 @@ def test_o_tamanho_da_copia_SOMA_o_wal(conn, cenario):
 
     cert = _certificar(conn, cenario)
     assert cert.manifesto["custo_operacional"]["bytes_da_copia"] > 50_000
+
+
+def test_o_ARNES_da_certificacao_entra_no_alvo():
+    """Um certificado produzido por outro mecanismo é outro certificado.
+
+    **Medido em produção em 2026-09-09**: duas certificações da `cv9` saíram
+    com o **mesmo** `alvo_hash` tendo o arnês mudado entre elas — a correção de
+    `bytes_em_disco` subiu no meio e o alvo não se moveu. Sem isto, a
+    reutilização por identidade devolveria o certificado antigo para um
+    mecanismo novo.
+    """
+    from app.certificacao import alvo as alvo_mod
+
+    _, modulos = alvo_mod.hash_da_implementacao()
+    for exigido in (
+        "app.certificacao.suite",
+        "app.certificacao.laboratorio",
+        "app.certificacao.alvo",
+    ):
+        assert exigido in modulos, f"{exigido} fora do alvo: {len(modulos)} modulos"
+    # E o laboratorio continua fora do que ele certifica em outro sentido: as
+    # rotas nao entram.
+    assert not any("api.rotas" in m for m in modulos)
