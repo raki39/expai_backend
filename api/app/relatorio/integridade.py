@@ -48,6 +48,11 @@ ESTRUTURA_ESPERADA = {
         "certificacao_caso",
         "certificacao_manifesto",
     ],
+    # Migracao 31: o A1b parcelado em oito blocos imutaveis. O Portao A virou
+    # composicao dos cinco escopos, e nenhum deles basta sozinho - A1a
+    # certifica que defeito conhecido nao e promovido, e um protocolo que
+    # recusasse tudo satisfaria isso de graca.
+    31: ["certificacao_bloco"],
 }
 
 COLUNAS_ESPERADAS = {
@@ -71,6 +76,10 @@ GATILHOS_ESPERADOS = [
     "certificacao_nunca_promove",
     "manifesto_exige_suite_completa",
     "manifesto_cita_o_alvo_da_execucao",
+    # Migracao 31 - os blocos do A1b.
+    "certificacao_bloco_sem_update", "certificacao_bloco_sem_delete",
+    "bloco_cita_o_escopo_da_execucao", "bloco_dentro_do_declarado",
+    "manifesto_exige_todos_os_blocos",
     "bbo_contrato_sem_update", "bbo_contrato_sem_delete",
     "bbo_amostra_sem_update", "bbo_amostra_sem_delete",
     "janela_piloto_sem_update", "janela_piloto_sem_delete",

@@ -49,6 +49,7 @@ def _certificar(conn, cenario, **extra):
     dataset_id, cfg = cenario
     return suite.executar(
         conn,
+        escopo=extra.pop("escopo", "a1a"),
         dataset_id=dataset_id,
         config=cfg,
         config_version_id=1,
@@ -439,8 +440,8 @@ def test_a_suite_prepara_as_PROPRIAS_precondicoes_na_copia(conn, cenario_cru):
     antes = _foto(conn)
 
     cert = suite.executar(
-        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
-        dataset_hash="a" * 64,
+        conn, escopo="a1a", dataset_id=dataset_id, config=cfg,
+        config_version_id=1, dataset_hash="a" * 64,
     )
     assert len(cert.manifesto["casos"]) == 6
     preparo = cert.manifesto["preparo_do_laboratorio"]
@@ -498,3 +499,132 @@ def test_o_ARNES_da_certificacao_entra_no_alvo():
     # E o laboratorio continua fora do que ele certifica em outro sentido: as
     # rotas nao entram.
     assert not any("api.rotas" in m for m in modulos)
+
+
+# ---------------------------------------------------------------------------
+# A COMPOSIÇÃO: cinco escopos, e nenhum basta sozinho
+# ---------------------------------------------------------------------------
+
+
+def test_a1a_sozinho_NAO_faz_o_portao_passar(conn, cenario):
+    """O argumento do usuário, imposto por código.
+
+    > *"A1a certifica apenas que defeitos conhecidos não são promovidos. Sem
+    > A1b, uma implementação que rejeita tudo poderia passar."*
+
+    E a 0B tem o número que ilustra: o IC `[0,09%; 2,78%]` vem de **1 promoção
+    em 200 lotes** — *"o número que prova que ele não passou por ser surdo"*.
+    Essa medição é A1b.
+    """
+    from app.certificacao import escopos as esc
+    from app.certificacao import suite
+
+    cert = _certificar(conn, cenario)
+    comp = esc.composicao(conn, cert.alvo_hash)
+
+    assert comp["escopos"]["a1a"]["estado"] == esc.CERTIFICADO
+    assert comp["passa"] is False, "a1a sozinho fez o portao passar"
+    assert set(comp["pendentes"]) == {"a1b", "a2", "a3", "a4"}
+    assert "surdo" in comp["por_que_nao_basta_o_a1a"]
+    # E o manifesto do a1a diz, ele proprio, que nao afirma o Portao A.
+    assert "NAO** diz" in cert.manifesto["o_que_passa_significa"] or (
+        "NAO" in cert.manifesto["o_que_passa_significa"]
+    )
+
+
+def test_os_quatro_estados_por_escopo(conn, cenario):
+    """`certificado`, `pendente`, `falhou` e `inaplicavel` — cada um por escopo."""
+    from app.certificacao import escopos as esc
+
+    cert = _certificar(conn, cenario)
+    comp = esc.composicao(conn, cert.alvo_hash)
+    assert set(comp["escopos"]) == set(esc.TODOS)
+    for escopo, bloco in comp["escopos"].items():
+        assert bloco["estado"] in (
+            esc.CERTIFICADO, esc.PENDENTE, esc.FALHOU, esc.INAPLICAVEL
+        )
+        assert bloco["pergunta"], escopo
+        assert bloco["casos_esperados"] == esc.CASOS_ESPERADOS[escopo]
+
+
+def test_certificados_de_ALVOS_DIFERENTES_nao_compoem(conn, cenario, monkeypatch):
+    """Um A1a de ontem com um A1b de hoje descreve um laboratório inexistente."""
+    from app.certificacao import alvo as alvo_mod
+    from app.certificacao import escopos as esc
+
+    cert = _certificar(conn, cenario)
+    # Muda o laboratorio e certifica a2 sob o alvo NOVO.
+    real = alvo_mod.hash_da_implementacao
+    monkeypatch.setattr(
+        alvo_mod, "hash_da_implementacao", lambda: ("f" * 64, real()[1])
+    )
+    outro = _certificar(conn, cenario, escopo="a3")
+    assert outro.alvo_hash != cert.alvo_hash
+
+    # Nenhum dos dois alvos tem os dois escopos.
+    a = esc.composicao(conn, cert.alvo_hash)
+    b = esc.composicao(conn, outro.alvo_hash)
+    assert a["escopos"]["a1a"]["estado"] == esc.CERTIFICADO
+    assert a["escopos"]["a3"]["estado"] == esc.PENDENTE
+    assert b["escopos"]["a1a"]["estado"] == esc.PENDENTE
+    assert b["escopos"]["a3"]["estado"] == esc.CERTIFICADO
+    assert not a["passa"] and not b["passa"]
+
+
+def test_o_a1a_publica_o_mecanismo_ESPERADO_e_o_OBSERVADO(conn, cenario):
+    """`promovido=False` não basta, e a duplicação disfarçada é o caso.
+
+    Medido na `cv9`: ela saiu `barrado=False` e `promovido=False` — atravessou
+    as guardas estruturais e foi contida pela estatística. É informação
+    diferente de ter sido recusada na porta.
+    """
+    cert = _certificar(conn, cenario)
+    por_chave = {c["chave"]: c["bloqueio"] for c in cert.manifesto["casos"]}
+    assert len(por_chave) == 6
+
+    for chave, b in por_chave.items():
+        assert b["como_foi_contido"] in ("estrutural", "estatistico", "nenhum")
+        assert b["mecanismo_esperado"], f"{chave} sem mecanismo esperado"
+        assert b["contido"] is True, chave
+        if b["como_foi_contido"] == "estrutural":
+            assert b["mecanismo_observado"], f"{chave} barrou sem dizer por quem"
+        else:
+            assert "ATRAVESSOU" in b["resumo"]
+
+    # E a duplicacao e o caso que o usuario nomeou.
+    dup = por_chave["duplicacao_disfarcada"]
+    assert dup["barrado"] is False
+    assert dup["promovido"] is False
+    assert dup["como_foi_contido"] == "estatistico"
+
+
+def test_os_escopos_de_LEITURA_nao_copiam(conn, cenario):
+    """a3 e a4 são leitura: copiar 48 MB para três `SELECT` é custo sem troco."""
+    for escopo in ("a3", "a4"):
+        cert = _certificar(conn, cenario, escopo=escopo)
+        custo = cert.manifesto["custo_operacional"]
+        assert custo["bytes_da_copia"] == 0, escopo
+        assert custo["micros_para_copiar"] == 0, escopo
+        assert "copiar" in str(cert.manifesto["preparo_do_laboratorio"])
+
+
+def test_criterio_NAO_MEDIDO_recusa_o_selo(conn, cenario):
+    """`None` não é `False`, e nenhum dos dois pode virar certificado.
+
+    **Medido**: `b1_proporcional_ao_giro` sai `None` quando há um giro só —
+    um ponto não tem inclinação, e afirmar que tem seria inventar a segunda
+    medida. A primeira versão disto selava um manifesto com `passa=0`,
+    transformando *"não medi"* em *"falhou"*. São coisas diferentes, e o
+    Portão A tem três resultados exatamente por isso.
+    """
+    from app.certificacao import suite
+
+    with pytest.raises(suite.CertificacaoRecusada) as erro:
+        _certificar(conn, cenario, escopo="a2")
+    assert "NAO MEDIDO" in str(erro.value)
+    assert "b1_proporcional_ao_giro" in str(erro.value)
+    assert "nao e uma reprovacao" in str(erro.value)
+    # E nada foi gravado.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM certificacao_manifesto"
+    ).fetchone()[0] == 0

@@ -9,7 +9,7 @@ split repetiria o mesmo engano.
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Any
+from typing import Any, Literal
 
 
 class AlteracaoConfig(BaseModel):
@@ -130,9 +130,28 @@ class PedidoAuditoria(BaseModel):
 
 
 class PedidoCertificacao(BaseModel):
-    """Quem pediu a certificacao. `author` por auditoria, como em A1a e B4."""
+    """Quem pediu a certificacao, e de QUAL escopo.
+
+    O escopo e obrigatorio: o Portao A e a composicao de cinco, e um pedido
+    sem escopo faria o chamador certificar o que o default escolhesse.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     author: str = Field(min_length=1, max_length=120)
+    escopo: Literal["a1a", "a2", "a3", "a4"]
     note: str = Field(default="", max_length=500)
+
+
+class PedidoBlocoA1b(BaseModel):
+    """Um bloco do A1b. `indice_bloco` ausente = o proximo que falta.
+
+    O painel dispara os oito sequencialmente; o estado fica no banco e a
+    retomada e ler `faltando`. Nenhum worker (regra 1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    author: str = Field(min_length=1, max_length=120)
+    indice_bloco: int | None = Field(default=None, ge=0, le=7)
+    selar: bool = False

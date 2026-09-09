@@ -46,7 +46,7 @@ from ..comum import _conn
 # as funcoes que ja servem cada tela. Se recalculasse, o export poderia
 # discordar do painel, e a divergencia so apareceria em quem exportou.
 from .a1a import a1a_estado
-from .certificacao import certificacao_estado
+from .certificacao import a1b_estado_certificacao, certificacao_estado
 from .a1b import a1b_estado
 from .agente import agente_estado
 from .b4 import b4_estado
@@ -467,6 +467,11 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # tinha 13 chaves e nenhuma era `separacao`.
         ("certificacao", "/api/certificacao",
          lambda: certificacao_estado(request)),
+        # O a1b tem parte propria porque a pergunta e outra: o `/certificacao`
+        # diz se o alvo esta certificado, e este diz QUANTO DOS OITO BLOCOS ja
+        # rodou - progresso, e nao veredito.
+        ("certificacao_a1b", "/api/certificacao/a1b",
+         lambda: a1b_estado_certificacao(request)),
         ("a1b", "/api/a1b", lambda: a1b_estado(request)),
         # As quatro partes da 0B. Faltavam: este export foi escrito no
         # incremento 7 com uma tupla literal, e parou de descrever o sistema

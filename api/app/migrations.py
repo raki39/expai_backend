@@ -3962,6 +3962,135 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        31,
+        "os cinco escopos do Portao A, e os blocos imutaveis do A1b",
+        """
+        -- ================================================================
+        -- O Portao A e uma COMPOSICAO de cinco escopos
+        -- ================================================================
+        --
+        -- > "A1a certifica apenas que defeitos conhecidos nao sao promovidos.
+        -- > Sem A1b, uma implementacao que rejeita tudo poderia passar."
+        --
+        -- E o argumento e exato: `nenhum_promovido` e satisfeito de graca por
+        -- um protocolo surdo. E por isso que a 0B mediu 1 promocao em 200
+        -- lotes de nulas - o numero que prova que ele nao passou por ser
+        -- surdo -, e essa medicao e A1b, nao A1a.
+        --
+        -- Um certificado por escopo, e o Portao so passa quando os CINCO
+        -- tiverem certificado para o MESMO alvo.
+        ALTER TABLE certificacao_execucao ADD COLUMN escopo TEXT NOT NULL
+            DEFAULT 'a1a'
+            CHECK (escopo IN ('a1a', 'a1b', 'a2', 'a3', 'a4'));
+
+        -- O DEFAULT reescreve o passado, e aqui isso e o certo: as tres
+        -- execucoes que ja existem certificaram A1a, e nada mais.
+
+        -- Os insumos CONGELADOS antes do primeiro bloco. Sem eles, dois blocos
+        -- podem rodar sob `tentativas_globais` diferentes - e ai metade das
+        -- execucoes sai deflacionada por um `N` e metade por outro, que e
+        -- exatamente a divergencia [40, 41] que a 0B registrou.
+        ALTER TABLE certificacao_execucao ADD COLUMN congelado_json TEXT;
+
+        -- Quantos blocos esta execucao TEM. Zero para escopo que nao e
+        -- parcelado; 8 para A1b.
+        ALTER TABLE certificacao_execucao ADD COLUMN blocos_esperados INTEGER
+            NOT NULL DEFAULT 0 CHECK (blocos_esperados >= 0);
+
+        -- ----------------------------------------------------------------
+        -- Os BLOCOS, imutaveis e idempotentes
+        -- ----------------------------------------------------------------
+        --
+        -- Cada bloco guarda o CONTEUDO das execucoes que produziu, e nunca id
+        -- temporario: `calibre.agregar` e pura sobre `list[Uma]`, entao
+        -- recarregar o conteudo e agregar reproduz EXATAMENTE o numero de
+        -- rodar tudo de uma vez. Demonstrado em `test_a1b_parcelado`.
+        CREATE TABLE certificacao_bloco (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            execucao_id    INTEGER NOT NULL
+                               REFERENCES certificacao_execucao(id),
+            escopo         TEXT NOT NULL
+                               CHECK (escopo IN ('a1a','a1b','a2','a3','a4')),
+            indice_bloco   INTEGER NOT NULL CHECK (indice_bloco >= 0),
+
+            -- `concluido` ou `falhou`. Um bloco que falhou PERMANECE no
+            -- resultado: apagar a falha e reexecutar ate o numero agradar e o
+            -- mecanismo que a secao 8.6 chama de produtor de falsas
+            -- descobertas.
+            estado         TEXT NOT NULL
+                               CHECK (estado IN ('concluido', 'falhou')),
+
+            quantas        INTEGER NOT NULL CHECK (quantas >= 0),
+            conteudo_json  TEXT NOT NULL CHECK (json_valid(conteudo_json)),
+            micros         INTEGER NOT NULL DEFAULT 0,
+            criado_em      TEXT NOT NULL,
+
+            -- A IDEMPOTENCIA do retry: o mesmo bloco duas vezes e uma linha
+            -- so. Sem isto, um clique repetido no painel dobraria as
+            -- execucoes de um bloco e a agregacao contaria duas vezes.
+            UNIQUE (execucao_id, escopo, indice_bloco)
+        );
+
+        CREATE INDEX idx_cert_bloco_exec
+            ON certificacao_bloco(execucao_id, escopo);
+
+        -- Resultado de bloco concluido NUNCA e sobrescrito.
+        CREATE TRIGGER certificacao_bloco_sem_update
+        BEFORE UPDATE ON certificacao_bloco
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bloco de certificacao e imutavel: retry do mesmo indice e recusado pelo UNIQUE, e nao sobrescreve');
+        END;
+
+        CREATE TRIGGER certificacao_bloco_sem_delete
+        BEFORE DELETE ON certificacao_bloco
+        BEGIN
+            SELECT RAISE(ABORT,
+                'bloco de certificacao e imutavel: um bloco que falhou PERMANECE no resultado');
+        END;
+
+        -- O bloco nao pode citar escopo diferente do da execucao.
+        CREATE TRIGGER bloco_cita_o_escopo_da_execucao
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.escopo <> (SELECT escopo FROM certificacao_execucao
+                             WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o bloco cita um escopo que nao e o da execucao que o contem');
+        END;
+
+        -- E o indice tem de caber na contagem declarada NO INICIO.
+        CREATE TRIGGER bloco_dentro_do_declarado
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.indice_bloco >= (SELECT blocos_esperados
+                                    FROM certificacao_execucao
+                                   WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'indice de bloco fora de blocos_esperados: a contagem e congelada antes do primeiro bloco');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- O manifesto exige TODOS os blocos, e todos CONCLUIDOS
+        -- ----------------------------------------------------------------
+        --
+        -- Somado ao gatilho de casos que a migracao 30 ja criou. Sete de oito
+        -- blocos nao produz manifesto; oito com um `falhou` tambem nao.
+        CREATE TRIGGER manifesto_exige_todos_os_blocos
+        BEFORE INSERT ON certificacao_manifesto
+        WHEN (SELECT blocos_esperados FROM certificacao_execucao
+               WHERE id = NEW.execucao_id) > 0
+         AND (SELECT COUNT(*) FROM certificacao_bloco
+               WHERE execucao_id = NEW.execucao_id AND estado = 'concluido')
+             <> (SELECT blocos_esperados FROM certificacao_execucao
+                  WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'manifesto parcial e ilegivel: faltam blocos concluidos (ADR 0040)');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.
