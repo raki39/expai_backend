@@ -259,3 +259,176 @@ def test_o_excesso_do_portao_B_e_diferenca_de_dois_CAIXAS(conn, cenario):
         "dois runs de B3 sobre a mesma janela e a mesma config deram caixas"
         " diferentes: o determinismo do simulador quebrou (R12)"
     )
+
+
+# ===========================================================================
+# O RASTREAMENTO das cinco grandezas, e o que cada uma ESTIMA
+# ===========================================================================
+#
+# > "Faca o rastreamento exato da origem dos dados usados em: variancia da D48;
+# > autocorrelacao e n_efetivo da D48; p-valor submetido ao BY; retornos usados
+# > pelo DSR; futura variavel observada pelo CUSUM. Para cada um, declare qual
+# > grandeza esta sendo estimada." - o usuario, 2026-09-08
+#
+# **O rastreamento achou que a ausencia da serie de excesso SUSTENTA calculos
+# atuais**, e portanto ela deixa de ser divida tecnica e vira correcao
+# bloqueante. Estes testes fixam o rastreio, para que o defeito nao possa ser
+# esquecido nem descoberto de novo do zero.
+
+
+def test_a_variancia_da_D48_e_do_MERCADO_e_nao_do_estimador(conn):
+    """RASTREIO 1 e 2: variancia, autocorrelacao e `n_efetivo` da D48.
+
+    `viabilidade.montar` mede `desvio_bps` e `rho_ppm` sobre
+    `loader.retornos_bps_entre` — a serie de fechamento a fechamento do
+    DATASET, **a mesma para qualquer estrategia sobre a mesma janela**.
+
+    O efeito minimo declarado e `excesso_sobre_b3_cents`. Padronizar um efeito
+    de DIFERENCA pela volatilidade do MERCADO estima o objeto errado: a
+    variancia da diferenca depende de quanto as duas estrategias se movem
+    juntas, e nao de quanto o mercado se move.
+    """
+    import inspect
+
+    from app.relatorio import viabilidade
+
+    fonte = inspect.getsource(viabilidade.montar)
+    assert "loader.retornos_bps_entre" in fonte, (
+        "a fonte da variancia mudou: refaca o rastreio antes de mexer neste"
+        " teste"
+    )
+    assert viabilidade.VALIDACAO_DA_VARIANCIA[
+        "pertence_ao_estimador_do_efeito"
+    ] is False
+
+
+def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn):
+    """E a declaracao vai na RESPOSTA, e nao so no docstring.
+
+    Publicar 134.399 barras como se fosse numero validado seria a forma exata
+    do padrao: um valor que descrevia algo, parou de descrever, e nada avisou.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import viabilidade
+
+    r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    assert r["numeros_validados"] is False
+    v = r["validacao_da_variancia"]
+    assert v["fator_medido_em_n"] < 1
+    assert "SUPERESTIMADA" in v["amostra_exigida_esta"]
+    assert "IN-SAMPLE" in v["o_que_sobrevive"]
+    assert "dataset inteiro" in v["o_que_NAO_sobrevive"]
+    assert "BLOQUEANTE" in v["correcao"]
+
+
+def test_o_pvalor_que_vai_ao_BY_mede_o_MERCADO(conn, run_b3):
+    """RASTREIO 3 e 4: o p-valor e o DSR.
+
+    `promocao._estatistica_do_run` calcula os momentos sobre
+    `executor.retornos_do_run`, que e a serie do DATASET. Entao o "Sharpe
+    realizado", o p-valor que BY ordena e o DSR que o consome medem o
+    **mercado** na janela executada.
+
+    Medido em cenario sintetico: mercado subindo 198,8%, regra girando 164
+    vezes e terminando com 83.741 contra 100.000 de semente — **perdeu 16%** —
+    recebeu Sharpe **+25,78** e p-valor de **846 ppm**, contra um limiar de
+    primeira rejeicao de 467 ppm. O Sharpe da equity dela e **-17,06**.
+    """
+    import inspect
+
+    from app.validador import promocao
+
+    fonte = inspect.getsource(promocao._estatistica_do_run)
+    assert "executor.retornos_do_run" in fonte
+    assert "MERCADO" in fonte, (
+        "a declaracao de que esta serie e do mercado sumiu do modulo que a usa"
+    )
+
+    # E a ressalva vai na RESPOSTA, junto do numero que ela qualifica.
+    run_id, _ds, _cfg, _r = run_b3
+    est = promocao._estatistica_do_run(
+        conn, run_id, duracao_barra_ms=900_000, n_efetivo=100
+    )
+    if est.get("disponivel"):
+        assert "MERCADO" in est["serie_medida"]
+        assert "BLOQUEANTE" in est["nao_e_o_desempenho_da_estrategia"]
+
+
+def test_o_CUSUM_ainda_NAO_TEM_produtor_do_observado(conn):
+    """RASTREIO 5: a variavel observada pelo CUSUM.
+
+    `monitor.registrar` recebe `observados` como PARAMETRO, e nada em `app/` o
+    chama — nao ha candidata (D38). O `alvo` do CUSUM esta em milicents de
+    excesso sobre o B3 por barra, entao o `observado_t` tem de ser **a mesma
+    serie de excesso incremental** que falta.
+
+    A ausencia e latente: no dia em que houver candidata, quem escrever o
+    produtor tera de construir a serie — ou o CUSUM comparara um observado de
+    um objeto com um alvo de outro.
+    """
+    import pathlib
+
+    from tests._prosa import sql_sem_prosa
+
+    raiz = pathlib.Path(__file__).resolve().parents[1] / "app"
+    chamadores = [
+        c.relative_to(raiz).as_posix()
+        for c in raiz.rglob("*.py")
+        if "monitor.registrar(" in sql_sem_prosa(c).replace(" ", "")
+    ]
+    assert not chamadores, (
+        f"apareceu produtor do observado do CUSUM em {chamadores}: ele PRECISA"
+        " ser a serie de excesso incremental sobre grade comum, porque o alvo"
+        " esta em milicents de excesso sobre o B3 por barra"
+    )
+
+
+def test_a_serie_de_excesso_reconstroi_o_excesso_final(conn, cenario):
+    """**A construcao que o usuario especificou FUNCIONA, e esta medida.**
+
+    `excesso_incremental_t = Δequity_agente_t − Δequity_B3_t`, sobre a mesma
+    grade de barras e o mesmo preco de marcacao.
+
+    A garantia que importa: **a soma reconstroi o excesso final exatamente.**
+    Medido aqui, e nao suposto — e e o que torna a correcao bloqueante viavel
+    em vez de especulativa.
+
+    Este teste NAO constroi a serie em producao: ele prova que a construcao
+    fecha, usando as pecas que ja existem (`curva_do_run` sobre a mesma grade).
+    """
+    dataset_id, cfg = cenario
+    run_a = _abrir(conn)
+    baselines.rodar_b3(conn, run_id=run_a, dataset_id=dataset_id, config=cfg)
+    run_b = _abrir(conn)
+    baselines.rodar_b2(conn, run_id=run_b, dataset_id=dataset_id, config=cfg)
+
+    barras = executor.carregar_janela(conn, dataset_id)
+
+    def equity(run: int) -> list[int]:
+        pontos = curva_mod.curva_do_run(
+            conn, run, barras=barras, pontos=10**9
+        )
+        return [p.patrimonio_cents for p in pontos]
+
+    ea, eb = equity(run_a), equity(run_b)
+    assert len(ea) == len(eb), (
+        "as duas curvas tem de sair na MESMA grade: e a garantia 'mesmo preco"
+        " de marcacao para os dois'"
+    )
+    incremental = [
+        (ea[i] - ea[i - 1]) - (eb[i] - eb[i - 1]) for i in range(1, len(ea))
+    ]
+    # Barras sem operacao continuam existindo: a serie tem uma entrada por
+    # barra, e nao uma por execucao.
+    assert len(incremental) == len(barras) - 1
+
+    esperado = ea[-1] - eb[-1]
+    assert sum(incremental) == esperado, (
+        f"a soma dos excessos incrementais deu {sum(incremental)} e o excesso"
+        f" final e {esperado}: a construcao nao fecha"
+    )
+    # E o excesso final e o mesmo que o Portao B usaria, porque os dois runs
+    # terminam sem posicao.
+    assert esperado == simulador.caixa_cents(conn, run_a) - simulador.caixa_cents(
+        conn, run_b
+    )

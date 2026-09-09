@@ -217,6 +217,46 @@ def _estatistica_do_run(
     `None` com motivo, e nao zero: uma serie de tres barras nao tem quarto
     momento, e afirmar curtose 3 (normal) sobre ela seria inventar
     normalidade que ninguem mediu.
+
+    ## RASTREADO EM 2026-09-08: esta serie e do MERCADO, e nao da estrategia
+
+    `executor.retornos_do_run` devolve os retornos de fechamento a fechamento do
+    DATASET entre a primeira e a ultima execucao do run. **Ela nao conhece a
+    estrategia** - conhece so a janela em que a estrategia operou.
+
+    Entao o "Sharpe realizado" que sai daqui, e o **p-valor que vai ao BY**, e o
+    **DSR** que o consome, medem o desempenho do MERCADO naquela janela.
+
+    ### Medido, e o numero decide
+
+    Cenario sintetico, mercado subindo 198,8%, regra girando demais (164 idas e
+    voltas) e perdendo para o custo:
+
+    | | |
+    |---|---|
+    | patrimonio final | **83.741** contra 100.000 de semente - PERDEU 16% |
+    | "Sharpe realizado" que o protocolo publica | **+25,78** |
+    | p-valor que vai ao BY | **846 ppm** (o limiar da 1a rejeicao e 467) |
+    | Sharpe da equity da propria estrategia | **-17,06** |
+
+    **Uma estrategia que destruiu 16% do capital recebe Sharpe +25,78.**
+
+    ### Por que a 0B nao foi afetada no resultado
+
+    Sorte de direcao: o in-sample daquela janela teve Sharpe de mercado
+    NEGATIVO, entao o DSR saiu 0,000 e o p-valor 0,9405 - e a hipotese 41 foi
+    rejeitada por cinco criterios que sao **fatos do ledger** e nao dependem
+    desta serie. O protocolo rejeitou pelo motivo certo por acidente.
+
+    ### Estado
+
+    **CORRECAO BLOQUEANTE antes do relatorio definitivo da 0C**, registrada em
+    `.docs/16-divida-tecnica.md`. Nao esta corrigida aqui porque a correcao e a
+    mesma da D48 - a serie da estrategia sobre grade comum de marcacao a
+    mercado -, e ela e uma construcao, nao um ajuste.
+
+    O que este docstring garante enquanto isso e que ninguem leia
+    `sharpe_por_observacao` como desempenho da candidata.
     """
     retornos = executor.retornos_do_run(conn, run_id)
     try:
@@ -235,6 +275,16 @@ def _estatistica_do_run(
     )
     return {
         "disponivel": True,
+        # A ressalva vai JUNTO do numero. Uma ressalva longe do numero que ela
+        # qualifica e uma ressalva que ninguem le com ele - a licao da D47.
+        "serie_medida": "retornos do MERCADO na janela executada",
+        "nao_e_o_desempenho_da_estrategia": (
+            "RASTREADO em 2026-09-08: `retornos_do_run` devolve a serie do"
+            " DATASET entre a primeira e a ultima execucao, e nao a equity da"
+            " estrategia. Medido em cenario sintetico: uma regra que perdeu 16%"
+            " do capital recebeu Sharpe +25,78 e p-valor de 846 ppm. CORRECAO"
+            " BLOQUEANTE antes do relatorio definitivo da 0C"
+        ),
         "momentos": m.como_dict(duracao_barra_ms),
         "teste": teste.como_dict(),
         "p_valor_ppm": teste.p_valor_ppm,

@@ -183,6 +183,83 @@ _PROSPECTIVO_NAO_E_REUTILIZAVEL = (
 )
 
 
+#: **OS NUMEROS DESTE RELATORIO ESTAO NAO VALIDADOS.** Rastreado em 2026-09-08,
+#: por exigencia do usuario, e ele estava certo.
+#:
+#: > "Se a D48 dimensiona um efeito minimo de US$ 500 sobre o B3, a variancia e
+#: > a dependencia precisam pertencer ao estimador da DIFERENCA entre estrategia
+#: > e B3 - nao apenas aos retornos do mercado ou de um dos runs isoladamente."
+#:
+#: **Elas pertencem aos retornos do mercado.** `montar` mede `desvio_bps` e
+#: `rho_ppm` sobre `loader.retornos_bps_entre`, que e a serie de fechamento a
+#: fechamento do DATASET - a mesma para qualquer estrategia sobre a mesma
+#: janela.
+#:
+#: O efeito minimo declarado e `excesso_sobre_b3_cents`. Padronizar um efeito
+#: de DIFERENCA pela volatilidade do MERCADO estima o objeto errado: a variancia
+#: da diferenca depende de quanto as duas estrategias se movem JUNTAS, e nao de
+#: quanto o mercado se move.
+#:
+#: ### Medido, em cenario sintetico com dois cruzamentos sobre a mesma janela
+#:
+#: | | desvio por barra, em centavos |
+#: |---|---|
+#: | mercado x base | 221,53 |
+#: | diferenca real (grade comum de marcacao) | **121,08** |
+#: | razao | 0,547 |
+#: | **fator em `n`** (escala com o quadrado) | **0,299** |
+#:
+#: A amostra exigida esta **superestimada em cerca de 3,3x**. Nao e um erro de
+#: casas decimais: muda qual conclusao sobrevive.
+#:
+#: ### O que sobrevive e o que nao
+#:
+#: **Sobrevive:** "o desenho nao consegue testar o efeito minimo no in-sample" -
+#: mesmo corrigido, o `n` exigido continua muito acima das 21.024 barras.
+#:
+#: **NAO sobrevive:** "nem o dataset inteiro alcanca". Com o fator medido, o `n`
+#: exigido cai para perto de 40.000, abaixo das 70.080 do dataset. Essa frase
+#: fica RETIRADA ate a recalibracao.
+#:
+#: ### O que corrige
+#:
+#: A serie de excesso incremental sobre uma grade comum de marcacao a mercado,
+#: `excesso_t = (equity_agente_t - equity_agente_{t-1}) - (equity_B3_t -
+#: equity_B3_{t-1})`. **Medido: ela reconstroi o excesso final EXATAMENTE** - a
+#: soma bateu ao centavo com `caixa_agente - caixa_B3`. A construcao e viavel
+#: com o que existe (`curva_do_run` sobre a mesma grade de barras).
+#:
+#: Ela e **correcao bloqueante antes do relatorio definitivo**, e nao divida.
+VALIDACAO_DA_VARIANCIA = {
+    "pertence_ao_estimador_do_efeito": False,
+    "o_que_a_variancia_mede_hoje": (
+        "retornos do MERCADO, fechamento a fechamento do dataset - a mesma"
+        " serie para qualquer estrategia sobre a mesma janela"
+    ),
+    "o_que_ela_deveria_medir": (
+        "a diferenca por barra entre a equity da candidata e a do B3, numa"
+        " grade comum de marcacao a mercado - porque o efeito minimo declarado"
+        " e `excesso_sobre_b3_cents`"
+    ),
+    "fator_medido_em_n": 0.299,
+    "amostra_exigida_esta": "SUPERESTIMADA em cerca de 3,3x",
+    "o_que_sobrevive": (
+        "a conclusao sobre o IN-SAMPLE: mesmo corrigido, o `n` exigido fica"
+        " muito acima das 21.024 barras"
+    ),
+    "o_que_NAO_sobrevive": (
+        "a frase 'nem o dataset inteiro alcanca'. Com o fator medido o `n`"
+        " exigido cai para perto de 40.000, abaixo das 70.080 do dataset."
+        " RETIRADA ate a recalibracao"
+    ),
+    "correcao": (
+        "serie de excesso incremental sobre grade comum de marcacao a mercado."
+        " Medido: ela reconstroi o excesso final EXATAMENTE, ao centavo."
+        " CORRECAO BLOQUEANTE antes do relatorio definitivo"
+    ),
+}
+
+
 def _desvio_por_barra_bps(retornos: list[int]) -> int:
     """A variancia da D48, medida - e arredondada para BAIXO.
 
@@ -275,6 +352,11 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 " depende de familia, FDR e das barras que existem"
             ),
             "conclusao": None,
+            # A marca vai em TODOS os caminhos de saida. A primeira versao
+            # ficou so no completo, e o teste acusou: um `return` curto que
+            # omite a ressalva publica numeros sem ela.
+            "numeros_validados": False,
+            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
         }
 
     cfg = vigente.config
@@ -288,6 +370,11 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 " qual medir variancia e dependencia"
             ),
             "conclusao": None,
+            # A marca vai em TODOS os caminhos de saida. A primeira versao
+            # ficou so no completo, e o teste acusou: um `return` curto que
+            # omite a ressalva publica numeros sem ela.
+            "numeros_validados": False,
+            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
         }
 
     # Variancia e dependencia MEDIDAS, e medidas no in-sample - que e o
@@ -307,6 +394,11 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 " sem ela o dimensionamento seria ficcao"
             ),
             "conclusao": None,
+            # A marca vai em TODOS os caminhos de saida. A primeira versao
+            # ficou so no completo, e o teste acusou: um `return` curto que
+            # omite a ressalva publica numeros sem ela.
+            "numeros_validados": False,
+            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
         }
 
     capital = cfg.seed_capital_usd_cents
@@ -496,6 +588,8 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 " relatorio: relatar o que se mediu nao decide nada"
             ),
         },
+        "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
+        "numeros_validados": False,
         "conclusao": CONCLUSAO,
         "conclusao_sustentada": _sustenta(horizontes, hipoteses),
         "opcoes_prospectivas": OPCOES_PROSPECTIVAS,
