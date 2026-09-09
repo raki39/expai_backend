@@ -25,6 +25,9 @@ import sqlite3
 
 import pytest
 
+from tests.test_maos_rapidas import cenario  # noqa: F401
+from tests.test_simulador import criar_dataset  # noqa: F401
+
 from app.estatistica import fdr
 from app.hipotese import dimensionamento as dim
 from app.hipotese import poder
@@ -1009,18 +1012,17 @@ def test_a_conclusao_e_derivada_e_nao_digitada():
     consulta, e nao uma frase. Aqui a prova e pelo caminho contrario - uma
     hipotese que CABE derruba a sustentacao.
     """
-    assert viabilidade._sustenta([], [{"veredito": "nao_testavel_por_potencia"}])
-    assert not viabilidade._sustenta([], [{"veredito": "testavel"}])
+    assert viabilidade._sustenta([{"veredito": "nao_testavel_por_potencia"}])
+    assert not viabilidade._sustenta([{"veredito": "testavel"}])
     assert not viabilidade._sustenta(
-        [],
         [
             {"veredito": "nao_testavel_por_potencia"},
             {"veredito": "testavel"},
-        ],
+        ]
     )
     # Sem hipotese nenhuma, nao ha o que sustentar - e afirmar a conclusao
     # sobre um banco vazio seria afirmar sem medir.
-    assert not viabilidade._sustenta([], [])
+    assert not viabilidade._sustenta([])
 
 
 def test_as_quatro_opcoes_prospectivas_estao_listadas_e_NENHUMA_escolhida():
@@ -1492,3 +1494,52 @@ def test_a_base_e_declarada_no_relatorio_como_o_que_ela_e():
     assert "o_que_a_base_e" in fonte
     assert "nao exposicao real" in fonte
     assert "CANCELA" in fonte
+
+
+def test_o_booleano_da_conclusao_DECLARA_o_horizonte_que_mede(conn, cenario):
+    """Um booleano que mede outro horizonte que a frase ao lado dele.
+
+    **Medido em producao em 2026-09-09**: `conclusao_sustentada` saiu `false`
+    sob uma frase que fala do IN-SAMPLE, porque a regua media o DATASET
+    INTEIRO. Enquanto a variancia vinha do mercado o `n` exigido era grande
+    demais para a diferenca aparecer; com a variancia corrigida ele caiu
+    abaixo das 70.080 e a divergencia ficou visivel.
+
+    Decisao do usuario: o horizonte e o in-sample, porque walk-forward e
+    holdout ficam reservados para CONFIRMAR e nao podem ser somados para fazer
+    uma hipotese caber. E o campo tem de dizer isso.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import viabilidade
+
+    r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    assert r["disponivel"] is True
+    declara = r["conclusao_sustentada_declara"]
+    assert declara["frase"] == viabilidade.CONCLUSAO
+    assert declara["horizonte"] == "in_sample"
+    assert declara["barras"] == r["insumos_medidos"]["in_sample_barras"]
+    # A frase fala do in-sample; o horizonte declarado tem de ser o mesmo.
+    assert "in-sample" in viabilidade.CONCLUSAO.lower()
+    assert "reservado" in declara["por_que_este_horizonte"] or            "confirma" in declara["por_que_este_horizonte"].lower()
+    # E os outros horizontes seguem publicados como informacao.
+    assert len(r["horizontes"]) >= 3
+    assert "INFORMACAO" in declara["os_outros_horizontes"]
+
+
+def test_a_regua_NAO_soma_walk_forward_nem_holdout(conn, cenario):
+    """O `n` disponivel de cada hipotese e o do in-sample, e so ele.
+
+    Somar os outros conjuntos para fazer uma hipotese caber gastaria justamente
+    o que valida o resultado - e faria `testavel` significar "cabe se eu usar a
+    reserva", que e outra afirmacao.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import viabilidade
+
+    r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    in_sample = r["insumos_medidos"]["in_sample_barras"]
+    for h in r["hipoteses"]:
+        assert h["n_bruto_disponivel"] == in_sample, (
+            f"a hipotese {h['hypothesis_id']} foi medida contra"
+            f" {h['n_bruto_disponivel']} barras, e o in-sample tem {in_sample}"
+        )

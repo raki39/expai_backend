@@ -337,11 +337,15 @@ def test_sem_par_o_relatorio_DIZ_que_caiu_no_mercado(conn, cenario):
     assert r["numeros_validados"] is False
 
 
-def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn):
+def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn, cenario):
     """E a declaracao vai na RESPOSTA, e nao so no docstring.
 
     Publicar 134.399 barras como se fosse numero validado seria a forma exata
     do padrao: um valor que descrevia algo, parou de descrever, e nada avisou.
+
+    **Com `cenario`**, e nao com `conn` pelado: sem dataset o relatorio sai
+    `disponivel: False` e a variancia nem chega a ser medida - o teste passaria
+    sem exercitar nada, que foi o defeito do sexto pulado neste mesmo arquivo.
     """
     from app.hipotese import dimensionamento as d
     from app.relatorio import viabilidade
@@ -349,11 +353,14 @@ def test_os_numeros_da_D48_estao_declarados_NAO_VALIDADOS(conn):
     r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
     assert r["numeros_validados"] is False
     v = r["validacao_da_variancia"]
-    assert v["fator_medido_em_n"] < 1
-    assert "SUPERESTIMADA" in v["amostra_exigida_esta"]
-    assert "IN-SAMPLE" in v["o_que_sobrevive"]
-    assert "dataset inteiro" in v["o_que_NAO_sobrevive"]
-    assert "BLOQUEANTE" in v["correcao"]
+    # DERIVADO da fonte real, e nao um texto constante. Era constante ate
+    # 2026-09-09, e a producao publicou `fonte_da_variancia: EXCESSO ...
+    # pertence_ao_estimador: true` ao lado deste bloco dizendo MERCADO - dois
+    # campos da MESMA resposta se contradizendo.
+    assert v["pertence_ao_estimador_do_efeito"] == r["numeros_validados"]
+    assert "MERCADO" in v["o_que_a_variancia_mede_hoje"]
+    assert "PENDENTE" in v["estado"]
+    assert "excesso_sobre_b3_cents" in v["o_que_ela_deveria_medir"]
 
 
 def test_o_pvalor_que_vai_ao_BY_mede_a_ESTRATEGIA(conn, run_b3):
@@ -489,3 +496,27 @@ def test_a_serie_de_excesso_reconstroi_o_excesso_final(conn, cenario):
     assert esperado == simulador.caixa_cents(conn, run_a) - simulador.caixa_cents(
         conn, run_b
     )
+
+
+def test_a_validacao_da_variancia_ACOMPANHA_a_fonte(conn, cenario):
+    """Os dois campos da mesma resposta nunca podem discordar.
+
+    Este e o teste que faltava: `validacao_da_variancia` era uma constante de
+    modulo, entao ela dizia "MERCADO" para sempre - inclusive na resposta em
+    que `fonte_da_variancia` dizia "EXCESSO ... pertence_ao_estimador: true".
+    Nao havia numero errado; havia uma resposta que se contradizia, que e como
+    este projeto conta o padrao.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import viabilidade
+
+    r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    fonte = r["fonte_da_variancia"]
+    val = r["validacao_da_variancia"]
+    # A concordancia e o invariante, qualquer que seja a fonte do dia.
+    assert val["pertence_ao_estimador_do_efeito"] == fonte["pertence_ao_estimador"]
+    assert val["fonte_em_uso"] == fonte["fonte"]
+    assert val["desvio_por_barra_bps"] == fonte["desvio_bps"]
+    assert r["numeros_validados"] == fonte["pertence_ao_estimador"]
+    esperado = "CORRIGIDA" if fonte["pertence_ao_estimador"] else "PENDENTE"
+    assert val["estado"].startswith(esperado)

@@ -14,3 +14,15 @@ var/
 # Dados do coletor (ADR 0028): volume proprio, nunca o repositorio.
 *.jsonl.gz
 dados/
+
+# Segredos: nada de `.env` versionado, em NENHUMA pasta.
+# `.env.example` e a excecao deliberada - ele carrega os NOMES das chaves e
+# nunca os valores, e e ele que documenta o que precisa existir no deploy.
+# A regra 15 do CLAUDE.md e literal: chaves vivem so em env, nunca no banco,
+# nunca em log e nunca em pagina - e portanto nunca no git.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example

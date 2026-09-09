@@ -10,6 +10,7 @@ import logging
 from ... import fase as fase_mod
 from ...config import service as config_service
 from ...dataset import loader as dataset_loader
+from ...validador import lote_congelado
 from ...relatorio import montar as relatorio_montar
 from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
@@ -172,15 +173,48 @@ def portao_a(request: Request) -> dict[str, Any]:
     if atual is None:
         return {"existe": False, "motivo": "configuracao nao inicializada"}
     meta = dataset_loader.dataset_vigente(conn)
+    lote_id, equivalencia = _lote_a_certificar(conn, atual)
+    lote = config_service.versao_por_id(conn, lote_id) or atual
     return {
         "existe": True,
+        # QUAL lote este portao certifica, antes de qualquer condicao. Um
+        # veredito sem o sujeito e um veredito sobre coisa nenhuma.
+        "lote_certificado": {
+            **equivalencia,
+            "hipoteses_no_lote": lote_congelado.quantas_no_lote(conn, lote_id),
+        },
         **relatorio_portao_a.montar(
             conn,
-            config_version_id=atual.id,
-            config=atual.config,
+            config_version_id=lote_id,
+            config=lote.config,
             dataset_id=meta.id if meta else None,
         ),
     }
+
+
+def _lote_a_certificar(conn, atual):
+    """A `config_version` que os portoes certificam, e a equivalencia.
+
+    **Derivada do lote**, nunca da vigente e nunca do chamador — ver
+    `validador/lote_congelado.py`. Em 2026-09-09 as duas rotas liam a vigente
+    e devolviam sete condicoes `None` sobre uma fase que ja tinha respondido,
+    porque a reancoragem criou a `config_version` 7 e a evidencia esta na 6.
+    """
+    lote_id = lote_congelado.do_lote(conn)
+    if lote_id is None:
+        return atual.id, {
+            "estado": lote_congelado.EQUIVALENTES,
+            "lote_config_version_id": None,
+            "vigente_config_version_id": atual.id,
+            "por_que": (
+                "nenhuma hipotese registrada: nao ha lote a certificar, entao"
+                " os portoes leem a config vigente"
+            ),
+            "campos_materiais_divergentes": [],
+        }
+    return lote_id, lote_congelado.equivalencia(
+        conn, lote_id=lote_id, vigente_id=atual.id
+    )
 
 
 def _config_e_dataset(conn):
@@ -203,12 +237,18 @@ def portao_b(request: Request) -> dict[str, Any]:
     atual, dataset_id = _config_e_dataset(conn)
     if atual is None:
         return {"existe": False, "motivo": "configuracao nao inicializada"}
+    lote_id, equivalencia = _lote_a_certificar(conn, atual)
+    lote = config_service.versao_por_id(conn, lote_id) or atual
     return {
         "existe": True,
+        "lote_certificado": {
+            **equivalencia,
+            "hipoteses_no_lote": lote_congelado.quantas_no_lote(conn, lote_id),
+        },
         **relatorio_portao_b.montar(
             conn,
-            config_version_id=atual.id,
-            config=atual.config,
+            config_version_id=lote_id,
+            config=lote.config,
             dataset_id=dataset_id,
             rodar_forward=False,
         ),

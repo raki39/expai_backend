@@ -115,7 +115,14 @@ class Comparador:
     timeframe: str
     de_ms: int
     ate_ms: int
-    barras: int
+    #: Quantas EXECUCOES este run fez - `COUNT(*) FROM execution`.
+    #:
+    #: **Nao e o tamanho da serie.** Chamava-se `barras` e foi renomeado em
+    #: 2026-09-09: o B3 publicava 488, que sao as 488 execucoes dele (244 idas
+    #: e voltas), e quem lesse `fonte_da_variancia.comparador.barras` concluiria
+    #: que a variancia da D48 saiu de 488 pontos. Ela sai da grade CHEIA de
+    #: barras (`executor.carregar_janela`), que e a garantia 1.
+    execucoes: int
 
     def como_dict(self) -> dict:
         return {
@@ -126,7 +133,11 @@ class Comparador:
             "timeframe": self.timeframe,
             "de_ms": self.de_ms,
             "ate_ms": self.ate_ms,
-            "barras": self.barras,
+            "execucoes": self.execucoes,
+            "o_que_execucoes_e": (
+                "COUNT(*) FROM execution deste run, e NAO o tamanho da serie."
+                " A serie de excesso vive na grade cheia de barras"
+            ),
         }
 
 
@@ -412,7 +423,7 @@ def comparador(conn: sqlite3.Connection, run_id: int) -> Comparador:
         timeframe=str(ds["timeframe"]) if ds else "?",
         de_ms=int(linha["de"]),
         ate_ms=int(linha["ate"]),
-        barras=int(linha["n"]),
+        execucoes=int(linha["n"]),
     )
 
 

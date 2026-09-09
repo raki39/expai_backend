@@ -230,34 +230,71 @@ _PROSPECTIVO_NAO_E_REUTILIZAVEL = (
 #: com o que existe (`curva_do_run` sobre a mesma grade de barras).
 #:
 #: Ela e **correcao bloqueante antes do relatorio definitivo**, e nao divida.
-VALIDACAO_DA_VARIANCIA = {
-    "pertence_ao_estimador_do_efeito": False,
-    "o_que_a_variancia_mede_hoje": (
-        "retornos do MERCADO, fechamento a fechamento do dataset - a mesma"
-        " serie para qualquer estrategia sobre a mesma janela"
-    ),
-    "o_que_ela_deveria_medir": (
-        "a diferenca por barra entre a equity da candidata e a do B3, numa"
-        " grade comum de marcacao a mercado - porque o efeito minimo declarado"
-        " e `excesso_sobre_b3_cents`"
-    ),
-    "fator_medido_em_n": 0.299,
-    "amostra_exigida_esta": "SUPERESTIMADA em cerca de 3,3x",
-    "o_que_sobrevive": (
-        "a conclusao sobre o IN-SAMPLE: mesmo corrigido, o `n` exigido fica"
-        " muito acima das 21.024 barras"
-    ),
-    "o_que_NAO_sobrevive": (
-        "a frase 'nem o dataset inteiro alcanca'. Com o fator medido o `n`"
-        " exigido cai para perto de 40.000, abaixo das 70.080 do dataset."
-        " RETIRADA ate a recalibracao"
-    ),
-    "correcao": (
-        "serie de excesso incremental sobre grade comum de marcacao a mercado."
-        " Medido: ela reconstroi o excesso final EXATAMENTE, ao centavo."
-        " CORRECAO BLOQUEANTE antes do relatorio definitivo"
-    ),
-}
+def _validacao_da_variancia(medida: dict | None) -> dict:
+    """O estado da variancia, DERIVADO da fonte que de fato foi usada.
+
+    Era uma constante, e a constante mentia. Em 2026-09-09 a producao publicou
+    `fonte_da_variancia: EXCESSO ... pertence_ao_estimador: true` ao lado deste
+    bloco dizendo `pertence_ao_estimador_do_efeito: false` e "o que a variancia
+    mede hoje: retornos do MERCADO" - **dois campos da MESMA resposta se
+    contradizendo**. O texto foi escrito quando a serie de excesso nao existia
+    e nao acompanhou a correcao, que e o padrao que este projeto conta.
+
+    `None` quando o relatorio nem chegou a medir (as saidas curtas): ali a
+    resposta honesta e "nao medida", e nao a descricao de uma fonte.
+    """
+    if medida is None:
+        return {
+            "pertence_ao_estimador_do_efeito": None,
+            "o_que_a_variancia_mede_hoje": (
+                "NAO MEDIDA: o relatorio nao chegou a estimar a variancia"
+                " porque falta config vigente, dataset ou separacao"
+            ),
+            "o_que_ela_deveria_medir": _O_QUE_DEVERIA_MEDIR,
+            "correcao": _A_CORRECAO,
+        }
+
+    pertence = bool(medida["pertence_ao_estimador"])
+    return {
+        "pertence_ao_estimador_do_efeito": pertence,
+        "o_que_a_variancia_mede_hoje": (
+            medida["por_que"]
+            if pertence
+            else (
+                "retornos do MERCADO, fechamento a fechamento do dataset - a"
+                " mesma serie para qualquer estrategia sobre a mesma janela."
+                f" Motivo: {medida['por_que']}"
+            )
+        ),
+        "o_que_ela_deveria_medir": _O_QUE_DEVERIA_MEDIR,
+        "fonte_em_uso": medida["fonte"],
+        "desvio_por_barra_bps": medida["desvio_bps"],
+        "estado": (
+            "CORRIGIDA: a variancia vem do estimador do efeito declarado, e os"
+            " numeros deste relatorio estao validados"
+            if pertence
+            else "PENDENTE: os numeros seguem NAO VALIDADOS"
+        ),
+        "correcao": (
+            "aplicada em 2026-09-08 (`maos_rapidas.series.excesso_incremental`)"
+            if pertence
+            else _A_CORRECAO
+        ),
+    }
+
+
+#: Constantes de TEXTO, e nao de estado. Elas descrevem o que a regua exige,
+#: que nao muda com a medicao - separadas justamente para que o que MUDA seja
+#: derivado e o que NAO muda seja escrito uma vez.
+_O_QUE_DEVERIA_MEDIR = (
+    "a diferenca por barra entre a equity da candidata e a do B3, numa grade"
+    " comum de marcacao a mercado - porque o efeito minimo declarado e"
+    " `excesso_sobre_b3_cents`"
+)
+_A_CORRECAO = (
+    "serie de excesso incremental sobre grade comum de marcacao a mercado."
+    " Medido: ela reconstroi o excesso final EXATAMENTE, ao centavo"
+)
 
 
 def _variancia_do_estimador(
@@ -448,7 +485,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             # ficou so no completo, e o teste acusou: um `return` curto que
             # omite a ressalva publica numeros sem ela.
             "numeros_validados": False,
-            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
+            "validacao_da_variancia": _validacao_da_variancia(None),
         }
 
     cfg = vigente.config
@@ -466,7 +503,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             # ficou so no completo, e o teste acusou: um `return` curto que
             # omite a ressalva publica numeros sem ela.
             "numeros_validados": False,
-            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
+            "validacao_da_variancia": _validacao_da_variancia(None),
         }
 
     # Variancia e dependencia MEDIDAS, e medidas no in-sample - que e o
@@ -499,7 +536,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
             # ficou so no completo, e o teste acusou: um `return` curto que
             # omite a ressalva publica numeros sem ela.
             "numeros_validados": False,
-            "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
+            "validacao_da_variancia": _validacao_da_variancia(None),
         }
 
     capital = cfg.seed_capital_usd_cents
@@ -628,7 +665,12 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         fdr_alfa_bps=cfg.fdr_alvo_bps,
         procedimento=cfg.fdr_procedimento,
         duracao_barra_ms=ds.interval_ms,
-        disponivel_barras=ds.bars,
+        # O IN-SAMPLE, e nao o dataset inteiro. Decisao do usuario em
+        # 2026-09-09: e a evidencia disponivel para construir e avaliar a
+        # hipotese; walk-forward e holdout ficam reservados para
+        # CONFIRMAR e nao podem ser somados para fazer uma hipotese
+        # caber. Somar os tres gastaria justamente o que valida.
+        disponivel_barras=in_sample.bars,
     )
 
     alfa_ppm = dimensionamento.alfa_primeira_rejeicao_ppm(
@@ -689,7 +731,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
                 " relatorio: relatar o que se mediu nao decide nada"
             ),
         },
-        "validacao_da_variancia": VALIDACAO_DA_VARIANCIA,
+        "validacao_da_variancia": _validacao_da_variancia(medida),
         "fonte_da_variancia": {
             k: v for k, v in medida.items() if k != "amostra"
         },
@@ -698,7 +740,29 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         # do mercado e o campo continua `false` - derivado, e nao fixo.
         "numeros_validados": bool(medida["pertence_ao_estimador"]),
         "conclusao": CONCLUSAO,
-        "conclusao_sustentada": _sustenta(horizontes, hipoteses),
+        "conclusao_sustentada": _sustenta(hipoteses),
+        # O booleano diz QUAL frase e QUAL horizonte ele representa. Sem isso
+        # ele ja mediu o dataset inteiro enquanto a frase falava do in-sample,
+        # e a divergencia so apareceu quando a variancia corrigida derrubou o
+        # `n` exigido para baixo das 70.080 - um campo que responde outra
+        # pergunta que a frase ao lado dele.
+        "conclusao_sustentada_declara": {
+            "frase": CONCLUSAO,
+            "horizonte": "in_sample",
+            "barras": in_sample.bars,
+            "por_que_este_horizonte": (
+                "e a evidencia que a hipotese pode usar para se construir e se"
+                " avaliar (secao 8.5.1). O walk-forward confirma FORA da"
+                " amostra em tres janelas e o holdout tem uso UNICO por"
+                " hipotese: somar qualquer um dos dois para fazer o `n` caber"
+                " gastaria o conjunto que valida o resultado"
+            ),
+            "os_outros_horizontes": (
+                "seguem publicados em `horizontes` como INFORMACAO, cada um"
+                " com `cenario` e `reutilizavel_pela_hipotese_atual`. Eles"
+                " dizem o que seria preciso, e nao o que esta disponivel"
+            ),
+        },
         "opcoes_prospectivas": OPCOES_PROSPECTIVAS,
         "fora_de_cogitacao": FORA_DE_COGITACAO,
         "nenhuma_opcao_escolhida": (
@@ -709,13 +773,22 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
     }
 
 
-def _sustenta(horizontes: list[dict], hipoteses: list[dict]) -> bool:
+def _sustenta(hipoteses: list[dict]) -> bool:
     """A conclusao e verdadeira NESTE banco, ou nao e.
 
     Derivada, e nao digitada, pelo mesmo motivo que `fecha` do relatorio da 0A:
-    se um dia o dataset crescer o bastante, este campo vira `False` sozinho e a
-    frase deixa de ser sustentada - em vez de continuar impressa descrevendo um
-    mundo que acabou.
+    se um dia o IN-SAMPLE crescer o bastante, este campo vira `False` sozinho e
+    a frase deixa de ser sustentada - em vez de continuar impressa descrevendo
+    um mundo que acabou.
+
+    **O horizonte e o in-sample, e isso e a correcao de 2026-09-09.** Ela
+    recebia `horizontes` e nunca os usava, e o veredito de cada hipotese vinha
+    medido contra o DATASET INTEIRO - enquanto a frase que este booleano
+    qualifica fala do in-sample. Enquanto a variancia vinha do mercado o `n`
+    exigido era grande demais para a diferenca aparecer; com a variancia
+    corrigida ele caiu abaixo das 70.080 e o campo virou `False` sob uma frase
+    que continuava verdadeira. Um booleano que mede outro horizonte que a
+    frase ao lado dele e a forma exata do padrao que este projeto conta.
     """
     if not hipoteses:
         return False

@@ -18,6 +18,7 @@ import sqlite3
 import pytest
 
 from app.config.schema import ExperimentConfig
+from tests.test_cerebro import settings  # noqa: F401
 
 
 # ===========================================================================
@@ -1097,3 +1098,95 @@ def test_a_certificacao_DECLARA_o_custo_da_reinjecao() -> None:
     assert "PARECER" in como["o_que_a_releitura_NAO_alcanca"]
     # A garantia antiga so vale por um dos dois caminhos, e ela diz qual.
     assert "SO VALE PELA RELEITURA" in cert["a_reexecucao_NAO_e"]
+
+
+# ---------------------------------------------------------------------------
+# O PORTAO CERTIFICA UM LOTE, e o lote nao e a config vigente
+# ---------------------------------------------------------------------------
+
+
+def test_o_lote_e_derivado_das_hipoteses_e_nao_da_vigente(
+    conn: sqlite3.Connection, a1a, settings
+) -> None:
+    """A `config_version` do portao sai de onde a FAMILIA vive.
+
+    **Medido em producao em 2026-09-09**: `/api/relatorio/portao-a` respondeu
+    `pendente` com SETE das onze condicoes em `None`, e o Portao B recusou
+    calcular por R49 — nao porque algo se perdesse, mas porque a reancoragem
+    criou a `config_version` 7 e as rotas liam a vigente enquanto a evidencia
+    inteira da 0B esta na 6. **Os portoes descreviam a nossa data de deploy
+    como se fosse o experimento.**
+    """
+    from app.config.service import criar_versao
+    from app.validador import lote_congelado
+
+    assert lote_congelado.do_lote(conn) == 1
+    nova = criar_versao(
+        conn, settings, alteracoes={"b3_slow": 51}, author="t"
+    )
+    assert nova.id == 2
+    # A vigente andou; o lote NAO. E o que os portoes certificam e o lote.
+    assert lote_congelado.do_lote(conn) == 1
+    # O lote e a FAMILIA inteira sob aquela config - B4 e A1a juntos -, e nao
+    # so o braco que este teste rodou por ultimo.
+    total = conn.execute("SELECT COUNT(*) AS n FROM hypothesis").fetchone()["n"]
+    assert lote_congelado.quantas_no_lote(conn, 1) == total
+    assert total >= len(a1a.controles)
+    # E nada nasceu sob a config nova: ela existe e o lote nao a alcanca.
+    assert lote_congelado.quantas_no_lote(conn, 2) == 0
+
+
+def test_a_divergencia_e_PUBLICADA_e_nunca_herdada_em_silencio(
+    conn: sqlite3.Connection, a1a, settings
+) -> None:
+    """Vigente diferente do lote => `vigente_nao_certificada`, com o diff.
+
+    Herdar calado faria a certificacao de um mundo valer para outro sem que
+    nada avisasse — e o diff vai junto para que quem le julgue com o mesmo
+    dado que a funcao usou.
+    """
+    from app.config.service import criar_versao
+    from app.validador import lote_congelado
+
+    criar_versao(conn, settings, alteracoes={"b3_slow": 51}, author="t")
+    eq = lote_congelado.equivalencia(conn, lote_id=1, vigente_id=2)
+
+    assert eq["estado"] == lote_congelado.DIVERGENTES
+    assert eq["identidades_iguais"] is False
+    campos = {c["campo"] for c in eq["campos_materiais_divergentes"]}
+    assert "b3_slow" in campos, campos
+    assert "heranca silenciosa" in eq["por_que"]
+    # E a divergencia NAO afirma que a evidencia se perdeu.
+    assert "segue integra" in eq["o_que_isso_NAO_significa"]
+
+
+def test_o_mesmo_lote_e_a_mesma_config_sao_EQUIVALENTES(
+    conn: sqlite3.Connection, a1a
+) -> None:
+    """Sem reancoragem no meio, lote e vigente coincidem e nada e declarado."""
+    from app.validador import lote_congelado
+
+    eq = lote_congelado.equivalencia(conn, lote_id=1, vigente_id=1)
+    assert eq["estado"] == lote_congelado.EQUIVALENTES
+    assert eq["campos_materiais_divergentes"] == []
+
+
+def test_a_rota_do_portao_NAO_deixa_o_chamador_escolher_a_versao() -> None:
+    """Derivada, e nunca por parametro — pergunta 5 do teste de escopo.
+
+    Um parametro deixaria escolher a versao que da a resposta melhor, que e
+    ajustar o criterio depois de ver o resultado. A derivacao e estavel porque
+    `hypothesis` e append-only por gatilho.
+    """
+    import inspect
+
+    from app.api.rotas import relatorio as rotas
+
+    for rota in (rotas.portao_a, rotas.portao_b):
+        params = set(inspect.signature(rota).parameters) - {"request"}
+        assert not params, (
+            f"{rota.__name__} aceita {params}: a config_version do lote tem de"
+            " ser DERIVADA, e nao escolhida por quem chama"
+        )
+        fonte = inspect.getsource(rota)
+        assert "_lote_a_certificar" in fonte

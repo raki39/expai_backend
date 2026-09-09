@@ -34,6 +34,12 @@ rele/tests/
 rele/pytest.ini
 rele/requirements-dev.txt
 
+# Segredo nunca entra na imagem. As linhas por servico acima ja cobrem
+# os tres que existem; estas cobrem o servico que alguem criar depois.
+**/.env
+**/.env.*
+!**/.env.example
+
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/
