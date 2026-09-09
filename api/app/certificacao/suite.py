@@ -117,6 +117,72 @@ def _caso_canonico(c) -> dict:
     }
 
 
+def _preparar_laboratorio(
+    copia, *, dataset_id: int, config, config_version_id: int
+) -> dict:
+    """As pré-condições da suíte, estabelecidas NA CÓPIA.
+
+    ## Por que isto existe, e é o desenho e não um remendo
+
+    `a1a.braco.rodar` recusa sem um B3 sob a mesma `config_version` — a métrica
+    dos controles estatísticos é `excesso_sobre_b3_cents`, e sem o baseline ela
+    não tem contra o que ser medida. E o controle de **duplicação disfarçada**
+    precisa de uma hipótese real anterior para duplicar; sem ela, ele registra a
+    linha e marca `nao_injetado`, e a família passa a constar como injetada sem
+    ter injetado nada.
+
+    Medido em produção em 2026-09-09: certificar a `config_version` 9 devolveu
+    **HTTP 500** por exatamente isso — ela é a config vigente e não tem run
+    nenhum apontando para ela.
+
+    **A resposta certa não é exigir que alguém rode baselines em produção antes
+    de certificar.** Isso criaria runs reais só para permitir uma certificação,
+    que é o oposto do objeto. A cópia é descartável: a suíte estabelece as
+    próprias pré-condições dentro dela, e tudo vai embora junto.
+
+    E isso torna o certificado **mais** forte, não menos: ele passa a exercitar
+    também o caminho dos baselines e o de B4, e deixa de depender do que por
+    acaso estava no banco.
+    """
+    from ..b4 import braco as b4_braco
+    from ..maos_rapidas import baselines
+
+    feito = {}
+    tem_b3 = copia.execute(
+        "SELECT 1 FROM run WHERE agent_id = 'baseline-B3'"
+        " AND config_version_id = ?",
+        (config_version_id,),
+    ).fetchone()
+    if not tem_b3:
+        baselines.rodar_comparacao(
+            copia,
+            dataset_id=dataset_id,
+            config=config,
+            config_version_id=config_version_id,
+            semente=config.default_seed,
+        )
+        feito["baselines"] = "rodados na copia (nao havia B3 sob esta config)"
+
+    tem_hipotese = copia.execute(
+        "SELECT 1 FROM hypothesis h JOIN run r ON r.id = h.run_id"
+        " WHERE r.config_version_id = ?",
+        (config_version_id,),
+    ).fetchone()
+    if not tem_hipotese:
+        b4_braco.rodar(
+            copia,
+            dataset_id=dataset_id,
+            config=config,
+            config_version_id=config_version_id,
+        )
+        feito["b4"] = (
+            "rodado na copia: o controle de DUPLICACAO precisa de uma hipotese"
+            " real anterior para duplicar, e sem ela a familia constaria como"
+            " injetada sem ter injetado nada"
+        )
+    return feito
+
+
 def executar(
     oficial: sqlite3.Connection,
     *,
@@ -143,6 +209,12 @@ def executar(
     # 3 a 6. A copia, a suite, o canonico, o descarte.
     inicio = time.perf_counter_ns()
     with laboratorio.laboratorio_descartavel(oficial) as copia:
+        preparo = _preparar_laboratorio(
+            copia.conn,
+            dataset_id=dataset_id,
+            config=config,
+            config_version_id=config_version_id,
+        )
         resultado = a1a_braco.rodar(
             copia.conn,
             dataset_id=dataset_id,
@@ -200,6 +272,9 @@ def executar(
         },
         "casos": casos,
         "escopo": ESCOPO,
+        "preparo_do_laboratorio": preparo or {
+            "nada": "a copia ja tinha baseline e hipotese sob esta config"
+        },
         "passa": passa,
         "banco_oficial_intocado": {
             "antes": antes,

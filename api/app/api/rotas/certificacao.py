@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Request, status
 
+from ...a1a import braco as a1a_braco
 from ...certificacao import alvo as alvo_mod
 from ...certificacao import suite as suite_mod
 from ...config import service as config_service
@@ -117,6 +118,12 @@ def certificacao_rodar(
         # 409, e nao 500: a certificacao FUNCIONOU e o certificado nao pode
         # existir. Um 500 diria que o servidor falhou, e o que houve foi o
         # mecanismo cumprindo o papel dele.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except (a1a_braco.SeparacaoAusente, a1a_braco.BaselineAusente) as e:
+        # 409 com o motivo, e nao 500: falta uma pre-condicao, e o servidor
+        # nao falhou. Producao devolveu 500 aqui em 2026-09-09 porque a `cv9`
+        # nao tinha B3 - hoje a suite prepara o laboratorio na COPIA, entao
+        # este ramo so alcanca o que o preparo nao resolve.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(

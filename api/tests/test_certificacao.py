@@ -26,6 +26,16 @@ TABELAS_DO_EXPERIMENTO = (
 )
 
 
+@pytest.fixture
+def cenario_cru(conn):
+    """Dataset e separação, sem baseline e sem hipótese — o estado da cv9."""
+    from app.config.schema import ExperimentConfig
+    from tests.test_maos_rapidas import criar_dataset, precos_passeio
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    return dataset_id, ExperimentConfig()
+
+
 def _foto(conn: sqlite3.Connection) -> dict:
     return {
         t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
@@ -407,3 +417,35 @@ def test_a_AUSENCIA_de_arquivo_de_ambiente_entra_no_hash(monkeypatch):
     assert "nao pode fingir que cobriu" in (
         faltando["componentes"]["por_que_ausentes"]
     )
+
+
+def test_a_suite_prepara_as_PROPRIAS_precondicoes_na_copia(conn, cenario_cru):
+    """Certificar uma config SEM baseline e SEM hipótese tem de funcionar.
+
+    **Medido em produção em 2026-09-09**: certificar a `config_version` 9
+    devolveu **HTTP 500**. Ela é a vigente e não tem run nenhum apontando para
+    ela, e `a1a.braco.rodar` recusa sem um B3 sob a mesma config.
+
+    A resposta certa não é pedir que alguém rode baselines em produção antes de
+    certificar — isso criaria runs reais só para permitir uma certificação, que
+    é o oposto do objeto. A cópia é descartável: a suíte estabelece as
+    pré-condições dentro dela.
+    """
+    from app.certificacao import suite
+
+    dataset_id, cfg = cenario_cru
+    # Nem baseline, nem hipotese: o estado exato da cv9.
+    assert conn.execute("SELECT COUNT(*) FROM hypothesis").fetchone()[0] == 0
+    antes = _foto(conn)
+
+    cert = suite.executar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        dataset_hash="a" * 64,
+    )
+    assert len(cert.manifesto["casos"]) == 6
+    preparo = cert.manifesto["preparo_do_laboratorio"]
+    assert "baselines" in preparo and "b4" in preparo
+
+    # E NADA disso alcancou o banco oficial.
+    assert _foto(conn) == antes
+    assert conn.execute("SELECT COUNT(*) FROM hypothesis").fetchone()[0] == 0
