@@ -46,6 +46,7 @@ from ..comum import _conn
 # as funcoes que ja servem cada tela. Se recalculasse, o export poderia
 # discordar do painel, e a divergencia so apareceria em quem exportou.
 from .a1a import a1a_estado
+from .certificacao import certificacao_estado
 from .a1b import a1b_estado
 from .agente import agente_estado
 from .b4 import b4_estado
@@ -460,6 +461,12 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # Um export sem eles mostraria o placar e nao mostraria se o juiz
         # funciona, que e a pergunta que a 0B faz (§14.4).
         ("a1a", "/api/a1a", lambda: a1a_estado(request)),
+        # A certificacao entra no export como as outras: o painel e o
+        # JSON exportado tem de mostrar o mesmo, e foi por uma parte
+        # que faltava aqui que o incremento 11b descobriu que o export
+        # tinha 13 chaves e nenhuma era `separacao`.
+        ("certificacao", "/api/certificacao",
+         lambda: certificacao_estado(request)),
         ("a1b", "/api/a1b", lambda: a1b_estado(request)),
         # As quatro partes da 0B. Faltavam: este export foi escrito no
         # incremento 7 com uma tupla literal, e parou de descrever o sistema

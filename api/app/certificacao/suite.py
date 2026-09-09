@@ -36,6 +36,42 @@ from . import alvo as alvo_mod
 from . import laboratorio
 
 
+#: O QUE este certificado cobre, e o que ele NAO cobre.
+#:
+#: Declarado, e nao implicito: um manifesto que dissesse "Portao A certificado"
+#: cobrindo so uma das quatro familias de criterio seria a forma exata do
+#: padrao que este projeto conta - um campo que descreve mais do que mediu.
+ESCOPO = {
+    "cobre": [
+        "A1a: as seis familias de defeito deterministico de §14.4, injetadas"
+        " pelo caminho real (adaptador, gatilhos, creditos, transicoes e"
+        " ledger) numa copia descartavel",
+    ],
+    "NAO_cobre": [
+        "A1b: as 400 execucoes das nulas estocasticas. `a1b.braco"
+        ".MAX_POR_PEDIDO` e 50 (~45 s), entao as 400 exigem OITO requisicoes -"
+        " e cada uma teria a sua propria copia, descartada no fim, sem"
+        " acumular. Uma requisicao unica de seis minutos e o que o ADR 0018"
+        " chama de aposta no timeout, e a regra 1 proibe worker na Fase 0",
+        "A2, A3 e A4: baselines, vazamento e reconciliacao do ledger. Sao"
+        " criterios sobre RUNS e sobre a estrutura, e run nao e hipotese -"
+        " eles nunca precisaram deste objeto para serem reexecutados",
+    ],
+    "por_que_isso_nao_e_um_manifesto_parcial": (
+        "parcial seria a suite A1a incompleta - tres dos seis casos -, e o"
+        " gatilho `manifesto_exige_suite_completa` recusa isso. Aqui a suite"
+        " esta INTEIRA; o que e menor que o Portao A e o escopo declarado do"
+        " certificado, e ele diz qual e"
+    ),
+    "o_que_falta_decidir": (
+        "como certificar A1b sem worker e sem requisicao de seis minutos. As"
+        " execucoes sao reproduziveis por (semente, desenho, indice), entao"
+        " rodar em pedacos produz o mesmo conjunto - mas pedacos em copias"
+        " diferentes nao acumulam. Fica aberto"
+    ),
+}
+
+
 class CertificacaoRecusada(Exception):
     """A certificação rodou e o certificado NÃO pode existir.
 
@@ -146,6 +182,9 @@ def executar(
 
     familias_injetadas = {c["familia_de_defeito"] for c in casos}
     esperadas = {f.familia_de_defeito for f in a1a_catalogo.FAMILIAS}
+    # `passa` e sobre a SUITE deste certificado, e nao sobre o Portao A - ver
+    # `ESCOPO`. Nomear isso importa: um `passa: true` lido como "o Portao A
+    # passou" afirmaria A1b, A2, A3 e A4, que este certificado nao mediu.
     passa = not promovidos and not (esperadas - familias_injetadas)
 
     manifesto = {
@@ -160,6 +199,7 @@ def executar(
             "familias_faltando": sorted(esperadas - familias_injetadas),
         },
         "casos": casos,
+        "escopo": ESCOPO,
         "passa": passa,
         "banco_oficial_intocado": {
             "antes": antes,

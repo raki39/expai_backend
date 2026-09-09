@@ -8,7 +8,7 @@ split repetiria o mesmo engano.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Any
 
 
@@ -127,3 +127,12 @@ class PedidoAuditoria(BaseModel):
     author: str = Field(min_length=1, max_length=120)
     hypothesis_id: int = Field(ge=1)
     semente_alternativa: int | None = None
+
+
+class PedidoCertificacao(BaseModel):
+    """Quem pediu a certificacao. `author` por auditoria, como em A1a e B4."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    author: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=500)

@@ -159,6 +159,8 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | POST | `/api/b4` | **roda as 16 hipóteses de B4 — não gasta dinheiro, só CPU** |
 | GET | `/api/a1a` | os seis controles negativos determinísticos (§14.4) e o que aconteceu com cada um |
 | POST | `/api/a1a` | **injeta os seis controles pelo mesmo caminho das reais — tolerância zero** |
+| GET | `/api/certificacao` | o **alvo de certificação** de hoje (sete componentes) e o certificado dele, se existir |
+| POST | `/api/certificacao` | roda a suíte numa **cópia descartável** e sela o manifesto. **Não gasta crédito, não registra hipótese e não move o contador do DSR** (ADR 0040) |
 | GET | `/api/a1b` | o calibre acumulado das nulas estocásticas, nos dois desenhos |
 | POST | `/api/a1b` | **roda um pedaço das 200 execuções por desenho (D29); idempotente por índice** |
 

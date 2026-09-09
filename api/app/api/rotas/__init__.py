@@ -20,6 +20,7 @@ from ...security import exigir_token_de_servico
 from . import (
     a1a,
     a1b,
+    certificacao,
     agente,
     aovivo,
     b4,
@@ -65,6 +66,7 @@ MODULOS = (
     b4,
     a1a,
     a1b,
+    certificacao,
     validador,
     relatorio,
     diagnostico,
