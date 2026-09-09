@@ -608,23 +608,44 @@ def test_os_escopos_de_LEITURA_nao_copiam(conn, cenario):
         assert "copiar" in str(cert.manifesto["preparo_do_laboratorio"])
 
 
-def test_criterio_NAO_MEDIDO_recusa_o_selo(conn, cenario):
+def test_criterio_NAO_MEDIDO_recusa_o_selo(conn, cenario, monkeypatch):
     """`None` não é `False`, e nenhum dos dois pode virar certificado.
 
-    **Medido**: `b1_proporcional_ao_giro` sai `None` quando há um giro só —
-    um ponto não tem inclinação, e afirmar que tem seria inventar a segunda
-    medida. A primeira versão disto selava um manifesto com `passa=0`,
-    transformando *"não medi"* em *"falhou"*. São coisas diferentes, e o
-    Portão A tem três resultados exatamente por isso.
-    """
-    from app.certificacao import suite
+    **Medido em produção em 2026-09-09**: a certificação do A2 na `cv9` foi
+    recusada com `b1_proporcional_ao_giro` NÃO MEDIDO, porque o preparo rodava
+    um giro só — *"um ponto não tem inclinação"*. Foi o mecanismo funcionando.
 
+    A primeira versão disto selava um manifesto com `passa=0`, transformando
+    *"não medi"* em *"falhou"*. São coisas diferentes, e o Portão A tem três
+    resultados exatamente por isso.
+    """
+    from app.certificacao import por_escopo, suite
+
+    # Sem o segundo giro, o A2 volta a nao ter inclinacao a medir.
+    monkeypatch.setattr(
+        por_escopo, "_segundo_giro_de_b1",
+        lambda *a, **k: {"a2_segundo_giro": "desligado por este teste"},
+    )
     with pytest.raises(suite.CertificacaoRecusada) as erro:
         _certificar(conn, cenario, escopo="a2")
     assert "NAO MEDIDO" in str(erro.value)
     assert "b1_proporcional_ao_giro" in str(erro.value)
     assert "nao e uma reprovacao" in str(erro.value)
-    # E nada foi gravado.
     assert conn.execute(
         "SELECT COUNT(*) FROM certificacao_manifesto"
     ).fetchone()[0] == 0
+
+
+def test_o_a2_roda_o_SEGUNDO_giro_e_certifica(conn, cenario):
+    """Com dois pontos há inclinação, e a proporcionalidade é medida.
+
+    O segundo giro é **derivado** — metade do primeiro — e não escolhido: a 0B
+    teve os dois giros (244 e 70) porque existiam, e não porque alguém os
+    selecionou para o teste dar certo.
+    """
+    cert = _certificar(conn, cenario, escopo="a2")
+    assert cert.passa is True
+    por_chave = {c["chave"]: c for c in cert.manifesto["casos"]}
+    assert por_chave["b1_negativo"]["contido"] is True
+    assert por_chave["b1_proporcional_ao_giro"]["contido"] is True
+    assert "metade de" in cert.manifesto["preparo_do_laboratorio"]["a2_segundo_giro"]

@@ -107,6 +107,12 @@ def rodar_a2(oficial, *, dataset_id, config, config_version_id) -> Resultado:
             copia.conn, dataset_id=dataset_id, config=config,
             config_version_id=config_version_id,
         )
+        preparo.update(
+            _segundo_giro_de_b1(
+                copia.conn, dataset_id=dataset_id, config=config,
+                config_version_id=config_version_id,
+            )
+        )
         bloco = portao._a2(copia.conn, config_version_id, config)
         micros_copia = copia.micros_para_copiar
         bytes_copia = copia.bytes_em_disco()
@@ -146,6 +152,80 @@ def rodar_a2(oficial, *, dataset_id, config, config_version_id) -> Resultado:
         intocado_depois=laboratorio.fotografia(oficial),
         preparo=preparo,
     )
+
+
+def _segundo_giro_de_b1(
+    copia, *, dataset_id: int, config, config_version_id: int
+) -> dict:
+    """Um segundo B1 com giro diferente. **Na cópia, e só para o A2.**
+
+    ## Por que ele é necessário
+
+    `_a2` confere que B1 perde **e que perde proporcionalmente ao giro**, e
+    proporcionalidade precisa de dois pontos: *"um ponto não tem inclinação, e
+    afirmar que tem seria inventar a segunda medida"*.
+
+    **Medido em produção em 2026-09-09**: a certificação do A2 na `cv9` foi
+    **recusada** com `b1_proporcional_ao_giro` NÃO MEDIDO, porque o preparo
+    rodava um giro só. Foi o mecanismo funcionando — `None` não é `False`, e um
+    certificado sobre critério não medido afirmaria o que ninguém observou.
+
+    ## Por que o segundo giro é DERIVADO, e não escolhido
+
+    Metade do giro do primeiro. Escolher um número faria a inclinação ser
+    medida entre dois pontos que nós selecionamos — e a 0B teve os dois giros
+    (244 e 70) porque **existiam**, e não porque alguém os escolheu para o
+    teste dar certo. Derivar do que já rodou é o mais próximo disso.
+
+    E o segundo giro nunca é zero nem igual ao primeiro: com giro 1, metade
+    seria 0, e `_a2` veria um ponto só de novo.
+    """
+    from ..ledger.livro import abrir_run, encerrar_run
+    from ..maos_rapidas import baselines
+
+    corridas = baselines.todos_os_b1(copia, config_version_id)
+    giros = {int(c["operacoes_alvo"]) for c in corridas}
+    if len(giros) >= 2:
+        return {
+            "a2_segundo_giro": (
+                f"nao foi preciso: ja havia {len(giros)} giros de B1 na copia"
+            )
+        }
+    if not giros:
+        return {
+            "a2_segundo_giro": (
+                "nenhum B1 na copia: o A2 vai sair NAO MEDIDO, e a recusa e o"
+                " comportamento certo"
+            )
+        }
+
+    primeiro = max(giros)
+    segundo = primeiro // 2
+    if segundo < 1 or segundo == primeiro:
+        return {
+            "a2_segundo_giro": (
+                f"o unico giro e {primeiro}, e a metade dele nao produz um"
+                " segundo ponto distinto: o A2 sai NAO MEDIDO"
+            )
+        }
+
+    run_id, _ = abrir_run(
+        copia, config_version_id=config_version_id,
+        seed_capital_usd_cents=config.seed_capital_usd_cents,
+        agent_id="baseline-B1-certificacao",
+    )
+    baselines.rodar_b1(
+        copia, run_id=run_id, dataset_id=dataset_id, config=config,
+        operacoes_alvo=segundo, semente=config.default_seed,
+    )
+    encerrar_run(copia, run_id, "concluido")
+    return {
+        "a2_segundo_giro": (
+            f"rodado na copia com {segundo} idas e voltas (metade de"
+            f" {primeiro}), porque proporcionalidade precisa de dois pontos e"
+            " um ponto nao tem inclinacao"
+        )
+    }
 
 
 # ---------------------------------------------------------------------------
