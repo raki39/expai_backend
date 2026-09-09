@@ -100,6 +100,73 @@ def _nomes(conn: sqlite3.Connection, tipo: str) -> set[str]:
     }
 
 
+def contrato_do_agente(conn: sqlite3.Connection) -> dict:
+    """O contrato GRAVADO na config vigente descreve o código NO AR?
+
+    ## O vão que este campo fecha, medido em 2026-09-09
+
+    `config_hash_confere` respondeu **`True`** enquanto a `config_version` 8
+    guardava `contrato_do_agente_hash = 24e76a14…` e o código no ar calculava
+    `131898fe…`. Ele não estava errado: ele confere o **payload gravado contra
+    o hash gravado**, e os dois eram coerentes entre si. O que ninguém
+    conferia era o payload contra o **código**.
+
+    E é a mesma forma do defeito que este módulo cometeu com a migração 28:
+    `integras: true` sobre uma estrutura que tinha parado de descrever. No
+    campo cuja única função é acusar.
+
+    ## Por que isto importa e não é cosmético
+
+    `contrato_do_agente_hash` entra no `config_hash`, e portanto na
+    `identidade_executavel`. Um run aberto com a config derivada carregaria uma
+    identidade que **não descreve o prompt que o produziu** — exatamente o que
+    o incremento 18 fechou para o perfil de calibração e o que a
+    `identidade_executavel` existe para impedir.
+
+    A resposta é `reancorar`, o mesmo mecanismo da deriva de schema: nenhum
+    valor é alterado, a config vigente é regravada sob o hash correto e a
+    mudança fica registrada campo a campo.
+    """
+    from ..cerebro.contrato import VERSAO_DO_CONTRATO, hash_do_contrato
+    from ..config import service as config_service
+
+    calculado = hash_do_contrato()
+    atual = config_service.versao_atual(conn)
+    gravado = (
+        getattr(atual.config, "contrato_do_agente_hash", None)
+        if atual is not None
+        else None
+    )
+    confere = gravado == calculado
+    return {
+        "versao_legivel": VERSAO_DO_CONTRATO,
+        "gravado_na_config_vigente": (gravado or "")[:16] or None,
+        "calculado_do_codigo_no_ar": calculado[:16],
+        "confere": confere,
+        "config_version_id": atual.id if atual is not None else None,
+        "o_que_e": (
+            "sha256 do que o agente LE: o sistema, os schemas de saida e o"
+            " codigo que monta a mensagem. Entra no `config_hash`, e portanto"
+            " na `identidade_executavel`"
+        ),
+        "por_que_config_hash_confere_nao_pega": (
+            "`conferir_hash` compara o payload GRAVADO com o hash GRAVADO, e os"
+            " dois seguem coerentes entre si quando o codigo muda. O que muda e"
+            " a relacao entre o payload e o CODIGO, e so este campo a olha"
+        ),
+        "se_nao_confere": (
+            None
+            if confere
+            else (
+                "o prompt mudou depois desta `config_version`. Reancore: nenhum"
+                " valor e alterado, e um run aberto agora carregaria uma"
+                " identidade executavel que nao descreve o prompt que o"
+                " produziu"
+            )
+        ),
+    }
+
+
 def montar(conn: sqlite3.Connection) -> dict[str, Any]:
     from ..calibracao import identidade
     from ..config import service as config_service
@@ -122,6 +189,9 @@ def montar(conn: sqlite3.Connection) -> dict[str, Any]:
         cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({tabela})")}
         if coluna not in cols:
             faltando_colunas.append(f"{tabela}.{coluna}")
+
+    # ------------------------- 1b. o contrato do agente contra o CODIGO
+    contrato = contrato_do_agente(conn)
 
     # ---------------------------------- 2. hashes e identidades executaveis
     versoes = [
@@ -230,7 +300,8 @@ def montar(conn: sqlite3.Connection) -> dict[str, Any]:
         },
         "identidades": {
             "config_versions": versoes,
-            "todas_com_hash_integro": all(v["hash_integro"] for v in versoes),
+            "contrato_do_agente": contrato,
+        "todas_com_hash_integro": all(v["hash_integro"] for v in versoes),
             "runs_recentes": runs,
         },
         "contabilidade": {

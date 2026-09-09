@@ -565,3 +565,57 @@ def test_o_A1a_barra_a_clausula_tautologica():
     assert "três tentativas" in fam.o_que_injeta
     assert "TAUTOLÓGICA" in fam.o_que_injeta
     assert "escala.py" in fam.guarda_esperada
+
+
+# ---------------------------------------------------------------------------
+# A deriva do contrato, que `config_hash_confere` NAO ve
+# ---------------------------------------------------------------------------
+
+
+def test_a_deriva_do_contrato_e_ACUSADA_por_campo_proprio(conn):
+    """`config_hash_confere` respondeu `True` sobre um contrato defasado.
+
+    **Medido em produção em 2026-09-09**: a `config_version` 8 guardava
+    `contrato_do_agente_hash = 24e76a14…` e o código no ar calculava
+    `131898fe…`. `conferir_hash` não estava errado — ele compara o payload
+    GRAVADO com o hash GRAVADO, e os dois seguiam coerentes entre si. O que
+    ninguém conferia era o payload contra o **código**.
+
+    Mesma forma do defeito que `integridade.py` cometeu com a migração 28:
+    `integras: true` sobre uma estrutura que tinha parado de descrever, no
+    campo cuja única função é acusar.
+    """
+    import app.cerebro.prompts as prompts
+    from app.relatorio import integridade
+
+    bloco = integridade.contrato_do_agente(conn)
+    assert bloco["confere"] is True
+    assert bloco["se_nao_confere"] is None
+    assert bloco["gravado_na_config_vigente"] == (
+        bloco["calculado_do_codigo_no_ar"]
+    )
+
+    # Muda o prompt, e o campo tem de virar sozinho.
+    original = prompts.SISTEMA
+    try:
+        prompts.SISTEMA = original + "\numa linha nova"
+        depois = integridade.contrato_do_agente(conn)
+        assert depois["confere"] is False
+        assert depois["gravado_na_config_vigente"] != (
+            depois["calculado_do_codigo_no_ar"]
+        )
+        assert "Reancore" in depois["se_nao_confere"]
+    finally:
+        prompts.SISTEMA = original
+
+    # E ele explica por que o outro campo nao pega, junto do proprio campo.
+    assert "GRAVADO" in bloco["por_que_config_hash_confere_nao_pega"]
+
+
+def test_o_relatorio_de_integridade_PUBLICA_o_contrato(conn):
+    """No relatório, e não só na função — a lição do `poder` que não aparecia."""
+    from app.relatorio import integridade
+
+    r = integridade.montar(conn)
+    assert "contrato_do_agente" in r["identidades"]
+    assert r["identidades"]["contrato_do_agente"]["confere"] is True
