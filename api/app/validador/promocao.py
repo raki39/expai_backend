@@ -47,6 +47,7 @@ from ..dataset import loader, selado
 from ..estatistica import pvalor as pvalor_mod
 from ..estatistica import sharpe as sharpe_mod
 from ..hipotese import poder
+from ..hipotese import escala
 from ..hipotese import registro as hipotese_registro
 from ..hipotese import veredito as veredito_mod
 from ..hipotese.schema import PreRegistroBruto
@@ -217,6 +218,23 @@ def _serie_da_estrategia(conn: sqlite3.Connection, run_id: int) -> list[int]:
     return series_mod.serie_do_run(conn, run_id)
 
 
+def _semente_do_run(conn: sqlite3.Connection, run_id: int) -> int:
+    """O capital semente da config que abriu o RUN, e nao da vigente.
+
+    Da config do run pelo mesmo motivo que `_familia_max`: o dominio de uma
+    clausula e o daquela execucao. Ler a vigente faria uma clausula mudar de
+    informativa para nao informativa quando alguem trocasse a semente.
+    """
+    linha = conn.execute(
+        "SELECT COALESCE("
+        "  json_extract(cv.payload_json, '$.seed_capital_usd_cents'), 100000"
+        ") AS semente FROM config_version cv"
+        " WHERE cv.id = (SELECT config_version_id FROM run WHERE id = ?)",
+        (run_id,),
+    ).fetchone()
+    return int(linha["semente"]) if linha else 100_000
+
+
 def _julgar(
     conn: sqlite3.Connection, hypothesis_id: int, run_id: int
 ) -> tuple[veredito_mod.Veredito, dict]:
@@ -250,10 +268,35 @@ def _julgar(
         idas_e_voltas=executor.idas_e_voltas(conn, run_id),
         b1_casado=_b1_do_run(conn, run_id),
     )
+    # As clausulas que nao conseguem ser verdadeiras E falsas no dominio.
+    #
+    # O pre-registro e imutavel (§8.2), entao uma linha antiga com clausula
+    # fora de escala nao pode ser corrigida - a hipotese 41 declarou
+    # `patrimonio_final_cents < 950000` sobre semente de 100.000. O que se faz
+    # e PUBLICAR que ela nao informa e tirar dela o direito de fortalecer
+    # veredito. A rejeicao dela segue de pe pelos criterios legitimos.
+    semente = _semente_do_run(conn, run_id)
+    nao_informativas = frozenset(
+        d["clausula"]
+        for d in escala.diagnosticar(
+            pre.condicoes_falseamento,
+            semente_cents=semente,
+            horizonte_barras=int(hip["horizonte_barras"] or 1),
+        )
+    )
     v = veredito_mod.emitir(
-        pre, realizado, n_efetivo=efetivo.efetivo, n_minimo=hip["n_minimo"]
+        pre,
+        realizado,
+        n_efetivo=efetivo.efetivo,
+        n_minimo=hip["n_minimo"],
+        clausulas_nao_informativas=nao_informativas,
     )
     detalhe = v.como_dict()
+    detalhe["clausulas_nao_informativas"] = escala.diagnosticar(
+        pre.condicoes_falseamento,
+        semente_cents=semente,
+        horizonte_barras=int(hip["horizonte_barras"] or 1),
+    )
     detalhe["amostra"]["n_bruto"] = efetivo.bruto
     detalhe["amostra"]["autocorrelacao_ppm"] = efetivo.autocorrelacao_ppm
     detalhe["run_id"] = run_id

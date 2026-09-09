@@ -338,4 +338,64 @@ def metrica_sem_custo() -> list[Tentativa]:
         )
         return {"aceitou": True}
 
-    return [_tentar("declarar metrica primaria sem custo", declarar)]
+    # ----------------------------------------------------------------------
+    # A terceira tentativa: CLAUSULA SECUNDARIA TAUTOLOGICA.
+    #
+    # Mesma familia de guarda que a de cima - o schema do pre-registro recusa
+    # uma DECLARACAO -, e por isso ela mora aqui em vez de abrir uma setima
+    # familia: a lista de §14.4 e fechada e citada, e o orcamento da D25
+    # (16 + 16 + 6 + 10 = 48) nao tem vaga para uma setima.
+    #
+    # E ela nao registra hipotese nenhuma: a recusa acontece na CONSTRUCAO do
+    # pre-registro, antes de qualquer escrita, entao o controle nao ocupa lugar
+    # na familia nem cobra credito.
+    #
+    # O caso e o real. A hipotese 41 declarou `patrimonio_final_cents < 950000`
+    # sobre uma semente de 100.000 centavos - nove vezes e meia a semente. Ela
+    # dispara em todo run possivel e nunca poderia deixar de disparar, e entrou
+    # no veredito com `disparou: true`, indistinguivel de uma refutacao real.
+    # Duas coisas deixaram passar: `_falseamento_serve_para_algo` so olhava a
+    # metrica PRIMARIA, e o prompt informava "um capital semente" - a palavra,
+    # nao o numero.
+    def clausula_tautologica():
+        from ..hipotese import escala
+
+        semente = 100_000
+        bruto = PreRegistroBruto(
+            enunciado=(
+                "CONTROLE NEGATIVO DETERMINISTICO (A1a, secao 14.4). Clausula"
+                " SECUNDARIA fora da escala: um limiar patrimonial de 9,5x a"
+                " semente dispara em qualquer run possivel, e uma condicao que"
+                " nao pode deixar de disparar nao refuta - ela decora."
+            ),
+            metrica_primaria="excesso_sobre_b3_cents",
+            efeito_minimo=semente * 500 // 10_000,
+            sharpe_esperado_milesimos=1_000,
+            criterio_parada="fim_da_janela",
+            condicoes_falseamento=[
+                ClausulaFalseamento.da_semente(
+                    "excesso_sobre_b3_cents", "menor_que",
+                    bps=500, semente_cents=semente,
+                ),
+                # 95.000 bps = 9,5x a semente. O numero da hipotese 41.
+                ClausulaFalseamento.da_semente(
+                    "patrimonio_final_cents", "menor_que",
+                    bps=95_000, semente_cents=semente,
+                ),
+            ],
+        )
+        # A unidade passa (esta declarada em bps); o que tem de barrar e a
+        # ESCALA, e ela e conferida no registro, com semente e horizonte.
+        escala.conferir(
+            bruto, semente_cents=semente, horizonte_barras=21_024
+        )
+        return {"aceitou": True}
+
+    return [
+        _tentar("declarar metrica primaria sem custo", declarar),
+        _tentar(
+            "declarar clausula secundaria tautologica (limiar patrimonial de"
+            " 9,5x a semente, o caso da hipotese 41)",
+            clausula_tautologica,
+        ),
+    ]

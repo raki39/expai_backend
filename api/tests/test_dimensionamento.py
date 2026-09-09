@@ -718,6 +718,7 @@ def _bruto(**mudancas) -> PreRegistroBruto:
                 "metrica": "excesso_sobre_b3_cents",
                 "comparador": "menor_que",
                 "valor": EFEITO_MINIMO_CENTS,
+                "valor_bps_da_semente": (EFEITO_MINIMO_CENTS) * 10_000 // 100_000,
             }
         ],
     }
@@ -735,6 +736,7 @@ def _registrar(conn, evento, dimensionamento_d48=None):
         condicoes_validade=CONDICOES,
         duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=IN_SAMPLE_BARRAS,
+        semente_cents=100_000,
         dimensionamento_d48=dimensionamento_d48,
     )
 
@@ -969,6 +971,7 @@ def _inserir_cru(conn: sqlite3.Connection, evento, **campos) -> None:
                     "metrica": "excesso_sobre_b3_cents",
                     "comparador": "menor_que",
                     "valor": 0,
+                    "valor_bps_da_semente": 0,
                 }
             ]
         ),

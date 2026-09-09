@@ -70,6 +70,10 @@ METRICA = "excesso_sobre_b3_cents"
 #: Giro alto de propósito no controle de custos: com ~27 bps por ida e volta,
 #: é o giro que faz a diferença entre bruto e líquido dominar o resultado.
 #: 2/3 é o cruzamento mais rápido que o catálogo aceita.
+#: O efeito minimo dos controles, em bps da semente: 5%. Mesma regra de B4,
+#: e agora declarada na unidade RELATIVA que o resto do sistema usa.
+EFEITO_MINIMO_BPS_DA_SEMENTE = 500
+
 REGRA_DE_GIRO_ALTO = {"rapida": 2, "lenta": 3}
 
 
@@ -165,7 +169,10 @@ def _pre_registro(
     duas afirmações indistinguíveis — uma pensada e uma construída para revelar
     defeito — e a leitura do lote perderia sentido no próprio dado.
     """
-    efeito = config.seed_capital_usd_cents * 500 // 10_000
+    efeito = (
+        config.seed_capital_usd_cents * EFEITO_MINIMO_BPS_DA_SEMENTE
+        // 10_000
+    )
     piso = sharpe_minimo_testavel(
         duracao_barra_ms=duracao_barra_ms,
         horizonte_barras=max(1, horizonte_barras),
@@ -184,11 +191,21 @@ def _pre_registro(
         sharpe_esperado_milesimos=min(piso, SHARPE_MAX_MILESIMOS),
         criterio_parada="fim_da_janela",
         condicoes_falseamento=[
-            ClausulaFalseamento(
-                metrica=METRICA, comparador="menor_que", valor=efeito
+            # Monetaria: declarada em bps da semente, e o sistema converte.
+            ClausulaFalseamento.da_semente(
+                METRICA, "menor_que",
+                bps=EFEITO_MINIMO_BPS_DA_SEMENTE,
+                semente_cents=config.seed_capital_usd_cents,
             ),
+            # Factual, e DENTRO DA ESCALA. Ate 2026-09-09 esta linha dizia
+            # `idas_e_voltas > 20000` sobre um horizonte de 21.024 barras, onde
+            # o maximo aritmetico e ~10.512: **a clausula do proprio controle
+            # nunca podia disparar**. O giro absurdo agora e derivado do
+            # horizonte, e nao digitado.
             ClausulaFalseamento(
-                metrica="idas_e_voltas", comparador="maior_que", valor=20_000
+                metrica="idas_e_voltas",
+                comparador="maior_que",
+                valor=max(1, horizonte_barras // 4),
             ),
         ],
     )
@@ -430,6 +447,7 @@ def _rodar_um(
         condicoes_validade=regra.condicoes_validade.model_dump(mode="json"),
         duracao_barra_ms=duracao,
         horizonte_barras=len(barras),
+        semente_cents=config.seed_capital_usd_cents,
         rule_id=rule_id,
         agente_origem=hipotese_registro.AGENTE_ORIGEM_A1A,
     )

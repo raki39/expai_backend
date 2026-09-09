@@ -133,6 +133,31 @@ class ExperimentConfig(BaseModel):
     # ------------------------------------------- economia (ADR 0003/0006)
     seed_capital_usd_cents: int = Field(default=100_000, gt=0)  # US$ 1.000
 
+    # O CONTRATO DO AGENTE, na identidade reproduzivel. 2026-09-09.
+    #
+    # > *"Se o prompt ou contexto influenciam a execucao do agente, sua
+    # > versao/hash deve participar da identidade reproduzivel."*
+    #
+    # Ate aqui `identidade_executavel` era `config_hash + perfil`, e o prompt
+    # nao aparecia nela: dois deploys com prompts diferentes produziam runs de
+    # identidade IGUAL e comportamento diferente. E o mesmo vao que o
+    # incremento 18 fechou ao descobrir que `config_hash` sozinho tinha
+    # parado de identificar o comportamento - por isso este campo entra no
+    # PAYLOAD, e assim no `config_hash`, e assim na identidade, sem precisar
+    # de coluna nova nem de uma terceira parte na string.
+    #
+    # `default_factory` com import local: `app.cerebro.contrato` importa o
+    # catalogo de regras, e um import no topo daqui fecharia o ciclo.
+    #
+    # MATERIAL de proposito: mudar o prompt muda o caminho de decisao, entao
+    # invalida comparacao com runs anteriores (§10.2.3) - e o cache de prefixo
+    # esfria, que e o custo que o usuario aceitou explicitamente.
+    contrato_do_agente_hash: str = Field(
+        default_factory=lambda: __import__(
+            "app.cerebro.contrato", fromlist=["hash_do_contrato"]
+        ).hash_do_contrato()
+    )
+
     # Tetos OPERACIONAIS. O limite inviolavel e LLM_MAX_USD_ABSOLUTE, no env,
     # e esta config nao pode exceder aquele valor (secao 12.1).
     max_llm_calls_per_run: int = Field(default=12, ge=0)

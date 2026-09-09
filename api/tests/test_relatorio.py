@@ -289,6 +289,7 @@ def test_veredito_e_none_quando_uma_condicao_nao_pode_ser_conferida(
                     "metrica": "excesso_sobre_b2_cents",
                     "comparador": "menor_que",
                     "valor": 100,
+                    "valor_bps_da_semente": 10,
                 }
             ],
         }
@@ -328,6 +329,7 @@ def test_falta_de_amostra_e_inconclusiva_e_nunca_refutada(
                     "metrica": "excesso_sobre_b1_p50_cents",
                     "comparador": "menor_que",
                     "valor": 5_000,
+                    "valor_bps_da_semente": (5_000) * 10_000 // 100_000,
                 }
             ],
         }

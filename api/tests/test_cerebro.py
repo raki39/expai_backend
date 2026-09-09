@@ -88,6 +88,7 @@ PRE_REGISTRO_OK = {
             "metrica": "excesso_sobre_b1_p50_cents",
             "comparador": "menor_que",
             "valor": 0,
+            "valor_bps_da_semente": 0,
         }
     ],
 }

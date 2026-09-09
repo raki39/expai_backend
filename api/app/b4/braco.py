@@ -334,6 +334,7 @@ def rodar(
             condicoes_validade=c.regra.condicoes_validade.model_dump(mode="json"),
             duracao_barra_ms=duracao,
             horizonte_barras=len(barras),
+            semente_cents=config.seed_capital_usd_cents,
             rule_id=rule_id,
             # A origem propria: e por ela que o contador separa os bracos.
             agente_origem=hipotese_registro.AGENTE_ORIGEM_B4,

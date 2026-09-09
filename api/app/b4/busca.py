@@ -242,14 +242,22 @@ def _pre_registro(
             # igual ao efeito minimo. E o schema que exige essa forma, e nao
             # uma escolha - ficar abaixo do proprio efeito minimo declarado
             # tem de refutar.
-            ClausulaFalseamento(
-                metrica=METRICA, comparador="menor_que", valor=efeito
+            ClausulaFalseamento.da_semente(
+                METRICA, "menor_que",
+                bps=EFEITO_MINIMO_BPS_DO_CAPITAL,
+                semente_cents=config.seed_capital_usd_cents,
             ),
             # Uma FACTUAL, que refuta sem depender de amostra: um giro
             # absurdo denuncia parametro degenerado, e essa e a falha que a
             # busca aleatoria produz de verdade.
+            # DERIVADO do horizonte, e nao digitado. `2_000` fixo nunca
+            # disparava em janela curta - o maximo aritmetico de idas e voltas
+            # e `horizonte // 2`, porque uma ida e uma volta gastam duas
+            # barras. Mesmo defeito que o A1a tinha com `20_000`.
             ClausulaFalseamento(
-                metrica="idas_e_voltas", comparador="maior_que", valor=2_000
+                metrica="idas_e_voltas",
+                comparador="maior_que",
+                valor=max(1, horizonte_barras // 4),
             ),
         ],
     )

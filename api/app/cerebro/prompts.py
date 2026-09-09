@@ -253,12 +253,59 @@ def mensagem_interpretar(resumo: ResumoDePeriodo) -> str:
     )
 
 
+def bloco_de_escala(
+    *,
+    capital_semente_cents: int,
+    moeda: str,
+    fracao_maxima_bps: int,
+    horizonte_barras: int,
+) -> str:
+    """A ESCALA, em numeros. Sem ela o agente declara limiar sem referencia.
+
+    **Medido**: a hipotese 41 declarou `patrimonio_final_cents < 950000` sobre
+    uma semente de 100.000 centavos - nove vezes e meia a semente, uma clausula
+    que dispara em qualquer run possivel e nunca poderia deixar de disparar. O
+    prompt dizia *"ele comeca com um capital semente"*, a palavra e nao o
+    numero, e nada informava a unidade. **O agente nao errou: ele nao tinha
+    como acertar.**
+
+    Vai na MENSAGEM e nao no SISTEMA, pelo mesmo motivo do horizonte: estes
+    numeros mudam com a config, e o sistema e o prefixo cacheado.
+    """
+    from ..hipotese import escala
+
+    teto = (
+        capital_semente_cents * escala.TETO_MULTIPLO_DA_SEMENTE_BPS // 10_000
+    )
+    linhas = [
+        "Escala e unidades (LEIA ANTES DE DECLARAR QUALQUER LIMIAR):",
+        f"  capital semente: {capital_semente_cents} centavos"
+        f" ({capital_semente_cents / 100:.2f} {moeda})",
+        f"  moeda: {moeda}",
+        "  unidade de toda metrica monetaria: CENTAVOS INTEIROS"
+        " (nunca fracao, nunca a unidade da moeda)",
+        f"  posicao maxima por operacao: {fracao_maxima_bps} bps do caixa do"
+        " momento; long/flat, sem alavancagem e sem venda a descoberto",
+        f"  patrimonio possivel: de 0 a ~{teto} centavos",
+        f"  idas e voltas possiveis: de 0 a {horizonte_barras // 2}"
+        f" (a janela tem {horizonte_barras} barras, e uma ida mais uma volta"
+        " gastam duas)",
+        "",
+        "Limiar monetario e declarado em `valor_bps_da_semente`, e o sistema"
+        " converte para centavos: 10000 bps e a semente inteira, 9500 bps sao"
+        " 95% dela. Limiar fora da faixa possivel e RECUSADO - uma condicao"
+        " que nao pode deixar de disparar nao refuta nada.",
+    ]
+    return "\n".join(linhas)
+
+
 def mensagem_propor(
     resumo: ResumoDePeriodo,
     leitura: Interpretacao,
     *,
     horizonte_barras: int | None = None,
     sharpe_minimo_milesimos: int | None = None,
+    escala_texto: str | None = None,
 ) -> str:
     """A mensagem do no `propor_regra`.
 
@@ -267,7 +314,13 @@ def mensagem_propor(
     variavel dentro do prefixo esfriaria o cache a cada run - e a descoberta 5
     do incremento 5 foi exatamente sobre o que faz parte desse prefixo.
     """
-    partes = [
+    partes: list[str] = []
+    # A ESCALA vem PRIMEIRO, antes do resumo: ela e a unidade em que tudo
+    # que vem depois sera lido, e um limiar declarado sem ela e o defeito
+    # que a hipotese 41 registrou.
+    if escala_texto:
+        partes.append(f"{escala_texto}\n")
+    partes += [
         "Resumo estatistico do periodo observado:\n",
         f"{resumo.como_texto()}\n",
         "Sua leitura deste periodo:\n",

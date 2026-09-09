@@ -34,7 +34,7 @@ from ..hipotese import poder
 from ..hipotese import registro as hipotese_registro
 from ..ledger.livro import fx_micro, registrar_custo_reflexao
 from ..regra import registro as registro_de_regra
-from ..regra.schema import CruzamentoMedias, Regra
+from ..regra.schema import FRACAO_MAXIMA_BPS, CruzamentoMedias, Regra
 from ..settings import Settings
 from . import contexto, propostas, prompts, reflexao
 from .contrato import (
@@ -358,6 +358,26 @@ def no_propor_regra(estado: Estado, dep: Dependencias) -> dict:
                         resumo,
                         estado["interpretacao"],
                         horizonte_barras=estado["horizonte_execucao"],
+                        # A ESCALA, em numeros. Sem ela o agente declara
+                        # limiar monetario sem referencia - a hipotese 41
+                        # declarou `patrimonio < 950000` sobre semente de
+                        # 100.000, e a clausula passou a disparar em qualquer
+                        # run possivel.
+                        escala_texto=prompts.bloco_de_escala(
+                            capital_semente_cents=(
+                                dep.config.seed_capital_usd_cents
+                            ),
+                            moeda="USD",
+                            # Do SCHEMA DA REGRA, e nao da config: o limite
+                            # de posicao e `Params.position_fraction_bps`, com
+                            # `le=10_000` - 100% do caixa. A config nao tem
+                            # esse campo, e inventar um valor aqui seria
+                            # declarar um teto que ninguem impoe.
+                            fracao_maxima_bps=FRACAO_MAXIMA_BPS,
+                            horizonte_barras=max(
+                                1, estado["horizonte_execucao"]
+                            ),
+                        ),
                         # O modelo precisa saber o piso ANTES de escolher o
                         # Sharpe. Sem isto ele declara um numero plausivel, a
                         # hipotese nasce nao testavel, e ele so descobre
@@ -466,6 +486,7 @@ def no_registrar_intencao(estado: Estado, dep: Dependencias) -> dict:
             ),
             duracao_barra_ms=_duracao_da_barra(estado, dep.config),
             horizonte_barras=estado["horizonte_execucao"],
+            semente_cents=dep.config.seed_capital_usd_cents,
             rule_id=rule_id,
         )
     except Exception as erro:  # noqa: BLE001

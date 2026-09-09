@@ -212,3 +212,24 @@ class Regra(BaseModel):
         sinal" seria diferente de tratar como "sinal de ficar de fora".
         """
         return self.params.janela_minima
+
+
+def _campo_fracao():
+    """O `FieldInfo` de `position_fraction_bps`. Ele vive em `Regra`."""
+    campo = Regra.model_fields.get("position_fraction_bps")
+    if campo is None:
+        raise AssertionError("position_fraction_bps saiu de `Regra`")
+    return campo
+
+
+#: O teto de posicao que o schema IMPOE, lido do proprio `Field`.
+#:
+#: Derivado, e nao digitado: o prompt informa este numero ao agente como
+#: "posicao maxima por operacao", e um segundo literal em outro arquivo
+#: divergiria do que o validador de fato recusa - a forma que
+#: `condicoes_da_config` teve duas vezes identica.
+FRACAO_MAXIMA_BPS: int = next(
+    m.le
+    for m in _campo_fracao().metadata
+    if getattr(m, "le", None) is not None
+)

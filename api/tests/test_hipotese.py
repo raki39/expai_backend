@@ -41,6 +41,7 @@ BRUTO_OK = {
             "metrica": "excesso_sobre_b1_p50_cents",
             "comparador": "menor_que",
             "valor": 5_000,
+            "valor_bps_da_semente": (5_000) * 10_000 // 100_000,
         }
     ],
 }
@@ -90,6 +91,7 @@ def _inserir_cru(conn: sqlite3.Connection, evento, **campos) -> None:
                     "metrica": "excesso_sobre_b1_p50_cents",
                     "comparador": "menor_que",
                     "valor": 0,
+                    "valor_bps_da_semente": 0,
                 }
             ]
         ),
@@ -226,6 +228,7 @@ def test_hipotese_que_nao_cabe_no_horizonte_nasce_nao_testavel(
         condicoes_validade=CONDICOES,
         duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=21_024,
+        semente_cents=100_000,
     )
     assert testavel is False
     lido = hipotese_registro.por_id(conn, hid)
@@ -319,6 +322,7 @@ def test_os_dez_campos_da_secao_8_2_estao_todos_gravados(
         condicoes_validade=CONDICOES,
         duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=56_064,
+        semente_cents=100_000,
     )
     h = hipotese_registro.por_id(conn, hid)
 
@@ -364,6 +368,7 @@ def test_pre_registro_recusa_update_e_delete(
         conn, run_id=run_id, agent_event_id=event_id, bruto=_pre(),
         condicoes_validade=CONDICOES, duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=56_064,
+        semente_cents=100_000,
     )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -382,6 +387,7 @@ def test_correcao_e_registro_novo_com_supersedes(
         conn, run_id=run_id, agent_event_id=event_id, bruto=_pre(),
         condicoes_validade=CONDICOES, duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=56_064,
+        semente_cents=100_000,
     )
     segunda, _ = hipotese_registro.registrar(
         conn, run_id=run_id, agent_event_id=event_id,
@@ -390,10 +396,12 @@ def test_correcao_e_registro_novo_com_supersedes(
                 "metrica": "excesso_sobre_b1_p50_cents",
                 "comparador": "menor_que",
                 "valor": 9_000,
+                "valor_bps_da_semente": (9_000) * 10_000 // 100_000,
             }
         ]),
         condicoes_validade=CONDICOES, duracao_barra_ms=QUINZE_MIN_MS,
         horizonte_barras=56_064, supersedes=primeira,
+        semente_cents=100_000,
     )
     assert hipotese_registro.por_id(conn, segunda)["supersedes"] == primeira
     # A primeira continua la, intacta.
@@ -444,6 +452,7 @@ def test_falseamento_precisa_contradizer_o_efeito_minimo() -> None:
                 "metrica": "excesso_sobre_b1_p50_cents",
                 "comparador": "menor_que",
                 "valor": -50_000,
+                "valor_bps_da_semente": (-50_000) * 10_000 // 100_000,
             }
         ])
 
@@ -512,6 +521,7 @@ def test_hash_e_do_conteudo_e_ignora_a_ordem_das_clausulas() -> None:
                 "metrica": "excesso_sobre_b1_p50_cents",
                 "comparador": "menor_que",
                 "valor": 5_000,
+                "valor_bps_da_semente": (5_000) * 10_000 // 100_000,
             },
             {"metrica": "idas_e_voltas", "comparador": "maior_que", "valor": 900},
         ]
@@ -523,6 +533,7 @@ def test_hash_e_do_conteudo_e_ignora_a_ordem_das_clausulas() -> None:
                 "metrica": "excesso_sobre_b1_p50_cents",
                 "comparador": "menor_que",
                 "valor": 5_000,
+                "valor_bps_da_semente": (5_000) * 10_000 // 100_000,
             },
         ]
     )
@@ -550,6 +561,7 @@ def test_contador_de_tentativas_reconhece_a_mesma_hipotese(
             conn, run_id=run_id, agent_event_id=event_id, bruto=_pre(),
             condicoes_validade=CONDICOES, duracao_barra_ms=QUINZE_MIN_MS,
             horizonte_barras=56_064,
+            semente_cents=100_000,
         )
     h = hipotese_registro.do_run(conn, run_id)
     assert hipotese_registro.tentativas_por_hash(conn, h["content_hash"]) == 3

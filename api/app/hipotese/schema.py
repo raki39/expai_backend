@@ -126,7 +126,17 @@ class ClausulaFalseamento(BaseModel):
 
     metrica: Metrica
     comparador: Comparador
+    #: O limiar na unidade da METRICA - centavos, ou contagem.
     valor: int
+    #: O mesmo limiar como o agente o DECLAROU: bps da semente, para metrica
+    #: monetaria. `None` nas linhas gravadas antes de 2026-09-09 e nas
+    #: metricas factuais, que sao contagem e nao tem semente a que se referir.
+    #:
+    #: Existe porque um limiar monetario absoluto nao carrega a escala: a
+    #: hipotese 41 declarou `patrimonio_final_cents < 950000` sobre uma semente
+    #: de 100.000, e a clausula passou a disparar em qualquer run possivel. O
+    #: sistema converte; o agente declara relativo.
+    valor_bps_da_semente: int | None = None
 
     def disparou(self, observado: int) -> bool:
         if self.comparador == "menor_que":
@@ -136,6 +146,28 @@ class ClausulaFalseamento(BaseModel):
     def como_texto(self) -> str:
         sinal = "<" if self.comparador == "menor_que" else ">"
         return f"{self.metrica} {sinal} {self.valor}"
+
+    @classmethod
+    def da_semente(
+        cls,
+        metrica: str,
+        comparador: str,
+        *,
+        bps: int,
+        semente_cents: int,
+    ) -> "ClausulaFalseamento":
+        """A clausula monetaria declarada em bps da semente. O SISTEMA converte.
+
+        Uma unica travessia bps -> centavos, pelo mesmo motivo que a marcacao a
+        mercado virou uma funcao so: duas conversoes divergem, e a divergencia
+        aqui muda um veredito.
+        """
+        return cls(
+            metrica=metrica,
+            comparador=comparador,
+            valor=semente_cents * bps // 10_000,
+            valor_bps_da_semente=bps,
+        )
 
 
 class PreRegistroBruto(BaseModel):
@@ -196,6 +228,40 @@ class PreRegistroBruto(BaseModel):
                 "duas condicoes de falseamento sobre a mesma metrica e o mesmo"
                 " comparador: uma delas e redundante ou contraditoria"
             )
+
+        # ------------------------------------------------------------------
+        # TODAS as clausulas, e nao so a primaria. 2026-09-09.
+        #
+        # Ate aqui a funcao inteira olhava `na_primaria`. A hipotese 41 passou
+        # com `patrimonio_final_cents < 950000` sobre semente de 100.000 -
+        # nove vezes e meia a semente, uma clausula SECUNDARIA que dispara em
+        # qualquer run possivel - porque secundaria nao era conferida por nada.
+        #
+        # A conferencia de ESCALA precisa da semente e do horizonte, que sao do
+        # banco: ela vive em `hipotese/escala.py` e roda no registro. O que se
+        # confere aqui e a UNIDADE, que nao depende de estado nenhum.
+        for c in self.condicoes_falseamento:
+            monetaria = c.metrica not in METRICAS_FACTUAIS
+            if monetaria and c.valor_bps_da_semente is None:
+                raise ValueError(
+                    f"a clausula sobre '{c.metrica}' declara limiar monetario"
+                    f" absoluto ({c.valor}) sem referencia de escala. Metrica"
+                    " monetaria e declarada em `valor_bps_da_semente`, e o"
+                    " sistema converte: um numero em centavos sozinho nao diz"
+                    " se e um decimo da semente ou dez vezes ela"
+                )
+            if not monetaria and c.valor_bps_da_semente is not None:
+                raise ValueError(
+                    f"a clausula sobre '{c.metrica}' e uma CONTAGEM e nao tem"
+                    " semente a que se referir; `valor_bps_da_semente` so vale"
+                    " para metrica monetaria"
+                )
+            if c.valor < 0 and c.metrica == "patrimonio_final_cents":
+                raise ValueError(
+                    "patrimonio nao fica negativo: nao ha alavancagem nem"
+                    " venda a descoberto no catalogo, entao um limiar negativo"
+                    " descreve um estado que o simulador nao produz"
+                )
         return self
 
 

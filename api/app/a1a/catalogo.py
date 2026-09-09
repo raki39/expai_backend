@@ -89,12 +89,18 @@ FAMILIAS: tuple[Familia, ...] = (
         chave="lucro_so_sem_custos",
         familia_de_defeito="operação que só lucra quando custos são ignorados",
         o_que_injeta=(
-            "duas tentativas: declarar métrica primária sem custo, e executar"
-            " giro alto para comparar o bruto com o líquido"
+            "três tentativas: declarar métrica primária sem custo; declarar"
+            " cláusula secundária TAUTOLÓGICA — limiar patrimonial de 9,5× a"
+            " semente, que é o caso real da hipótese 41; e executar giro alto"
+            " para comparar o bruto com o líquido"
         ),
         guarda_esperada=(
             "o enum fechado de métrica não tem métrica bruta, e todas saem do"
-            " ledger, que é líquido por construção"
+            " ledger, que é líquido por construção. E `hipotese/escala.py`"
+            " recusa cláusula que não consegue ser verdadeira E falsa no"
+            " domínio da métrica — a de 9,5× a semente dispara em qualquer run"
+            " possível, e uma condição que não pode deixar de disparar decora"
+            " em vez de refutar"
         ),
         tipo=ESTATISTICO,
     ),

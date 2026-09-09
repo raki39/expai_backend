@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import dimensionamento, poder
 from .dimensionamento import Dimensionamento
+from . import escala
 from .schema import PreRegistroBruto, hash_do_conteudo
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ def registrar(
     condicoes_validade: dict,
     duracao_barra_ms: int,
     horizonte_barras: int,
+    semente_cents: int,
     rule_id: int | None = None,
     supersedes: int | None = None,
     agente_origem: str = AGENTE_ORIGEM,
@@ -113,6 +115,19 @@ def registrar(
     aceitar outro valor aqui deixaria a regua ser escolhida por hipotese, que e
     exatamente a porta que a D48 fechou.
     """
+    # ---------------------------------------------------------------- escala
+    #
+    # PRIMEIRA coisa da funcao, antes de qualquer conta e de qualquer escrita:
+    # uma clausula que nao pode deixar de disparar nao vira hipotese. A
+    # conferencia mora fora do modelo porque depende da semente e do horizonte,
+    # que sao do banco - o schema que vai ao provedor nao pode depender de
+    # estado. Ver `hipotese/escala.py`.
+    escala.conferir(
+        bruto,
+        semente_cents=semente_cents,
+        horizonte_barras=horizonte_barras,
+    )
+
     regua = dimensionamento.REGUA_SECAO_8_3
     dimensionamento_json: str | None = None
     motivo: str | None = None

@@ -277,3 +277,54 @@ def montar_regra(bruta: PropostaBruta, config: ExperimentConfig) -> Regra:
         stop_loss_bps=bruta.stop_loss_bps,
         condicoes_validade=condicoes_da_config(config),
     )
+
+# ---------------------------------------------------------------------------
+# A VERSAO DO CONTRATO, e por que ela entra na identidade reproduzivel
+# ---------------------------------------------------------------------------
+#
+# > *"Versione a mudanca do prompt/contexto e aceite a invalidacao do cache. Se
+# > o prompt ou contexto influenciam a execucao do agente, sua versao/hash deve
+# > participar da identidade reproduzivel."* - o usuario, 2026-09-09
+#
+# Ate aqui `identidade_executavel` era `config_hash + calibracao_perfil_hash`,
+# e o prompt nao aparecia em lugar nenhum dela. Dois deploys com prompts
+# diferentes produziam runs com a MESMA identidade e comportamento diferente -
+# exatamente o vao que o incremento 18 fechou quando descobriu que
+# `config_hash` sozinho tinha parado de identificar o comportamento.
+#
+# O hash cobre o que o agente EFETIVAMENTE LE: o sistema, o schema de saida
+# (que a descoberta 5 do incremento 5 mostrou fazer parte do prefixo cacheado)
+# e o codigo que monta a mensagem. Nao cobre os NUMEROS interpolados nela:
+# esses vem da config, que ja esta na identidade pelo proprio `config_hash`.
+
+#: Versao legivel do contrato. 1 = ate 2026-09-08. 2 = com o bloco de escala.
+VERSAO_DO_CONTRATO = 2
+
+
+def hash_do_contrato() -> str:
+    """Sha256 do que o agente le. Derivado do CODIGO, nunca digitado.
+
+    Digitar um numero de versao ao lado do texto e a forma do defeito que este
+    projeto conta: alguem muda o texto e esquece o numero. Aqui a unica coisa
+    escrita a mao e `VERSAO_DO_CONTRATO`, que serve para conversa humana - o
+    que entra na identidade e o hash, e ele muda sozinho.
+    """
+    import hashlib
+    import inspect
+    import json
+
+    from . import prompts
+
+    partes = [
+        prompts.SISTEMA,
+        json.dumps(PropostaBruta.model_json_schema(), sort_keys=True),
+        json.dumps(Interpretacao.model_json_schema(), sort_keys=True),
+        inspect.getsource(prompts.bloco_de_escala),
+        inspect.getsource(prompts.mensagem_propor),
+        inspect.getsource(prompts.mensagem_interpretar),
+    ]
+    h = hashlib.sha256()
+    for parte in partes:
+        h.update(parte.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()

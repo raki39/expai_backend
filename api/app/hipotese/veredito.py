@@ -176,6 +176,14 @@ class ClausulaConferida:
     clausula: ClausulaFalseamento
     observado: int | None
     disparou: bool | None
+    #: A clausula nao consegue ser verdadeira E falsa no dominio da metrica.
+    #:
+    #: A hipotese 41 declarou `patrimonio_final_cents < 950000` sobre uma
+    #: semente de 100.000 centavos: ela dispara em qualquer run possivel. O
+    #: pre-registro e imutavel (§8.2), entao a linha nao pode ser corrigida -
+    #: o que se pode e publicar que ela nao informa, e **nao deixar o
+    #: `disparou` dela fortalecer veredito nenhum**.
+    nao_informativa: bool = False
     por_que_nao_conferida: str | None = None
 
     def como_dict(self) -> dict:
@@ -186,6 +194,7 @@ class ClausulaConferida:
             "valor": self.clausula.valor,
             "observado": self.observado,
             "disparou": self.disparou,
+            "nao_informativa": self.nao_informativa,
             "por_que_nao_conferida": self.por_que_nao_conferida,
         }
 
@@ -229,6 +238,7 @@ def emitir(
     *,
     n_efetivo: int,
     n_minimo: int,
+    clausulas_nao_informativas: frozenset[str] = frozenset(),
 ) -> Veredito:
     """Deriva o veredito. Nenhum ramo aqui escreve uma conclusao a mao."""
     clausulas: list[ClausulaConferida] = []
@@ -249,7 +259,10 @@ def emitir(
             continue
         clausulas.append(
             ClausulaConferida(
-                clausula=c, observado=observado, disparou=c.disparou(observado)
+                clausula=c,
+                observado=observado,
+                disparou=c.disparou(observado),
+                nao_informativa=c.como_texto() in clausulas_nao_informativas,
             )
         )
 
@@ -306,7 +319,9 @@ def emitir(
     #    mais ou menos verdadeira. Por isso este ramo vem antes da amostra.
     factuais = [
         c for c in clausulas
-        if c.disparou and c.clausula.metrica in METRICAS_FACTUAIS
+        if c.disparou
+        and not c.nao_informativa
+        and c.clausula.metrica in METRICAS_FACTUAIS
     ]
     if factuais:
         return _refutada(
@@ -335,7 +350,12 @@ def emitir(
         )
 
     # 4. Refutada por clausula ESTATISTICA, ja com amostra suficiente.
-    dispararam = [c for c in clausulas if c.disparou]
+    #
+    # Clausula NAO INFORMATIVA nao vota. Uma que dispara em qualquer run
+    # possivel - `patrimonio_final_cents < 950000` sobre semente de 100.000 -
+    # nao observou nada: deixa-la refutar seria chamar de evidencia uma linha
+    # que nao podia dar outra resposta.
+    dispararam = [c for c in clausulas if c.disparou and not c.nao_informativa]
     if dispararam:
         return _refutada(
             dispararam,
