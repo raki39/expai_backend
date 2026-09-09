@@ -285,16 +285,15 @@ def _estatistica_do_run(
     momento, e afirmar curtose 3 (normal) sobre ela seria inventar
     normalidade que ninguem mediu.
 
-    ## RASTREADO EM 2026-09-08: esta serie e do MERCADO, e nao da estrategia
+    ## CORRIGIDO EM 2026-09-08: a serie e da ESTRATEGIA (metodologia v2)
 
-    `executor.retornos_do_run` devolve os retornos de fechamento a fechamento do
-    DATASET entre a primeira e a ultima execucao do run. **Ela nao conhece a
-    estrategia** - conhece so a janela em que a estrategia operou.
+    Ate a metodologia v1 esta funcao lia `executor.retornos_do_run`, que devolve
+    os retornos de fechamento a fechamento do DATASET entre a primeira e a
+    ultima execucao do run. **Ela nao conhece a estrategia** - conhece so a
+    janela em que a estrategia operou. Entao o "Sharpe realizado", o **p-valor
+    que vai ao BY** e o **DSR** que o consome mediam o MERCADO.
 
-    Entao o "Sharpe realizado" que sai daqui, e o **p-valor que vai ao BY**, e o
-    **DSR** que o consome, medem o desempenho do MERCADO naquela janela.
-
-    ### Medido, e o numero decide
+    ### Medido antes de corrigir, e o numero decide
 
     Cenario sintetico, mercado subindo 198,8%, regra girando demais (164 idas e
     voltas) e perdendo para o custo:
@@ -302,11 +301,11 @@ def _estatistica_do_run(
     | | |
     |---|---|
     | patrimonio final | **83.741** contra 100.000 de semente - PERDEU 16% |
-    | "Sharpe realizado" que o protocolo publica | **+25,78** |
-    | p-valor que vai ao BY | **846 ppm** (o limiar da 1a rejeicao e 467) |
+    | "Sharpe realizado" que o protocolo publicava | **+25,78** |
+    | p-valor que ia ao BY | **846 ppm** (o limiar da 1a rejeicao e 467) |
     | Sharpe da equity da propria estrategia | **-17,06** |
 
-    **Uma estrategia que destruiu 16% do capital recebe Sharpe +25,78.**
+    **Uma estrategia que destruiu 16% do capital recebia Sharpe +25,78.**
 
     ### Por que a 0B nao foi afetada no resultado
 
@@ -315,15 +314,17 @@ def _estatistica_do_run(
     rejeitada por cinco criterios que sao **fatos do ledger** e nao dependem
     desta serie. O protocolo rejeitou pelo motivo certo por acidente.
 
-    ### Estado
+    ### O que mudou aqui
 
-    **CORRECAO BLOQUEANTE antes do relatorio definitivo da 0C**, registrada em
-    `.docs/16-divida-tecnica.md`. Nao esta corrigida aqui porque a correcao e a
-    mesma da D48 - a serie da estrategia sobre grade comum de marcacao a
-    mercado -, e ela e uma construcao, nao um ajuste.
+    A serie vem de `_serie_da_estrategia`, que delega a `series.serie_do_run` -
+    UMA definicao, lida pelas duas partes (a guarda do run 30 existe para isso).
+    A metodologia viaja **junto do numero**, e a v1 fica registrada como
+    `invalidado_por_serie_incorreta` sem que nada seja apagado.
 
-    O que este docstring garante enquanto isso e que ninguem leia
-    `sharpe_por_observacao` como desempenho da candidata.
+    **Este docstring ja descreveu o mundo anterior.** Ele dizia "esta serie e do
+    MERCADO" e "nao esta corrigida aqui" depois de a correcao ter subido, na
+    funcao que e o centro dela - a trigesima ocorrencia do padrao que este
+    projeto conta, e minha.
     """
     retornos = _serie_da_estrategia(conn, run_id)
     try:

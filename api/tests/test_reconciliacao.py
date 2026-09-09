@@ -5,9 +5,11 @@
 > Se a exposição real variar, isso precisa permanecer separado da base fixa."*
 > — o usuário, 2026-09-08
 
-**A resposta curta é NÃO, e o motivo não é um defeito: essa série não existe.**
-Este arquivo mede o que existe, e fixa cada identidade que de fato vale, para
-que a ausência pare de ser uma suposição de quem lê.
+**A resposta era NÃO quando este arquivo nasceu, porque a série não existia.
+Desde 2026-09-08 ela existe** — `maos_rapidas.series.excesso_incremental` — e a
+soma reconstrói a diferença final ao centavo (`test_a_serie_de_excesso_...`, no
+fim do arquivo). Este arquivo mede o que existe e fixa cada identidade que vale,
+para que nem a ausência nem a presença sejam suposição de quem lê.
 
 ## O que existe, e o que cada coisa é
 
@@ -22,15 +24,21 @@ que a ausência pare de ser uma suposição de quem lê.
 mercado.** Chamá-la de excesso seria confundir o que o preço fez com o que a
 estratégia ganhou.
 
-## Por que a série de excesso por barra não pode ser somada hoje
+## Por que ela parecia impossível, e por que não era
 
-Excesso é uma diferença entre **dois runs**, e eles não compartilham grade: o
-agente e o B3 executam em instantes diferentes, com giros diferentes. Não há
-barra em que os dois tenham um valor a subtrair — só os dois finais têm.
+Excesso é uma diferença entre **dois runs**, e eles não compartilham *giro*: o
+agente e o B3 executam em instantes diferentes. A conclusão intuitiva — "não há
+barra em que os dois tenham valor a subtrair" — está **errada**, e foi ela que
+atrasou a construção.
 
-Construir essa série seria trabalho novo (marcar os dois a mercado na mesma
-grade), e não é conserto de defeito: é um objeto que ninguém precisou até agora.
-Fica **declarado** aqui em vez de suposto.
+O que casa é a **grade de avaliação**, não o giro. Marcando os dois a mercado na
+mesma grade, cada um tem um valor por barra, opere ele ou não naquele instante,
+e a diferença existe em toda barra. A soma é telescópica, então ela reconstrói
+exatamente `patrimônio_final_agente − patrimônio_final_B3`.
+
+**Este docstring já descreveu o mundo anterior** — afirmou que a série não podia
+ser somada depois de ela existir. Fica registrado porque é o padrão que o
+próprio arquivo documenta.
 
 ## O que este arquivo PROVA, então
 
@@ -293,18 +301,35 @@ def test_a_variancia_da_D48_vem_do_ESTIMADOR_quando_ha_par(conn):
     assert "pertence_ao_estimador" in fonte
 
 
-def test_sem_par_o_relatorio_DIZ_que_caiu_no_mercado(conn):
+def test_sem_par_o_relatorio_DIZ_que_caiu_no_mercado(conn, cenario):
     """A queda é informativa, e ela mantém os números inválidos.
 
     Na 0C não há candidata (D38), então o par não existe — e o relatório tem de
     dizer isso em vez de usar a série errada calado.
+
+    ## Ele já foi o SEXTO TESTE PULADO, e o pulo era incondicional
+
+    Nasceu pedindo só `conn`, e sem dataset `viabilidade.montar` devolve
+    `disponivel: False` **sempre** — então o `pytest.skip` que parecia
+    defensivo nunca deixava de disparar. As três asserções que importam
+    (a fonte é declarada, ela não pertence ao estimador, e os números seguem
+    não validados) **nunca correram**, no arquivo que registra a correção da
+    série. Guarda vazia é pior que guarda ausente: ela afirma proteção que não
+    existe — `volume_gravavel`, `BLOCOS`, o comentário de `braco.py` e a guarda
+    de `app.state.conn` são a mesma forma.
+
+    A correção é a fixture, e não o `skip`: com `cenario` há dataset, o
+    relatório fica disponível e as asserções passam.
     """
     from app.hipotese import dimensionamento as d
     from app.relatorio import viabilidade
 
     r = viabilidade.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
-    if not r.get("disponivel"):
-        pytest.skip("sem dataset: a fonte da variancia nao chega a ser medida")
+    assert r.get("disponivel") is True, (
+        "sem relatorio disponivel este teste volta a ser vacuo: a fixture"
+        " `cenario` existe justamente para que a fonte da variancia chegue a"
+        " ser medida"
+    )
     fonte = r["fonte_da_variancia"]
     assert fonte["pertence_ao_estimador"] is False
     assert fonte["fonte"] == "MERCADO"

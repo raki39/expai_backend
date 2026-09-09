@@ -1033,3 +1033,67 @@ def test_o_portao_b_nao_e_avaliado_enquanto_o_a_nao_passa(
     r = _portao(conn, dataset_id, cfg)
     assert r["portao_b"]["avaliado"] is False
     assert "R49" in r["portao_b"]["por_que"]
+
+
+# ---------------------------------------------------------------------------
+# O CUSTO DA REEXECUCAO, medido — e nao declarado por confianca
+# ---------------------------------------------------------------------------
+
+
+def test_reinjetar_a1a_MOVE_o_contador_global_do_DSR(
+    conn: sqlite3.Connection, cenario
+) -> None:
+    """A releitura e de graca; a REINJECAO nao, e a diferenca decide.
+
+    `certificacao_estatistica` ja afirmou que a reexecucao "nao e hipotese
+    nova, tentativa nova, credito novo" enquanto o unico caminho de reexecucao
+    (`a1a.braco.rodar`) registra uma hipotese por controle, ocupa lugar na
+    familia de 48, cobra credito e **incrementa o contador global** — que e o
+    `N` que deflaciona o DSR de TODA hipotese, inclusive a 41.
+
+    Reinjetar para recertificar moveria o numero que o controle existe para
+    certificar. Este teste mede isso, para que a declaracao nao possa voltar a
+    prometer o que o caminho nao cumpre.
+    """
+    from app.a1a import braco, catalogo
+    from app.validador import contador
+
+    dataset_id, cfg = cenario
+    antes = contador.total(conn)
+    resultado = braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    depois = contador.total(conn)
+
+    registradas = [c for c in resultado.controles if c.hypothesis_id is not None]
+    assert registradas, "sem hipotese registrada nao ha o que este teste meca"
+    # Derivado, e nao um 6 digitado: quantos controles ganharam linha e quanto
+    # o contador andou tem de ser o MESMO numero.
+    assert depois - antes == len(registradas)
+    assert depois > antes, (
+        "se a reinjecao deixar de mover o contador, a declaracao de"
+        " `como_reexecutar` precisa ser reescrita — nao este assert apagado"
+    )
+    # E sao os SEIS, inclusive os barrados: a linha nasce antes da guarda
+    # recusar a injecao, entao "barrado" nao devolve o lugar na familia.
+    # Medido: o contador foi de 16 a 22 mesmo com cinco dos seis barrados.
+    assert len(registradas) == catalogo.QUANTAS
+    assert all(c.hypothesis_id is not None for c in resultado.controles)
+
+
+def test_a_certificacao_DECLARA_o_custo_da_reinjecao() -> None:
+    """E a declaracao vai na resposta, junto do que ela qualifica (D47)."""
+    from app.relatorio import portao_a
+
+    cert = portao_a._certificacao_estatistica()
+    como = cert["como_reexecutar"]
+    assert "parecer" in como["por_releitura"].lower()
+    assert "Nada e escrito" in como["por_releitura"]
+    # A reinjecao precisa nomear o que ela custa, e nao so dizer "cuidado".
+    for termo in ("REGISTRA", "credito", "contador global", "familia de 48"):
+        assert termo in como["por_reinjecao"], termo
+    # E o limite da releitura fica dito: ela nao reescreve transicao.
+    assert "transicoes" in como["o_que_a_releitura_NAO_alcanca"]
+    assert "PARECER" in como["o_que_a_releitura_NAO_alcanca"]
+    # A garantia antiga so vale por um dos dois caminhos, e ela diz qual.
+    assert "SO VALE PELA RELEITURA" in cert["a_reexecucao_NAO_e"]

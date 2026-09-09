@@ -458,10 +458,46 @@ def _certificacao_estatistica() -> dict:
             " sob a serie corrigida"
         ),
         "aguarda_reexecucao": [
-            "a1a: os seis controles deterministicos, injetados pelo mesmo"
-            " caminho das reais - eles chegam a `promocao.avaliar_in_sample`",
+            "a1a: os DOIS controles estatisticos, que chegam a"
+            " `promocao.avaliar_in_sample` e portanto liam a serie errada."
+            " Os outros QUATRO sao injecoes estruturais barradas pelas guardas"
+            " ANTES de qualquer estatistica, e nao dependem da serie",
             "a avaliacao da hipotese 41, com o MESMO pre-registro",
         ],
+        # COMO reexecutar, e a distincao NAO e cosmetica.
+        #
+        # Este campo ja afirmou que a reexecucao "nao e credito novo" enquanto
+        # o unico caminho de reexecucao disponivel (`a1a.braco.rodar`) registra
+        # uma hipotese por controle, ocupa lugar na familia de 48, cobra
+        # credito e INCREMENTA o contador global - que e o `N` do DSR de toda
+        # hipotese, inclusive a 41. Reinjetar moveria o numero que o controle
+        # existe para certificar.
+        #
+        # A promessa so e cumprivel pela releitura: o parecer e DERIVADO
+        # (`parecer_derivado` recalcula do banco a cada leitura), entao os
+        # controles ja gravados sao rejulgados sob a metodologia vigente sem
+        # que nada seja escrito.
+        "como_reexecutar": {
+            "por_releitura": (
+                "GET /api/a1a e GET /api/validador/hipotese/41. O parecer e"
+                " recalculado do banco sob a metodologia VIGENTE, sobre o"
+                " mesmo pre-registro imutavel e as mesmas execucoes"
+                " append-only. Nada e escrito"
+            ),
+            "por_reinjecao": (
+                "POST /api/a1a. REGISTRA seis hipoteses novas, ocupa seis"
+                " lugares na familia de 48, cobra credito no braco a1a e move"
+                " o contador global do DSR em +6 - o mesmo contador que"
+                " deflaciona a hipotese 41. NAO cumpre a garantia abaixo"
+            ),
+            "o_que_a_releitura_NAO_alcanca": (
+                "as transicoes de estado ja gravadas: `nenhum_promovido` sai"
+                " do log de transicoes, que e fato historico escrito sob a"
+                " metodologia v1. A pergunta 'a serie corrigida promoveria um"
+                " controle?' e respondida pelo PARECER recalculado de cada"
+                " controle, e nao pelo estado dele"
+            ),
+        },
         "nao_precisa_de_reexecucao": [
             "a1b: ele SINTETIZA a propria serie da estrategia, com um Sharpe"
             " implantado, e nunca leu `retornos_do_run`. O calibre das nulas"
@@ -473,7 +509,9 @@ def _certificacao_estatistica() -> dict:
         "a_reexecucao_NAO_e": (
             "hipotese nova, tentativa nova, credito novo nem uso novo de"
             " holdout. E a MESMA hipotese sob a metodologia corrigida - o"
-            " contador global do DSR nao se move, e o pre-registro e o mesmo"
+            " contador global do DSR nao se move, e o pre-registro e o mesmo."
+            " ISSO SO VALE PELA RELEITURA: ver `como_reexecutar`, porque"
+            " reinjetar A1a viola cada um dos quatro itens desta frase"
         ),
     }
 
