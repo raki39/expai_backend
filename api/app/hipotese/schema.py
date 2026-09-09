@@ -230,38 +230,19 @@ class PreRegistroBruto(BaseModel):
             )
 
         # ------------------------------------------------------------------
-        # TODAS as clausulas, e nao so a primaria. 2026-09-09.
+        # A conferencia de UNIDADE e de ESCALA nao mora aqui, e o motivo e
+        # NAO-RETROATIVIDADE.
         #
-        # Ate aqui a funcao inteira olhava `na_primaria`. A hipotese 41 passou
-        # com `patrimonio_final_cents < 950000` sobre semente de 100.000 -
-        # nove vezes e meia a semente, uma clausula SECUNDARIA que dispara em
-        # qualquer run possivel - porque secundaria nao era conferida por nada.
+        # Ela morou aqui por vinte minutos e derrubou tres rotas em producao
+        # com 500: `_pre_registro` reconstroi um `PreRegistroBruto` a partir do
+        # JSON GRAVADO, e o pre-registro e imutavel (§8.2) - as clausulas das
+        # 41 hipoteses existentes nunca terao `valor_bps_da_semente`, entao
+        # exigi-lo no modelo torna todo veredito antigo IMPOSSIVEL DE RELER.
         #
-        # A conferencia de ESCALA precisa da semente e do horizonte, que sao do
-        # banco: ela vive em `hipotese/escala.py` e roda no registro. O que se
-        # confere aqui e a UNIDADE, que nao depende de estado nenhum.
-        for c in self.condicoes_falseamento:
-            monetaria = c.metrica not in METRICAS_FACTUAIS
-            if monetaria and c.valor_bps_da_semente is None:
-                raise ValueError(
-                    f"a clausula sobre '{c.metrica}' declara limiar monetario"
-                    f" absoluto ({c.valor}) sem referencia de escala. Metrica"
-                    " monetaria e declarada em `valor_bps_da_semente`, e o"
-                    " sistema converte: um numero em centavos sozinho nao diz"
-                    " se e um decimo da semente ou dez vezes ela"
-                )
-            if not monetaria and c.valor_bps_da_semente is not None:
-                raise ValueError(
-                    f"a clausula sobre '{c.metrica}' e uma CONTAGEM e nao tem"
-                    " semente a que se referir; `valor_bps_da_semente` so vale"
-                    " para metrica monetaria"
-                )
-            if c.valor < 0 and c.metrica == "patrimonio_final_cents":
-                raise ValueError(
-                    "patrimonio nao fica negativo: nao ha alavancagem nem"
-                    " venda a descoberto no catalogo, entao um limiar negativo"
-                    " descreve um estado que o simulador nao produz"
-                )
+        # Foi uma regra nova aplicada ao passado, que e exatamente o que a
+        # migracao 29 evitou na D48 ao gravar `regua_dimensionamento` linha a
+        # linha. A regra vive em `hipotese/escala.py` e roda no REGISTRO: gateia
+        # toda declaracao nova e nao alcanca nenhuma linha ja gravada.
         return self
 
 

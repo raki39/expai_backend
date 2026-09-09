@@ -157,31 +157,97 @@ def test_a_clausula_EM_ESCALA_passa():
 
 
 def test_metrica_monetaria_EXIGE_declaracao_relativa():
-    """Um número em centavos sozinho não diz se é um décimo ou dez vezes."""
-    with pytest.raises(ValueError) as erro:
-        _pre(
-            ClausulaFalseamento(
-                metrica="excesso_sobre_b3_cents",
-                comparador="menor_que",
-                valor=5_000,
-            )
+    """Um número em centavos sozinho não diz se é um décimo ou dez vezes.
+
+    A recusa é no REGISTRO, e não no modelo — ver o teste de
+    não-retroatividade logo abaixo.
+    """
+    bruto = _pre(
+        ClausulaFalseamento(
+            metrica="excesso_sobre_b3_cents",
+            comparador="menor_que",
+            valor=5_000,
+        )
+    )
+    with pytest.raises(escala.ClausulaNaoInformativa) as erro:
+        escala.conferir(
+            bruto, semente_cents=SEMENTE, horizonte_barras=HORIZONTE
         )
     assert "sem referencia de escala" in str(erro.value)
 
 
 def test_metrica_de_CONTAGEM_recusa_declaracao_relativa():
     """`idas_e_voltas` não tem semente a que se referir: bps ali é erro."""
-    with pytest.raises(ValueError) as erro:
-        _pre(
-            _obrigatoria(),
-            ClausulaFalseamento(
-                metrica="idas_e_voltas",
-                comparador="maior_que",
-                valor=80,
-                valor_bps_da_semente=800,
-            ),
+    bruto = _pre(
+        _obrigatoria(),
+        ClausulaFalseamento(
+            metrica="idas_e_voltas",
+            comparador="maior_que",
+            valor=80,
+            valor_bps_da_semente=800,
+        ),
+    )
+    with pytest.raises(escala.ClausulaNaoInformativa) as erro:
+        escala.conferir(
+            bruto, semente_cents=SEMENTE, horizonte_barras=HORIZONTE
         )
     assert "CONTAGEM" in str(erro.value)
+
+
+def test_a_LINHA_JA_GRAVADA_continua_relegivel():
+    """A regra nova não alcança o passado, e esta é a regressão que a prova.
+
+    A conferência de unidade morou no `model_validator` por vinte minutos e
+    **derrubou três rotas em produção com HTTP 500**: `_pre_registro`
+    reconstrói um `PreRegistroBruto` a partir do JSON gravado, e o
+    pré-registro é imutável (§8.2) — as cláusulas das 41 hipóteses existentes
+    nunca terão `valor_bps_da_semente`. Exigi-lo no modelo tornou todo
+    veredito antigo impossível de reler.
+
+    Foi uma regra nova aplicada ao passado, que é o que a migração 29 evitou
+    na D48 ao gravar `regua_dimensionamento` linha a linha.
+    """
+    # A forma EXATA em que a hipótese 41 está gravada: sem `bps` em campo nenhum.
+    gravado = {
+        "enunciado": "hipotese de 2026-09-04",
+        "metrica_primaria": "excesso_sobre_b3_cents",
+        "efeito_minimo": 50_000,
+        "sharpe_esperado_milesimos": 2_700,
+        "criterio_parada": "fim_da_janela",
+        "condicoes_falseamento": [
+            {
+                "metrica": "excesso_sobre_b3_cents",
+                "comparador": "menor_que",
+                "valor": 50_000,
+            },
+            {
+                "metrica": "idas_e_voltas",
+                "comparador": "maior_que",
+                "valor": 80,
+            },
+            {
+                "metrica": "patrimonio_final_cents",
+                "comparador": "menor_que",
+                "valor": 950_000,
+            },
+        ],
+    }
+    pre = PreRegistroBruto(**gravado)
+    assert [c.como_texto() for c in pre.condicoes_falseamento] == [
+        "excesso_sobre_b3_cents < 50000",
+        "idas_e_voltas > 80",
+        "patrimonio_final_cents < 950000",
+    ]
+    assert all(
+        c.valor_bps_da_semente is None for c in pre.condicoes_falseamento
+    )
+    # E o diagnóstico ainda nomeia a que não informa, sem impedir a leitura.
+    fora = escala.diagnosticar(
+        pre.condicoes_falseamento,
+        semente_cents=SEMENTE,
+        horizonte_barras=HORIZONTE,
+    )
+    assert [d["metrica"] for d in fora] == ["patrimonio_final_cents"]
 
 
 def test_a_conversao_de_bps_e_UMA_travessia():

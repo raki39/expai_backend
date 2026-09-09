@@ -129,6 +129,33 @@ def conferir(
     depender de estado do banco.
     """
     for c in bruto.condicoes_falseamento:
+        # ---------------------------------------------------------- unidade
+        #
+        # Aqui, e nao no modelo: no modelo ela alcancaria a RECONSTRUCAO das
+        # linhas ja gravadas, que sao imutaveis e nunca terao `bps`. Ver o
+        # comentario em `schema._falseamento_serve_para_algo`.
+        monetaria = c.metrica not in METRICAS_FACTUAIS
+        if monetaria and c.valor_bps_da_semente is None:
+            raise ClausulaNaoInformativa(
+                f"a clausula sobre '{c.metrica}' declara limiar monetario"
+                f" absoluto ({c.valor}) sem referencia de escala. Metrica"
+                " monetaria e declarada em `valor_bps_da_semente`, e o sistema"
+                " converte: um numero em centavos sozinho nao diz se e um"
+                " decimo da semente ou dez vezes ela"
+            )
+        if not monetaria and c.valor_bps_da_semente is not None:
+            raise ClausulaNaoInformativa(
+                f"a clausula sobre '{c.metrica}' e uma CONTAGEM e nao tem"
+                " semente a que se referir; `valor_bps_da_semente` so vale"
+                " para metrica monetaria"
+            )
+        if c.valor < 0 and c.metrica == "patrimonio_final_cents":
+            raise ClausulaNaoInformativa(
+                "patrimonio nao fica negativo: nao ha alavancagem nem venda a"
+                " descoberto no catalogo, entao um limiar negativo descreve um"
+                " estado que o simulador nao produz"
+            )
+
         minimo, maximo = dominio(
             c.metrica,
             semente_cents=semente_cents,
