@@ -3789,6 +3789,179 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        30,
+        "certificacao como objeto proprio, fora do universo estatistico",
+        """
+        -- ================================================================
+        -- ADR 0040: reexecucao de CERTIFICACAO nao e tentativa experimental
+        -- ================================================================
+        --
+        -- As duas tinham a mesma forma - uma linha em `hypothesis` - e sao
+        -- coisas diferentes. O que decide e a MULTIPLICIDADE: BY corrige o
+        -- risco de que, entre muitas afirmacoes, alguma pareca verdadeira por
+        -- acaso. Uma certificacao nao faz afirmacao nova sobre o mercado; ela
+        -- reafirma que a maquinaria barra defeito. Conta-la como tentativa nao
+        -- e conservador - e medir a coisa errada, e o preco sai do orcamento
+        -- de quem tem afirmacao de verdade a fazer.
+        --
+        -- Medido antes de decidir: reinjetar A1a movia o contador global de 16
+        -- para 22, os SEIS ganhando linha inclusive os cinco barrados, porque a
+        -- linha nasce antes de a guarda recusar. E esse contador e o `N` que
+        -- deflaciona o DSR de toda hipotese, inclusive a 41.
+        --
+        -- NENHUMA consulta de DSR ou FDR precisa filtrar estas tabelas: elas
+        -- nao sao `hypothesis`. A garantia e estrutural, e nao disciplina de
+        -- quem escreve o SELECT.
+
+        CREATE TABLE certificacao_execucao (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            -- O ALVO: o que exatamente esta sendo certificado. Sete
+            -- componentes, publicados em `componentes_json` - o hash sozinho e
+            -- opaco, e quem le precisa ver QUAL componente divergiu.
+            alvo_hash         TEXT NOT NULL CHECK (length(alvo_hash) = 64),
+            componentes_json  TEXT NOT NULL CHECK (json_valid(componentes_json)),
+
+            -- Rastreamento, e FORA do alvo: uma virgula no README nao pode
+            -- invalidar o Portao A.
+            build_do_backend  TEXT,
+
+            iniciada_em       TEXT NOT NULL,
+
+            -- Quantos casos esta suite TEM. Gravado no inicio, e e contra ele
+            -- que a completude e conferida - decidir no fim quantos eram
+            -- deixaria uma suite que quebrou no meio parecer completa.
+            casos_esperados   INTEGER NOT NULL CHECK (casos_esperados > 0),
+
+            -- CUSTO OPERACIONAL, separado dos creditos experimentais. Os
+            -- creditos de secao 8.6.1 medem escassez de DADO; isto e CPU e
+            -- disco. Somar os dois faria uma recertificacao consumir orcamento
+            -- de descoberta.
+            micros_para_copiar INTEGER NOT NULL DEFAULT 0,
+            micros_da_suite    INTEGER NOT NULL DEFAULT 0,
+            bytes_da_copia     INTEGER NOT NULL DEFAULT 0,
+
+            -- A evidencia de que a copia foi onde a escrita aconteceu.
+            intocado_json      TEXT NOT NULL CHECK (json_valid(intocado_json))
+        );
+
+        CREATE INDEX idx_cert_execucao_alvo
+            ON certificacao_execucao(alvo_hash);
+
+        -- Append-only, como o ledger e como `hypothesis`. Correcao e execucao
+        -- nova, nunca edicao.
+        CREATE TRIGGER certificacao_execucao_sem_update
+        BEFORE UPDATE ON certificacao_execucao
+        BEGIN
+            SELECT RAISE(ABORT, 'certificacao_execucao e imutavel');
+        END;
+
+        CREATE TRIGGER certificacao_execucao_sem_delete
+        BEFORE DELETE ON certificacao_execucao
+        BEGIN
+            SELECT RAISE(ABORT, 'certificacao_execucao e imutavel');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- Um resultado por CASO, imutavel
+        -- ----------------------------------------------------------------
+        --
+        -- Identificado pela CHAVE do catalogo, e nunca por `hypothesis_id`:
+        -- medido, dos 6 ids que o resultado citava, ZERO existiam depois de a
+        -- copia ser descartada. Uma chave estrangeira aqui apontaria para
+        -- linha que nao existe.
+        CREATE TABLE certificacao_caso (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            execucao_id   INTEGER NOT NULL
+                              REFERENCES certificacao_execucao(id),
+            chave         TEXT NOT NULL CHECK (length(chave) > 0),
+            familia       TEXT NOT NULL CHECK (length(familia) > 0),
+            tipo          TEXT NOT NULL CHECK (tipo IN ('estrutural', 'estatistico')),
+
+            -- `barrado` e `promovido` sao as duas perguntas de secao 14.4.
+            barrado       INTEGER NOT NULL CHECK (barrado IN (0, 1)),
+            promovido     INTEGER NOT NULL CHECK (promovido IN (0, 1)),
+
+            resultado_json TEXT NOT NULL CHECK (json_valid(resultado_json)),
+            UNIQUE (execucao_id, chave)
+        );
+
+        CREATE TRIGGER certificacao_caso_sem_update
+        BEFORE UPDATE ON certificacao_caso
+        BEGIN
+            SELECT RAISE(ABORT, 'resultado por caso e imutavel (ADR 0040)');
+        END;
+
+        CREATE TRIGGER certificacao_caso_sem_delete
+        BEFORE DELETE ON certificacao_caso
+        BEGIN
+            SELECT RAISE(ABORT, 'resultado por caso e imutavel (ADR 0040)');
+        END;
+
+        -- CERTIFICACAO NUNCA PROMOVE. Imposto pelo banco, e nao por revisao:
+        -- um caso promovido reprova a fase (tolerancia zero de secao 14.4), e
+        -- um certificado que registrasse promocao teria de ser a prova do
+        -- defeito - nao um registro aceitavel.
+        CREATE TRIGGER certificacao_nunca_promove
+        BEFORE INSERT ON certificacao_caso
+        WHEN NEW.promovido = 1
+        BEGIN
+            SELECT RAISE(ABORT,
+                'certificacao promoveu um controle: isso reprova a fase e nao entra como resultado normal (secao 14.4, tolerancia zero)');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- O MANIFESTO so existe quando a suite esta completa
+        -- ----------------------------------------------------------------
+        --
+        -- "Manifesto parcial e ilegivel" imposto por GATILHO, e nao por
+        -- disciplina de quem chama: uma suite que quebrou no terceiro caso nao
+        -- pode produzir documento nenhum. E o mesmo desenho do fechamento de
+        -- transacao do ledger, onde e o banco que confere as partidas dobradas.
+        CREATE TABLE certificacao_manifesto (
+            execucao_id     INTEGER PRIMARY KEY
+                                REFERENCES certificacao_execucao(id),
+            alvo_hash       TEXT NOT NULL CHECK (length(alvo_hash) = 64),
+            manifesto_json  TEXT NOT NULL CHECK (json_valid(manifesto_json)),
+            selado_em       TEXT NOT NULL,
+            passa           INTEGER NOT NULL CHECK (passa IN (0, 1))
+        );
+
+        CREATE TRIGGER manifesto_exige_suite_completa
+        BEFORE INSERT ON certificacao_manifesto
+        WHEN (SELECT COUNT(*) FROM certificacao_caso
+               WHERE execucao_id = NEW.execucao_id)
+             <> (SELECT casos_esperados FROM certificacao_execucao
+                  WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'manifesto parcial e ilegivel: os casos gravados nao alcancam casos_esperados (ADR 0040)');
+        END;
+
+        -- E ele nao pode citar um alvo diferente do da execucao que o produziu.
+        CREATE TRIGGER manifesto_cita_o_alvo_da_execucao
+        BEFORE INSERT ON certificacao_manifesto
+        WHEN NEW.alvo_hash <> (SELECT alvo_hash FROM certificacao_execucao
+                                WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o manifesto cita um alvo que nao e o da execucao que o produziu');
+        END;
+
+        CREATE TRIGGER certificacao_manifesto_sem_update
+        BEFORE UPDATE ON certificacao_manifesto
+        BEGIN
+            SELECT RAISE(ABORT, 'manifesto e imutavel');
+        END;
+
+        CREATE TRIGGER certificacao_manifesto_sem_delete
+        BEFORE DELETE ON certificacao_manifesto
+        BEGIN
+            SELECT RAISE(ABORT, 'manifesto e imutavel');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

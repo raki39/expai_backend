@@ -41,6 +41,13 @@ ESTRUTURA_ESPERADA = {
     28: ["monitor_limiar", "monitor_passo", "monitor_alarme",
          "monitor_reteste"],
     29: [],  # ALTER TABLE, conferido por coluna abaixo
+    # ADR 0040: a certificacao e objeto PROPRIO, fora de `hypothesis`.
+    # E por isso que nenhuma consulta de DSR ou FDR precisa filtra-la.
+    30: [
+        "certificacao_execucao",
+        "certificacao_caso",
+        "certificacao_manifesto",
+    ],
 }
 
 COLUNAS_ESPERADAS = {
@@ -54,6 +61,16 @@ COLUNAS_ESPERADAS = {
 # Os gatilhos que impedem reescrita. Se um deles sumir, a tabela continua
 # existindo e a garantia nao - e essa e a forma de falha que mais importa aqui.
 GATILHOS_ESPERADOS = [
+    # Migracao 30 - ADR 0040. Os tres pares de imutabilidade, mais as
+    # tres regras que o BANCO impoe: certificacao nunca promove, o
+    # manifesto exige suite completa, e ele nao cita outro alvo.
+    "certificacao_execucao_sem_update", "certificacao_execucao_sem_delete",
+    "certificacao_caso_sem_update", "certificacao_caso_sem_delete",
+    "certificacao_manifesto_sem_update",
+    "certificacao_manifesto_sem_delete",
+    "certificacao_nunca_promove",
+    "manifesto_exige_suite_completa",
+    "manifesto_cita_o_alvo_da_execucao",
     "bbo_contrato_sem_update", "bbo_contrato_sem_delete",
     "bbo_amostra_sem_update", "bbo_amostra_sem_delete",
     "janela_piloto_sem_update", "janela_piloto_sem_delete",
