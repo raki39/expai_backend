@@ -166,15 +166,44 @@ def hash_do_ambiente() -> dict:
             " terceiros, entao a versao do Python E a versao dela"
         ),
     }
-    arquivos = []
-    for nome in ("Dockerfile", "requirements.txt", "requirements-dev.txt"):
-        p = _RAIZ / nome
-        if p.is_file():
-            arquivos.append(p)
-            componentes[nome] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    # Os arquivos que definem o ambiente, e QUAIS DELES EXISTEM.
+    #
+    # Medido em producao em 2026-09-09: o `Dockerfile` **nao esta na imagem** -
+    # ele copia `app/`, `requirements.txt`, `pytest.ini` e `start-backend.sh`,
+    # e nao a si mesmo. A primeira versao desta funcao simplesmente pulava o
+    # arquivo ausente, e o hash passava a cobrir menos em producao do que em
+    # desenvolvimento **sem dizer**. Um componente que degrada em silencio e a
+    # forma exata do padrao que este projeto conta.
+    #
+    # Agora a ausencia entra no hash: um ambiente onde o Dockerfile existe e um
+    # onde ele nao existe sao ambientes diferentes, e o manifesto diz qual e.
+    esperados = ("Dockerfile", "requirements.txt", "requirements-dev.txt")
+    arquivos, ausentes = [], []
+    for nome in esperados:
+        alvo_p = _RAIZ / nome
+        if alvo_p.is_file():
+            arquivos.append(alvo_p)
+            componentes[nome] = hashlib.sha256(
+                alvo_p.read_bytes()
+            ).hexdigest()[:16]
+        else:
+            ausentes.append(nome)
+            componentes[nome] = None
+    componentes["arquivos_ausentes"] = ausentes
+    if ausentes:
+        componentes["por_que_ausentes"] = (
+            "estes arquivos nao estao no ambiente que executa. Na imagem da"
+            " Railway isso e esperado para o `Dockerfile` e para o"
+            " `requirements-dev.txt`: o build copia `app/`,"
+            " `requirements.txt`, `pytest.ini` e `start-backend.sh`, e nao a"
+            " si mesmo. A ausencia ENTRA no hash - um ambiente sem eles e"
+            " outro ambiente, e o certificado nao pode fingir que cobriu o que"
+            " nao viu"
+        )
     h = hashlib.sha256()
     h.update(componentes["python"].encode())
     h.update(componentes["sqlite"].encode())
+    h.update(("|".join(ausentes)).encode())
     if arquivos:
         h.update(_hash_de_arquivos(arquivos).encode())
     return {"hash": h.hexdigest(), "componentes": componentes}

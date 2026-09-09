@@ -375,3 +375,35 @@ def test_a_DOCUMENTACAO_nao_invalida_o_certificado():
         assert "api.rotas" not in m, m
         assert not m.endswith("app.main"), m
         assert ".aovivo" not in m, m
+
+
+def test_a_AUSENCIA_de_arquivo_de_ambiente_entra_no_hash(monkeypatch):
+    """Um componente que degrada em silêncio cobre menos do que afirma.
+
+    **Medido em produção em 2026-09-09**: o `Dockerfile` não está na imagem —
+    o build copia `app/`, `requirements.txt`, `pytest.ini` e
+    `start-backend.sh`, e não a si mesmo. A primeira versão pulava o arquivo
+    ausente, e o hash de ambiente passava a cobrir menos em produção do que em
+    desenvolvimento sem dizer.
+    """
+    from app.certificacao import alvo as alvo_mod
+
+    completo = alvo_mod.hash_do_ambiente()
+
+    real = alvo_mod.pathlib.Path.is_file
+
+    def sem_dockerfile(self):
+        return False if self.name == "Dockerfile" else real(self)
+
+    monkeypatch.setattr(alvo_mod.pathlib.Path, "is_file", sem_dockerfile)
+    faltando = alvo_mod.hash_do_ambiente()
+
+    assert faltando["hash"] != completo["hash"], (
+        "o ambiente sem Dockerfile produziu o MESMO hash: a ausencia nao"
+        " entrou, e o componente degrada em silencio"
+    )
+    assert faltando["componentes"]["arquivos_ausentes"] == ["Dockerfile"]
+    assert faltando["componentes"]["Dockerfile"] is None
+    assert "nao pode fingir que cobriu" in (
+        faltando["componentes"]["por_que_ausentes"]
+    )
