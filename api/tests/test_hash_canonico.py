@@ -243,3 +243,56 @@ def test_o_hash_NAO_depende_do_git(tmp_path, monkeypatch):
             f"{fn.__name__} chama git: a canonicalizacao tem de valer sem ele"
         )
         assert not any("subprocess" in c for c in chamadas)
+
+
+# ---------------------------------------------------------------------------
+# O que ficou para tras: o AMBIENTE tambem le arquivo de texto
+# ---------------------------------------------------------------------------
+
+
+def test_o_AMBIENTE_nao_depende_do_fim_de_linha_do_requirements(tmp_path, monkeypatch):
+    """O campo por arquivo do ambiente entra no alvo inteiro.
+
+    Ele lia bytes crus depois da OP-2 - achado ao conferir por que o componente
+    de ambiente mudou na janela. Um requirements.txt com CRLF mudaria o alvo
+    sem mudar dependencia nenhuma.
+    """
+    monkeypatch.setattr(alvo, "_RAIZ", tmp_path)
+    fim = chr(10)
+    texto = "fastapi==1.0" + fim + "pydantic==2.0" + fim
+    (tmp_path / "requirements.txt").write_bytes(texto.encode())
+    lf = alvo.hash_do_ambiente()
+    (tmp_path / "requirements.txt").write_bytes(texto.replace(fim, chr(13) + chr(10)).encode())
+    crlf = alvo.hash_do_ambiente()
+    assert bytes([13, 10]) in (tmp_path / "requirements.txt").read_bytes()
+    assert lf == crlf
+
+
+def test_TODO_arquivo_que_o_alvo_le_passa_pela_canonicalizacao():
+    """A guarda estrutural: read_bytes so dentro de conteudo_canonico.
+
+    A OP-2 corrigiu _hash_de_arquivos e deixou um read_bytes cru em
+    hash_do_ambiente. A guarda por funcao nao pegaria o proximo; esta varre o
+    modulo inteiro pela forma.
+    """
+    import ast
+    import inspect
+
+    arvore = ast.parse(inspect.getsource(alvo))
+    fora = []
+    for funcao in ast.walk(arvore):
+        if not isinstance(funcao, ast.FunctionDef):
+            continue
+        for no in ast.walk(funcao):
+            if (
+                isinstance(no, ast.Call)
+                and isinstance(no.func, ast.Attribute)
+                and no.func.attr == "read_bytes"
+                and funcao.name != "conteudo_canonico"
+            ):
+                fora.append(funcao.name)
+    assert not fora, (
+        f"read_bytes cru fora de conteudo_canonico em {sorted(set(fora))}: o"
+        " alvo voltaria a depender do checkout"
+    )
+

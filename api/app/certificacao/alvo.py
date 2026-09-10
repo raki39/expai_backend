@@ -284,8 +284,13 @@ def hash_do_ambiente() -> dict:
         alvo_p = _RAIZ / nome
         if alvo_p.is_file():
             arquivos.append(alvo_p)
+            # CANONICO, como tudo que o alvo le. Este campo entra no alvo
+            # inteiro (montar hasheia o componente todo), e ficou lendo bytes
+            # crus depois da OP-2: um requirements.txt com CRLF mudaria o alvo
+            # sem mudar uma dependencia. Achado ao conferir por que o
+            # componente de ambiente mudou na janela de 2026-09-10.
             componentes[nome] = hashlib.sha256(
-                alvo_p.read_bytes()
+                conteudo_canonico(alvo_p)
             ).hexdigest()[:16]
         else:
             ausentes.append(nome)

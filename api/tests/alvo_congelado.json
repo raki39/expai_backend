@@ -1,6 +1,6 @@
 {
   "politica_canonica": "canonico@1",
-  "implementacao_hash": "6e32e69db428f4d1",
+  "implementacao_hash": "ed239872e6ae9bdb",
   "alvo_em_producao": null,
   "alvo_em_producao_pendente": "preenchido depois da recertificacao dos cinco escopos em producao, com o alvo que eles certificarem. Ate la, o fechamento congelado e o do codigo; o certificado dele ainda nao existe",
   "alvo_anterior": {
@@ -25,7 +25,7 @@
     "app.calibracao": "fe16634cf483a2b2",
     "app.calibracao.identidade": "8f73464afd172f5e",
     "app.certificacao": "cfb8bb27ad0beabb",
-    "app.certificacao.alvo": "8ec20e95097cb2f2",
+    "app.certificacao.alvo": "885cb5078ef67b27",
     "app.certificacao.canonico": "a7dace5036a6908f",
     "app.certificacao.escopos": "86ad60ce407fcba6",
     "app.certificacao.laboratorio": "0163e52db9a8cd67",
