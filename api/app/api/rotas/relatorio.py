@@ -47,7 +47,11 @@ from ..comum import _conn
 # as funcoes que ja servem cada tela. Se recalculasse, o export poderia
 # discordar do painel, e a divergencia so apareceria em quem exportou.
 from .a1a import a1a_estado
-from .certificacao import a1b_estado_certificacao, certificacao_estado
+from .certificacao import (
+    a1a_estado_certificacao,
+    a1b_estado_certificacao,
+    certificacao_estado,
+)
 from .a1b import a1b_estado
 from .agente import agente_estado
 from .b4 import b4_estado
@@ -515,6 +519,11 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # rodou - progresso, e nao veredito.
         ("certificacao_a1b", "/api/certificacao/a1b",
          lambda: a1b_estado_certificacao(request)),
+        # O a1a parcelado tem parte propria pelo mesmo motivo do a1b: e
+        # PROGRESSO - oito etapas, a copia selada, o aborto se houver -, e nao
+        # veredito. O veredito continua em `/certificacao`.
+        ("certificacao_a1a", "/api/certificacao/a1a",
+         lambda: a1a_estado_certificacao(request)),
         # O checkpoint NAO entra no export, e o motivo esta em
         # FORA_DO_EXPORT: ele CONTEM o export inteiro mais o resto, entao
         # aninha-lo faria o documento carregar duas copias de si mesmo.

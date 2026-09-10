@@ -11,9 +11,40 @@ calibração — que continua recusada até a janela fechar (ADR 0027). Confundi
 duas seria começar a falar de fidelidade a partir de uma extrapolação, que é a
 quinta pergunta do teste de escopo olhando para nós.
 
+## Os DOIS bloqueadores, e nenhum escondido atrás do outro
+
+> *"Acrescente uma projeção que mostre os dois possíveis bloqueadores: data
+> mínima pelo calendário; data estimada pela contagem, usando a taxa válida das
+> últimas 24/72 horas."* — o usuário, 2026-09-10
+
+A versão anterior publicava UMA data — a mais tarde —, e o leitor não via qual
+trava estava perto de virar. E ela tinha um defeito de relógio: projetava o
+calendário como `agora + dias inteiros que faltam`, então a data **deslizava
+com a hora da leitura** — 17:17 numa leitura, 17:59 na seguinte, sobre o mesmo
+estado. O calendário é um instante FIXO: primeira válida + 14 dias corridos, a
+trava 1 de `piloto.derivar`.
+
+**A contagem é ancorada no ALCANCE do dado, e não no relógio.** A taxa das
+últimas 24/72 horas é medida sobre as últimas 24/72 horas **da grade gravada**,
+e a projeção parte do último instante gravado. O mesmo estado produz a mesma
+projeção — e a defasagem entre o dado e o relógio vai publicada ao lado, porque
+um coletor parado congelaria a projeção com cara de saudável.
+
+## As lacunas registradas, SEPARADAS do piloto
+
+> *"Não altere nem reinicie o piloto por causa da lacuna de 21,8 horas, salvo
+> se uma regra pré-registrada exigir isso. Registre separadamente a causa,
+> componente, recuperação e impacto da lacuna."* — o usuário, 2026-09-10
+
+Causa, componente e recuperação são **história registrada**: não saem do banco.
+As bordas e o impacto **saem do banco**, e o registro confere as próprias bordas
+contra o dado a cada leitura. Se o `bbo_amostra` deixar de mostrar a lacuna onde
+o registro diz que ela está, `o_registro_descreve_o_dado` vira `False` — em vez
+de o texto continuar afirmando.
+
 **Este módulo está FORA do fechamento transitivo do alvo de certificação.**
 Conferido: o fechamento tem `app.relatorio` e `app.relatorio.portao_a`, e mais
-nada de `relatorio`. Publicar o piloto não invalida os cinco escopos da `cv9`.
+nada de `relatorio`. Publicar o piloto não invalida os cinco escopos.
 """
 
 from __future__ import annotations
@@ -21,12 +52,17 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-#: As duas travas da D45/ADR 0027. Obrigatórias as duas, e o piloto fecha na
-#: MAIS TARDE — não na primeira que vencer.
-OBSERVACOES_MINIMAS = 1_000
-DIAS_MINIMOS = 14
+# As travas do ADR 0027 vivem em `calibracao.piloto` e sao IMPORTADAS. Elas
+# estavam copiadas aqui - duas definicoes da mesma regra em modulos diferentes,
+# e a copia e a que envelhece calada.
+from ..calibracao.piloto import DIAS_MINIMOS, MS_POR_DIA, OBSERVACOES_MINIMAS
 
-DIA_MS = 86_400_000
+MS_POR_HORA = 3_600_000
+
+#: As janelas da taxa recente, em horas - as duas que o usuario pediu. A de 24h
+#: reage rapido a uma queda; a de 72h amortece uma queda isolada. Nenhuma e "a
+#: certa", e e por isso que as duas vao publicadas.
+JANELAS_DE_TAXA_HORAS = (24, 72)
 
 #: A consequencia do ADR 0033, escrita UMA vez. Ela acompanha o bloco de
 #: regimes em todos os ramos - inclusive no de "sem dado", onde ela vale mais:
@@ -37,6 +73,45 @@ _SEM_AMOSTRA = (
     " a fidelidade"
 )
 
+#: As lacunas que aconteceram e ja foram EXPLICADAS. Causa, componente e
+#: recuperacao sao historia: nao ha consulta que as derive. As bordas sao
+#: conferidas contra o dado a cada leitura (`lacunas_registradas`).
+LACUNAS_REGISTRADAS: tuple[dict, ...] = (
+    {
+        "id": "coletor-boot-zlib-2026-09-07",
+        # 2026-09-07 18:45 UTC e 2026-09-08 16:30 UTC: as duas validas que
+        # cercam a lacuna, lidas de `/api/relatorio/checkpoint` em 2026-09-10.
+        "ultima_valida_antes_ms": 1_788_806_700_000,
+        "primeira_valida_depois_ms": 1_788_885_000_000,
+        "componente": (
+            "o COLETOR de BBO, em Singapura - `coletor/main.py:selar_no_boot`"
+            " -> `coletor/arquivo.py:manifesto`. Nao a `api`, e nao o rele"
+        ),
+        "causa": (
+            "ciclo de crash no BOOT. A conferencia de integridade listava"
+            " `(EOFError, OSError, gzip.BadGzipFile)`, e `zlib.error` - bloco"
+            " deflate danificado no MEIO de um membro gzip - nao e `OSError`."
+            " A selagem roda no boot, entao cada restart morria no mesmo"
+            " arquivo, e a coleta morria junto"
+        ),
+        "origem_do_arquivo_danificado": (
+            "leitura PROVAVEL, nao confirmada por carimbo: SIGKILL durante a"
+            " escrita, num redeploy - a Railway derruba o container em"
+            " redeploy, e e isso que produz bloco deflate cortado no meio"
+        ),
+        "recuperacao": (
+            "commit 377898b do backend: uma travessia so (`_descomprimir`)"
+            " para a leitura e a conferencia, `varrer` devolvendo fato em vez"
+            " de levantar, e nenhuma falha de selagem alcancando o boot. O"
+            " coletor foi de 62 para 69 testes"
+        ),
+        "recuperacao_commit": "377898b",
+        # 2026-09-08 16:25:55 UTC. Commit nao e deploy: a conferencia abaixo
+        # diz "consistente", e nao "provado".
+        "recuperacao_commit_ms": 1_788_884_755_000,
+    },
+)
+
 
 def _iso(ms: int | None) -> str | None:
     if ms is None:
@@ -44,6 +119,217 @@ def _iso(ms: int | None) -> str | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(
         timespec="seconds"
     )
+
+
+def _agora_ms() -> int:
+    """O relogio de LEITURA, isolado para que o teste prove quem depende dele."""
+    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+
+
+def _grade_ms(conn: sqlite3.Connection) -> int:
+    linha = conn.execute(
+        "SELECT grade_ms FROM bbo_amostra ORDER BY t_grid_ms DESC LIMIT 1"
+    ).fetchone()
+    return int(linha["grade_ms"])
+
+
+def _taxa(conn: sqlite3.Connection, *, ate_ms: int, horas: int) -> dict:
+    """A fracao valida das ultimas `horas` DA GRADE GRAVADA, terminando em `ate_ms`."""
+    linha = conn.execute(
+        "SELECT COUNT(*) AS n, SUM(disponivel) AS ok FROM bbo_amostra"
+        " WHERE t_grid_ms >= ? AND t_grid_ms < ?",
+        (ate_ms - horas * MS_POR_HORA, ate_ms),
+    ).fetchone()
+    n, ok = int(linha["n"] or 0), int(linha["ok"] or 0)
+    return {
+        "janela_horas": horas,
+        "instantes": n,
+        "validas": ok,
+        "taxa_valida_ppm": (ok * 1_000_000 // n) if n else None,
+    }
+
+
+def _projetar(
+    taxa: dict,
+    *,
+    faltam: int,
+    alcance_ms: int,
+    grade_ms: int,
+    fim_calendario_ms: int,
+) -> dict:
+    """Quando a trava de contagem fecharia SE a taxa desta janela se mantiver.
+
+    A regra e a de `piloto.derivar`: a trava fecha em `t da 1.000-esima valida
+    + uma grade`. Com fracao valida `ok/n`, faltam `ceil(faltam * n / ok)`
+    instantes de grade a partir do alcance - arredondado para CIMA, porque a
+    1.000-esima nao chega antes do instante inteiro que a contem.
+    """
+    if not taxa["validas"]:
+        return {
+            **taxa,
+            "data_estimada": None,
+            "por_que_sem_data": (
+                "nenhuma observacao valida nesta janela: a esta taxa a trava"
+                " de contagem nao fecha nunca"
+            ),
+        }
+    instantes = -(-faltam * taxa["instantes"] // taxa["validas"])
+    fim_ms = alcance_ms + instantes * grade_ms
+    return {
+        **taxa,
+        "instantes_de_grade_necessarios": instantes,
+        "data_estimada": _iso(fim_ms),
+        "bloqueador": "calendario" if fim_calendario_ms >= fim_ms else "contagem",
+        "primeira_possibilidade": _iso(max(fim_ms, fim_calendario_ms)),
+        "folga_horas_milesimos": (fim_calendario_ms - fim_ms) * 1_000 // MS_POR_HORA,
+    }
+
+
+def lacunas_registradas(
+    conn: sqlite3.Connection, *, alcance_ms: int | None = None
+) -> list[dict]:
+    """Cada lacuna registrada, com as bordas CONFERIDAS e o impacto DERIVADO."""
+    saida = []
+    for reg in LACUNAS_REGISTRADAS:
+        ini = reg["ultima_valida_antes_ms"]
+        fim = reg["primeira_valida_depois_ms"]
+        bordas = {
+            int(l["t_grid_ms"]): int(l["disponivel"])
+            for l in conn.execute(
+                "SELECT t_grid_ms, disponivel FROM bbo_amostra"
+                " WHERE t_grid_ms IN (?, ?)",
+                (ini, fim),
+            )
+        }
+        dentro = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(disponivel), 0) AS ok"
+            "  FROM bbo_amostra WHERE t_grid_ms > ? AND t_grid_ms < ?",
+            (ini, fim),
+        ).fetchone()
+        motivos = {
+            (l["motivo"] or "sem_motivo"): int(l["n"])
+            for l in conn.execute(
+                "SELECT motivo, COUNT(*) AS n FROM bbo_amostra"
+                " WHERE t_grid_ms > ? AND t_grid_ms < ? AND disponivel = 0"
+                " GROUP BY motivo ORDER BY motivo",
+                (ini, fim),
+            )
+        }
+        barras_do_rele = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM stream_bar"
+                " WHERE open_time_ms > ? AND open_time_ms < ?",
+                (ini, fim),
+            ).fetchone()["n"]
+        )
+        linha_grade = conn.execute(
+            "SELECT grade_ms FROM bbo_amostra WHERE t_grid_ms = ?", (fim,)
+        ).fetchone()
+        grade = int(linha_grade["grade_ms"]) if linha_grade else None
+        esperados = ((fim - ini) // grade - 1) if grade else None
+
+        descreve = (
+            bordas.get(ini) == 1 and bordas.get(fim) == 1 and int(dentro["ok"]) == 0
+        )
+        saida.append(
+            {
+                "id": reg["id"],
+                "ultima_valida_antes": _iso(ini),
+                "primeira_valida_depois": _iso(fim),
+                "o_registro_descreve_o_dado": descreve,
+                "por_que_pode_nao_descrever": (
+                    None
+                    if descreve
+                    else (
+                        "este banco nao tem uma valida em cada borda e nenhuma"
+                        " valida entre elas. Num banco que nao e o de producao"
+                        " isso e esperado; no de producao, o registro parou de"
+                        " descrever o dado"
+                    )
+                ),
+                # ------------------------------------------ o que e HISTORIA
+                "componente": reg["componente"],
+                "causa": reg["causa"],
+                "origem_do_arquivo_danificado": reg["origem_do_arquivo_danificado"],
+                "recuperacao": reg["recuperacao"],
+                "recuperacao_commit": reg["recuperacao_commit"],
+                "recuperacao_commit_em": _iso(reg["recuperacao_commit_ms"]),
+                "a_volta_e_consistente_com_a_correcao": (
+                    grade is not None
+                    and 0 <= fim - reg["recuperacao_commit_ms"] <= grade
+                ),
+                "o_que_essa_consistencia_NAO_prova": (
+                    "commit nao e deploy. A primeira valida depois da lacuna e"
+                    " o primeiro instante de grade apos o commit da correcao -"
+                    " isso e consistente com a correcao ter encerrado a lacuna,"
+                    " e nao prova que encerrou"
+                ),
+                # --------------------------------------- o que SAI do banco
+                "impacto": {
+                    "duracao_horas_milesimos": (fim - ini) * 1_000 // MS_POR_HORA,
+                    "instantes_de_grade_sem_validade": int(dentro["n"]),
+                    "instantes_esperados_entre_as_bordas": esperados,
+                    "por_motivo": motivos,
+                    "na_trava_de_calendario": (
+                        "NENHUM. Ela conta da primeira valida do piloto, e nao"
+                        " de observacoes - a lacuna nao a move nem para antes"
+                        " nem para depois"
+                    ),
+                    "na_trava_de_contagem": (
+                        "atrasa pela propria duracao: cada instante de grade"
+                        " sem validade e uma observacao que nao entrou, e a"
+                        " 1.000-esima chega esse tanto de grade mais tarde"
+                    ),
+                    # A janela de uma taxa CONTEM a lacuna quando as duas se
+                    # sobrepoem - e e isso que explica as duas taxas
+                    # discordarem.
+                    "a_taxa_de_72h_contem_esta_lacuna": (
+                        None
+                        if alcance_ms is None
+                        else fim > alcance_ms - 72 * MS_POR_HORA
+                    ),
+                    "a_taxa_de_24h_contem_esta_lacuna": (
+                        None
+                        if alcance_ms is None
+                        else fim > alcance_ms - 24 * MS_POR_HORA
+                    ),
+                    "rele_no_mesmo_intervalo": {
+                        "barras": barras_do_rele,
+                        "esperadas": esperados,
+                        "o_que_isso_mostra": (
+                            "o rele de klines tambem esta em Singapura. Barras"
+                            " completas no mesmo intervalo dizem que a queda"
+                            " foi do COLETOR, e nao da rede ate a Binance nem"
+                            " da `api`"
+                        ),
+                    },
+                },
+                # ----------------------------------------------- o PILOTO
+                "o_que_foi_feito_com_o_piloto": (
+                    "NADA. Ele nao foi alterado nem reiniciado: o inicio"
+                    " continua na primeira valida, e as duas travas continuam"
+                    " as do ADR 0027"
+                ),
+                "regra_pre_registrada_que_exigiria_reinicio": None,
+                "por_que_nenhuma": (
+                    "o ADR 0027 fixa so as duas travas - 1.000 validas e 14"
+                    " dias corridos, a mais tarde. O ADR 0032 trata queda como"
+                    " atraso recuperavel, e ausencia como `disponivel = 0` com"
+                    " motivo, que entra na cobertura. Nenhum dos dois pede"
+                    " continuidade"
+                ),
+            }
+        )
+    return saida
+
+
+def _explicada_por(inicio_ms: int | None, fim_ms: int | None) -> str | None:
+    for reg in LACUNAS_REGISTRADAS:
+        if (reg["ultima_valida_antes_ms"], reg["primeira_valida_depois_ms"]) == (
+            inicio_ms, fim_ms,
+        ):
+            return reg["id"]
+    return None
 
 
 def montar(conn: sqlite3.Connection) -> dict:
@@ -69,7 +355,15 @@ def montar(conn: sqlite3.Connection) -> dict:
                 "recebidas": 0, "validas": 0,
                 "necessarias": OBSERVACOES_MINIMAS,
             },
+            "lacunas_registradas": lacunas_registradas(conn),
         }
+
+    agora_ms = _agora_ms()
+    grade_ms = _grade_ms(conn)
+    # O ALCANCE do dado: o proximo instante de grade depois do ultimo gravado.
+    # E dele que a projecao parte - e `piloto.derivar` usa a mesma definicao
+    # para recusar fechar uma janela cujo periodo ainda nao existe.
+    alcance_ms = int(ultima) + grade_ms
 
     # ------------------------------------------------------------- os dias
     #
@@ -78,18 +372,13 @@ def montar(conn: sqlite3.Connection) -> dict:
     # Chama-los de dia de piloto descreveria a nossa data de deploy como se
     # fosse o mercado - o defeito que `cobertura_total` x `cobertura_observada`
     # existe para nao cometer.
-    agora_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     decorridos_ms = (agora_ms - int(pri_valida)) if pri_valida else 0
-    dias_completos = decorridos_ms // DIA_MS
+    dias_completos = decorridos_ms // MS_POR_DIA
 
-    # ------------------------------------------- a taxa das ultimas 24 horas
-    janela = conn.execute(
-        "SELECT COUNT(*) AS n, SUM(disponivel) AS ok FROM bbo_amostra"
-        " WHERE t_grid_ms > ?",
-        (agora_ms - DIA_MS,),
-    ).fetchone()
-    n_24h = int(janela["n"] or 0)
-    ok_24h = int(janela["ok"] or 0)
+    # --------------------------------- as taxas, sobre a grade GRAVADA
+    taxas = {
+        h: _taxa(conn, ate_ms=alcance_ms, horas=h) for h in JANELAS_DE_TAXA_HORAS
+    }
 
     # ------------------------------------------------------- a maior lacuna
     #
@@ -97,7 +386,7 @@ def montar(conn: sqlite3.Connection) -> dict:
     # que o piloto nao acumulou. A grade e continua por construcao, entao a
     # lacuna de linhas nao diz nada - a de validade diz.
     maior_lacuna_ms = 0
-    fim_da_lacuna = None
+    inicio_da_lacuna = fim_da_lacuna = None
     anterior = None
     for l in conn.execute(
         "SELECT t_grid_ms FROM bbo_amostra WHERE disponivel = 1"
@@ -106,22 +395,57 @@ def montar(conn: sqlite3.Connection) -> dict:
         t = int(l["t_grid_ms"])
         if anterior is not None and t - anterior > maior_lacuna_ms:
             maior_lacuna_ms = t - anterior
-            fim_da_lacuna = t
+            inicio_da_lacuna, fim_da_lacuna = anterior, t
         anterior = t
 
-    # -------------------------------------------- a projecao, e ela e do CAL
+    # ---------------------------------------------- os DOIS bloqueadores
     faltam = max(0, OBSERVACOES_MINIMAS - validas)
-    por_dia = (ok_24h * DIA_MS / max(1, DIA_MS)) if n_24h else 0
-    dias_para_observacoes = (faltam / por_dia) if por_dia > 0 else None
-    dias_para_calendario = max(0, DIAS_MINIMOS - dias_completos)
-    espera_dias = (
-        max(dias_para_observacoes, dias_para_calendario)
-        if dias_para_observacoes is not None
-        else None
+    fim_calendario_ms = (
+        int(pri_valida) + DIAS_MINIMOS * MS_POR_DIA if pri_valida else None
     )
-    primeira_possivel_ms = (
-        agora_ms + int(espera_dias * DIA_MS) if espera_dias is not None else None
-    )
+    contagem: dict
+    if fim_calendario_ms is None:
+        contagem = {
+            "alcancada": False,
+            "por_que_sem_projecao": (
+                "nenhuma observacao valida ainda: o piloto comeca na primeira"
+                " valida, e sem ela nao ha calendario nem contagem a projetar"
+            ),
+        }
+    elif faltam == 0:
+        milesima = conn.execute(
+            "SELECT t_grid_ms FROM bbo_amostra WHERE disponivel = 1"
+            " ORDER BY t_grid_ms LIMIT 1 OFFSET ?",
+            (OBSERVACOES_MINIMAS - 1,),
+        ).fetchone()
+        fim_contagem_ms = int(milesima["t_grid_ms"]) + grade_ms
+        contagem = {
+            "alcancada": True,
+            "data": _iso(fim_contagem_ms),
+            "bloqueador": (
+                "calendario" if fim_calendario_ms >= fim_contagem_ms else "contagem"
+            ),
+        }
+    else:
+        contagem = {
+            "alcancada": False,
+            **{
+                f"pela_taxa_das_ultimas_{h}h": _projetar(
+                    taxas[h],
+                    faltam=faltam,
+                    alcance_ms=alcance_ms,
+                    grade_ms=grade_ms,
+                    fim_calendario_ms=fim_calendario_ms,
+                )
+                for h in JANELAS_DE_TAXA_HORAS
+            },
+            "sinal_da_folga": (
+                "folga POSITIVA: o calendario e o bloqueador, e essa e a"
+                " quantidade de horas de coleta perdida - a esta taxa - que"
+                " inverteria qual trava vence. NEGATIVA: a contagem ja e o"
+                " bloqueador"
+            ),
+        }
 
     return {
         "disponivel": True,
@@ -137,7 +461,7 @@ def montar(conn: sqlite3.Connection) -> dict:
         "dias": {
             "completos": int(dias_completos),
             "minimo": DIAS_MINIMOS,
-            "faltam": int(dias_para_calendario),
+            "faltam": int(max(0, DIAS_MINIMOS - dias_completos)),
             "contados_da_primeira_valida_em": _iso(pri_valida),
             "por_que_da_primeira_valida": (
                 "a grade abre antes de o coletor existir, e os instantes"
@@ -146,47 +470,68 @@ def montar(conn: sqlite3.Connection) -> dict:
                 " mercado"
             ),
         },
-        "ultimas_24h": {
-            "instantes": n_24h,
-            "validas": ok_24h,
-            "taxa_valida_ppm": (ok_24h * 1_000_000 // n_24h) if n_24h else None,
-            "por_que_sem_taxa": (
-                None if n_24h else "nenhum instante de grade nas ultimas 24h"
-            ),
-        },
+        "ultimas_24h": taxas[24],
+        "ultimas_72h": taxas[72],
+        "as_taxas_sao_do_DADO": (
+            "as ultimas 24/72 horas DA GRADE GRAVADA, terminando no alcance do"
+            " dado - e nao no relogio de leitura. Assim o mesmo estado da a"
+            " mesma taxa, e a defasagem do dado vai publicada a parte"
+        ),
         "maior_lacuna": {
             "duracao_ms": maior_lacuna_ms,
-            "duracao_horas_milesimos": maior_lacuna_ms * 1_000 // 3_600_000,
+            "duracao_horas_milesimos": maior_lacuna_ms * 1_000 // MS_POR_HORA,
+            "comecou_em": _iso(inicio_da_lacuna),
             "terminou_em": _iso(fim_da_lacuna),
+            "explicada_por": _explicada_por(inicio_da_lacuna, fim_da_lacuna),
             "o_que_e": (
                 "a maior distancia entre duas observacoes VALIDAS consecutivas"
                 " - o tempo em que o piloto nao acumulou. A grade e continua"
                 " por construcao, entao lacuna de LINHA nao diz nada"
             ),
+            "se_explicada_por_for_None": (
+                "a maior lacuna NAO esta em `lacunas_registradas`: ela nao tem"
+                " causa, componente nem recuperacao escritos, e alguem precisa"
+                " escreve-los"
+            ),
         },
+        "lacunas_registradas": lacunas_registradas(conn, alcance_ms=alcance_ms),
         "janela": {
             "primeira_ms": primeira, "primeira": _iso(primeira),
             "ultima_ms": ultima, "ultima": _iso(ultima),
         },
         "estimativa_OPERACIONAL_de_fechamento": {
-            "primeira_data_possivel": _iso(primeira_possivel_ms),
-            "dias_de_espera": (
-                round(espera_dias, 2) if espera_dias is not None else None
+            "os_dois_bloqueadores": {
+                "calendario": {
+                    "data_minima": _iso(fim_calendario_ms),
+                    "regra": (
+                        "primeira valida + 14 dias corridos - a trava 1 de"
+                        " `piloto.derivar`. E um instante FIXO: nao depende de"
+                        " taxa, e nao depende da hora da leitura"
+                    ),
+                    "e_ainda_exige": (
+                        "que o dado ALCANCE essa data. `piloto.derivar` recusa"
+                        " fechar uma janela cujo periodo ainda nao existe, entao"
+                        " o coletor precisa estar entregando nesse instante"
+                    ),
+                },
+                "contagem": contagem,
+            },
+            "e_uma_POSSIBILIDADE_e_nao_uma_promessa": (
+                "a data mais cedo que as duas travas permitem SE a taxa recente"
+                " se mantiver. Uma queda do coletor empurra a contagem; nada"
+                " traz o calendario para antes. Nenhuma data aqui e compromisso"
             ),
-            "trava_que_vence": (
-                None
-                if espera_dias is None
-                else (
-                    "observacoes"
-                    if (dias_para_observacoes or 0) >= dias_para_calendario
-                    else "calendario"
-                )
-            ),
-            "sobre_que_taxa": (
-                f"projetada sobre as {ok_24h} validas das ultimas 24h"
-                if n_24h
-                else "sem taxa recente: nao ha o que projetar"
-            ),
+            "ancorada_em": {
+                "alcance_do_dado": _iso(alcance_ms),
+                "defasagem_do_dado_horas_milesimos": (
+                    (agora_ms - alcance_ms) * 1_000 // MS_POR_HORA
+                ),
+                "por_que_publicar_a_defasagem": (
+                    "a projecao parte do dado, e nao do relogio. Um coletor"
+                    " parado congelaria a projecao com cara de saudavel - e a"
+                    " defasagem crescendo e o que denuncia isso"
+                ),
+            },
             "o_que_isso_NAO_e": (
                 "NAO e afirmacao sobre calibracao nem sobre fidelidade. E"
                 " projecao de CALENDARIO sobre a taxa recente, e ela muda a"

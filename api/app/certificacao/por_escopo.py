@@ -2,7 +2,7 @@
 
 | escopo | precisa de cópia? | por quê |
 |---|---|---|
-| **a1a** | **sim** | injeta pelo caminho real: registra hipótese, cobra crédito, escreve transição e ledger |
+| **a1a** | **sim, selada** | injeta pelo caminho real — e roda em `parcelado`, oito etapas sobre UMA cópia que atravessa requisições (OP-1) |
 | **a1b** | **não** | `calibre.rodar` é pura — demonstrado em `test_a1b_parcelado`. Nem lê nem escreve banco |
 | **a2** | **sim** | precisa dos baselines B1 em dois giros, e rodá-los criaria runs reais |
 | **a3** | **não** | purga e embargo são conferência de leitura sobre a separação |
@@ -42,48 +42,14 @@ class Resultado:
 
 
 # ---------------------------------------------------------------------------
-# a1a — na cópia, pelo caminho real
+# a1a — NAO mora aqui
 # ---------------------------------------------------------------------------
-
-
-def rodar_a1a(oficial, *, dataset_id, config, config_version_id) -> Resultado:
-    from ..a1a import braco as a1a_braco
-    from .suite import _caso_canonico, _preparar_laboratorio
-
-    antes = laboratorio.fotografia(oficial)
-    inicio = time.perf_counter_ns()
-    with laboratorio.laboratorio_descartavel(oficial) as copia:
-        preparo = _preparar_laboratorio(
-            copia.conn, dataset_id=dataset_id, config=config,
-            config_version_id=config_version_id,
-        )
-        r = a1a_braco.rodar(
-            copia.conn, dataset_id=dataset_id, config=config,
-            config_version_id=config_version_id,
-        )
-        casos = []
-        for controle in r.controles:
-            caso = _caso_canonico(controle)
-            # O MECANISMO, e nao so `promovido: False`. Ver
-            # `escopos.classificar_bloqueio`.
-            caso["bloqueio"] = esc.classificar_bloqueio(controle)
-            # `contido` sobe para o caso: e ele que o selo le. Para A1a,
-            # contido = nao promovido - mas o COMO fica visivel no bloqueio,
-            # porque barrado na porta e contido pela estatistica sao
-            # informacoes diferentes.
-            caso["contido"] = caso["bloqueio"]["contido"]
-            casos.append(caso)
-        micros_copia = copia.micros_para_copiar
-        bytes_copia = copia.bytes_em_disco()
-    return Resultado(
-        casos=casos,
-        micros_para_copiar=micros_copia,
-        micros_da_suite=(time.perf_counter_ns() - inicio) // 1_000 - micros_copia,
-        bytes_da_copia=bytes_copia,
-        intocado_antes=antes,
-        intocado_depois=laboratorio.fotografia(oficial),
-        preparo=preparo,
-    )
+#
+# O a1a de uma vez saiu na OP-1 (2026-09-10). Ele era uma requisicao de 196 a
+# 207 s em producao, e o unico caminho do a1a passou a ser `parcelado`: oito
+# etapas sobre UMA copia selada. `suite.executar(escopo="a1a")` chama as oito
+# em sequencia pelo MESMO caminho - manter um segundo executor aqui faria os
+# dois divergirem no primeiro campo novo, e ele nunca seria chamado.
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +265,9 @@ def rodar_a4(oficial, *, dataset_id, config, config_version_id) -> Resultado:
     )
 
 
-#: O executor de cada escopo que roda de uma vez. A1b é parcelado e tem
-#: caminho próprio — ver `suite.iniciar_a1b` e `suite.rodar_bloco`.
+#: O executor de cada escopo que roda de uma vez. A1a e A1b são parcelados e
+#: têm caminho próprio — `parcelado` e `suite.iniciar_a1b`/`suite.rodar_bloco`.
 DE_UMA_VEZ = {
-    esc.A1A: rodar_a1a,
     esc.A2: rodar_a2,
     esc.A3: rodar_a3,
     esc.A4: rodar_a4,

@@ -43,31 +43,25 @@ from . import laboratorio
 #: padrao que este projeto conta - um campo que descreve mais do que mediu.
 ESCOPO = {
     "cobre": [
-        "A1a: as seis familias de defeito deterministico de §14.4, injetadas"
-        " pelo caminho real (adaptador, gatilhos, creditos, transicoes e"
-        " ledger) numa copia descartavel",
+        "UM escopo por certificado. O Portao A e a COMPOSICAO dos cinco -"
+        " a1a, a1b, a2, a3 e a4 - e so passa quando os cinco tiverem"
+        " certificado para o MESMO alvo (`escopos.composicao`)",
+        "a1a: as seis familias de defeito deterministico de §14.4, injetadas"
+        " pelo caminho real numa copia descartavel SELADA, em oito etapas"
+        " (OP-1): preparo de baselines, preparo de B4 e uma etapa por familia",
+        "a1b: as 400 execucoes das nulas, em oito blocos de 50, sem copia -"
+        " `calibre.rodar` e pura",
+        "a2, a3 e a4: baselines, vazamento e reconciliacao do ledger",
     ],
     "NAO_cobre": [
-        "A1b: as 400 execucoes das nulas estocasticas. `a1b.braco"
-        ".MAX_POR_PEDIDO` e 50 (~45 s), entao as 400 exigem OITO requisicoes -"
-        " e cada uma teria a sua propria copia, descartada no fim, sem"
-        " acumular. Uma requisicao unica de seis minutos e o que o ADR 0018"
-        " chama de aposta no timeout, e a regra 1 proibe worker na Fase 0",
-        "A2, A3 e A4: baselines, vazamento e reconciliacao do ledger. Sao"
-        " criterios sobre RUNS e sobre a estrutura, e run nao e hipotese -"
-        " eles nunca precisaram deste objeto para serem reexecutados",
+        "o experimento: a certificacao nao registra hipotese, nao cobra"
+        " credito, nao move o contador do DSR e nao toca o holdout do banco"
+        " oficial",
     ],
     "por_que_isso_nao_e_um_manifesto_parcial": (
-        "parcial seria a suite A1a incompleta - tres dos seis casos -, e o"
-        " gatilho `manifesto_exige_suite_completa` recusa isso. Aqui a suite"
-        " esta INTEIRA; o que e menor que o Portao A e o escopo declarado do"
-        " certificado, e ele diz qual e"
-    ),
-    "o_que_falta_decidir": (
-        "como certificar A1b sem worker e sem requisicao de seis minutos. As"
-        " execucoes sao reproduziveis por (semente, desenho, indice), entao"
-        " rodar em pedacos produz o mesmo conjunto - mas pedacos em copias"
-        " diferentes nao acumulam. Fica aberto"
+        "parcial seria um escopo incompleto - tres dos seis casos do a1a, sete"
+        " das oito etapas -, e os gatilhos `manifesto_exige_suite_completa` e"
+        " `manifesto_exige_todos_os_blocos` recusam isso no banco"
     ),
 }
 
@@ -117,6 +111,72 @@ def _caso_canonico(c) -> dict:
     }
 
 
+def _preparar_baselines(
+    copia, *, dataset_id: int, config, config_version_id: int
+) -> dict:
+    """B2, B3 e B1 sob esta config, NA CÓPIA — se ainda não houver B3.
+
+    Uma das duas unidades do preparo. Separada para que a certificação
+    parcelada a rode como etapa própria (OP-1), sem uma segunda definição.
+    """
+    from ..maos_rapidas import baselines
+
+    if copia.execute(
+        "SELECT 1 FROM run WHERE agent_id = 'baseline-B3'"
+        " AND config_version_id = ?",
+        (config_version_id,),
+    ).fetchone():
+        return {"baselines": "nao foi preciso: ja havia B3 sob esta config"}
+    _t0 = time.perf_counter_ns()
+    baselines.rodar_comparacao(
+        copia,
+        dataset_id=dataset_id,
+        config=config,
+        config_version_id=config_version_id,
+        semente=config.default_seed,
+    )
+    return {
+        "micros_por_etapa": {
+            "baselines": (time.perf_counter_ns() - _t0) // 1_000
+        },
+        "baselines": "rodados na copia (nao havia B3 sob esta config)",
+    }
+
+
+def _preparar_b4(
+    copia, *, dataset_id: int, config, config_version_id: int
+) -> dict:
+    """O braço B4 NA CÓPIA — se ainda não houver hipótese sob esta config.
+
+    O controle de **duplicação disfarçada** precisa de uma hipótese real
+    anterior para duplicar; sem ela, a família constaria como injetada sem ter
+    injetado nada.
+    """
+    from ..b4 import braco as b4_braco
+
+    if copia.execute(
+        "SELECT 1 FROM hypothesis h JOIN run r ON r.id = h.run_id"
+        " WHERE r.config_version_id = ?",
+        (config_version_id,),
+    ).fetchone():
+        return {"b4": "nao foi preciso: ja havia hipotese sob esta config"}
+    _t0 = time.perf_counter_ns()
+    b4_braco.rodar(
+        copia,
+        dataset_id=dataset_id,
+        config=config,
+        config_version_id=config_version_id,
+    )
+    return {
+        "micros_por_etapa": {"b4": (time.perf_counter_ns() - _t0) // 1_000},
+        "b4": (
+            "rodado na copia: o controle de DUPLICACAO precisa de uma hipotese"
+            " real anterior para duplicar, e sem ela a familia constaria como"
+            " injetada sem ter injetado nada"
+        ),
+    }
+
+
 def _preparar_laboratorio(
     copia, *, dataset_id: int, config, config_version_id: int
 ) -> dict:
@@ -144,42 +204,19 @@ def _preparar_laboratorio(
     também o caminho dos baselines e o de B4, e deixa de depender do que por
     acaso estava no banco.
     """
-    from ..b4 import braco as b4_braco
-    from ..maos_rapidas import baselines
-
-    feito = {}
-    tem_b3 = copia.execute(
-        "SELECT 1 FROM run WHERE agent_id = 'baseline-B3'"
-        " AND config_version_id = ?",
-        (config_version_id,),
-    ).fetchone()
-    if not tem_b3:
-        baselines.rodar_comparacao(
-            copia,
-            dataset_id=dataset_id,
-            config=config,
-            config_version_id=config_version_id,
-            semente=config.default_seed,
-        )
-        feito["baselines"] = "rodados na copia (nao havia B3 sob esta config)"
-
-    tem_hipotese = copia.execute(
-        "SELECT 1 FROM hypothesis h JOIN run r ON r.id = h.run_id"
-        " WHERE r.config_version_id = ?",
-        (config_version_id,),
-    ).fetchone()
-    if not tem_hipotese:
-        b4_braco.rodar(
+    # As MARCAS de tempo por unidade. Sem elas, "207 segundos" e um numero
+    # sem endereco - e foi delas que o plano do A1a parcelado saiu (OP-1).
+    # A ordem importa: B4 exige o B3 que a primeira unidade estabelece.
+    feito: dict = {"micros_por_etapa": {}}
+    for unidade in (_preparar_baselines, _preparar_b4):
+        parte = unidade(
             copia,
             dataset_id=dataset_id,
             config=config,
             config_version_id=config_version_id,
         )
-        feito["b4"] = (
-            "rodado na copia: o controle de DUPLICACAO precisa de uma hipotese"
-            " real anterior para duplicar, e sem ela a familia constaria como"
-            " injetada sem ter injetado nada"
-        )
+        feito["micros_por_etapa"].update(parte.pop("micros_por_etapa", {}))
+        feito.update(parte)
     return feito
 
 
@@ -201,8 +238,17 @@ def _selar(
     from ..store import bloco_atomico
     from . import escopos as esc
 
+    from . import canonico
+
     esperados = esc.CASOS_ESPERADOS[escopo]
-    casos = resultado.casos
+    # CONTEUDO, e nunca id de linha que so existiu na copia. Medido nos
+    # certificados SELADOS antes da janela: o a1a citava a hipotese 57 e o a2
+    # os runs 82 e 99 - linhas da copia. Ver `canonico.py`.
+    casos, ids_dos_casos = canonico.sem_ids_temporarios(resultado.casos)
+    preparo, ids_do_preparo = canonico.sem_ids_temporarios(
+        resultado.preparo
+        or {"nada": "este escopo nao precisou preparar laboratorio"}
+    )
 
     diferencas = laboratorio.conferir_intocado(
         resultado.intocado_antes, resultado.intocado_depois
@@ -262,8 +308,15 @@ def _selar(
         "casos": casos,
         "escopo_declarado": ESCOPO,
         "insumos_congelados": congelado,
-        "preparo_do_laboratorio": resultado.preparo or {
-            "nada": "este escopo nao precisou preparar laboratorio"
+        "preparo_do_laboratorio": preparo,
+        "ids_temporarios_removidos": {
+            "caminhos": ids_dos_casos + ids_do_preparo,
+            "por_que": (
+                "id de linha criada na COPIA nao existe depois do descarte: o"
+                " certificado cita o CONTEUDO que o id apontava, que ja esta"
+                " ao lado (content_hash, giro, percentis). Publicado, e nao"
+                " apagado calado"
+            ),
         },
         "passa": passa,
         "o_que_passa_significa": (
@@ -363,7 +416,11 @@ def executar(
     snapshot_hash: str | None = None,
     build_do_backend: str | None = None,
 ) -> Certificado:
-    """Um escopo que roda de uma vez: a1a, a2, a3 ou a4.
+    """Um escopo inteiro numa chamada: a2, a3, a4 — e o a1a pelo parcelado.
+
+    O a1a entra aqui pelo MESMO caminho de etapas de `parcelado` (as oito, em
+    sequencia no mesmo processo). A rota HTTP nao oferece isso: pela API o
+    a1a e sempre uma etapa por requisicao (OP-1).
 
     A1b é parcelado e tem caminho próprio — `iniciar_a1b`, `rodar_bloco` e
     `selar_a1b` —, porque 400 execuções não cabem numa requisição e a regra 1
@@ -377,6 +434,22 @@ def executar(
             "a1b e parcelado: use `iniciar_a1b`, `rodar_bloco` e `selar_a1b`."
             " Uma requisicao unica de 400 execucoes e o que o ADR 0018 chama"
             " de aposta no timeout"
+        )
+    if escopo == esc.A1A:
+        # O MESMO caminho parcelado - etapas, copia selada, impressoes - so que
+        # chamado em sequencia no mesmo processo. Nao existe um segundo
+        # caminho monolitico para o a1a: ele divergiria do parcelado no
+        # primeiro campo novo.
+        from . import parcelado
+
+        return parcelado.de_uma_vez(
+            oficial,
+            dataset_id=dataset_id,
+            config=config,
+            config_version_id=config_version_id,
+            dataset_hash=dataset_hash,
+            snapshot_hash=snapshot_hash,
+            build_do_backend=build_do_backend,
         )
     if escopo not in por_escopo.DE_UMA_VEZ:
         raise ValueError(f"escopo desconhecido: {escopo!r}")

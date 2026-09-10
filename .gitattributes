@@ -1,10 +1,38 @@
-# Terminadores de linha normalizados em LF no repositorio e no checkout.
-# Dockerfile, entrypoint e scripts com CRLF quebram dentro do container Linux.
+# Fim de linha: LF no repositorio e no checkout, para TODO texto.
+#
+# A regra geral nasceu porque Dockerfile, entrypoint e scripts com CRLF quebram
+# dentro do container Linux - e ela continua aqui. Sem ela, arquivo sem
+# extensao conhecida (.dockerignore, .gitignore, .env.example) deixaria de ser
+# normalizado, e um .dockerignore com CR no fim da linha para de casar padrao.
 * text=auto eol=lf
 
-# Binarios: nunca converter.
-*.png binary
-*.jpg binary
-*.ico binary
-*.woff binary
+# Os FONTES, declarados como texto explicitamente (OP-2, 2026-09-10). A regra
+# geral acima ja os cobre por deteccao; estas linhas tiram a deteccao da conta.
+*.py      text eol=lf
+*.pyi     text eol=lf
+*.txt     text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.toml    text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+*.sql     text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sh      text eol=lf
+Dockerfile text eol=lf
+
+# E isto e CONVENIENCIA, e nao a correcao da OP-2. Quem garante que o alvo de
+# certificacao nao depende do checkout e certificacao/alvo.conteudo_canonico,
+# que normaliza sobre os bytes que estao no disco - e producao NAO contem .git,
+# entao depender daqui seria construir a garantia num lugar que nao existe
+# onde ela importa. O que este arquivo faz e menor e util: um checkout novo
+# nasce ja normalizado.
+
+# Binarios: nunca converter. 0x0D0A dentro de um PNG e dado, e nao fim de linha.
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
 *.woff2 binary
+*.sqlite3 binary

@@ -4091,6 +4091,278 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        32,
+        "o A1a parcelado: a copia selada, as tentativas, o aborto e o descarte",
+        """
+        -- ================================================================
+        -- OP-1: o A1a em ETAPAS, sobre UMA copia selada, sem worker
+        -- ================================================================
+        --
+        -- > "uma unica copia temporaria identificada e selada para a
+        -- > execucao; etapas com indice e estado persistidos; no maximo uma
+        -- > etapa em andamento; retry idempotente; nenhum resultado concluido
+        -- > sobrescrito; perda da copia temporaria aborta explicitamente a
+        -- > execucao - nunca reconstroi silenciosamente sobre outro estado"
+        -- > - o usuario, 2026-09-10
+        --
+        -- O RESULTADO de cada etapa vai para `certificacao_bloco` (migracao
+        -- 31): ja e imutavel, ja e idempotente pelo UNIQUE, e o manifesto ja
+        -- exige todos os blocos concluidos. O que falta e o que o A1b nao
+        -- precisava - ele nao tem copia - e e isto.
+
+        -- ----------------------------------------------------------------
+        -- A COPIA: uma por execucao, e a chave primaria E a execucao
+        -- ----------------------------------------------------------------
+        CREATE TABLE certificacao_copia (
+            execucao_id        INTEGER PRIMARY KEY
+                                   REFERENCES certificacao_execucao(id),
+            -- Identifica a copia no disco junto com o id: um diretorio que
+            -- sobrou de outra execucao nunca e confundido com esta.
+            token              TEXT    NOT NULL CHECK (length(token) = 32),
+            caminho            TEXT    NOT NULL CHECK (length(caminho) > 0),
+            -- sha256 do arquivo principal logo depois do backup, com o WAL
+            -- zerado. E contra ela que a primeira etapa confere a copia.
+            impressao          TEXT    NOT NULL CHECK (length(impressao) = 64),
+            bytes              INTEGER NOT NULL CHECK (bytes > 0),
+            micros_para_copiar INTEGER NOT NULL CHECK (micros_para_copiar >= 0),
+            selada_em          TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER certificacao_copia_sem_update
+        BEFORE UPDATE ON certificacao_copia
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a copia selada e imutavel: trocar de copia no meio e reconstruir sobre outro estado');
+        END;
+
+        CREATE TRIGGER certificacao_copia_sem_delete
+        BEFORE DELETE ON certificacao_copia
+        BEGIN
+            SELECT RAISE(ABORT, 'a copia selada e imutavel');
+        END;
+
+        CREATE TRIGGER copia_so_em_execucao_parcelada
+        BEFORE INSERT ON certificacao_copia
+        WHEN (SELECT escopo FROM certificacao_execucao
+               WHERE id = NEW.execucao_id) <> 'a1a'
+          OR (SELECT blocos_esperados FROM certificacao_execucao
+               WHERE id = NEW.execucao_id) = 0
+        BEGIN
+            SELECT RAISE(ABORT,
+                'copia selada so existe em execucao a1a parcelada');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- O ABORTO: explicito, com motivo, e terminal
+        -- ----------------------------------------------------------------
+        CREATE TABLE certificacao_aborto (
+            execucao_id INTEGER PRIMARY KEY
+                            REFERENCES certificacao_execucao(id),
+            motivo      TEXT NOT NULL CHECK (length(motivo) > 0),
+            abortada_em TEXT NOT NULL
+        );
+
+        CREATE TRIGGER certificacao_aborto_sem_update
+        BEFORE UPDATE ON certificacao_aborto
+        BEGIN
+            SELECT RAISE(ABORT, 'aborto e imutavel: ele nao se desfaz');
+        END;
+
+        CREATE TRIGGER certificacao_aborto_sem_delete
+        BEFORE DELETE ON certificacao_aborto
+        BEGIN
+            SELECT RAISE(ABORT, 'aborto e imutavel: ele nao se desfaz');
+        END;
+
+        CREATE TRIGGER aborto_nao_desfaz_selo
+        BEFORE INSERT ON certificacao_aborto
+        WHEN EXISTS (SELECT 1 FROM certificacao_manifesto
+                      WHERE execucao_id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'execucao ja selada nao pode ser abortada');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- As TENTATIVAS de etapa
+        -- ----------------------------------------------------------------
+        --
+        -- Mais de uma por indice so existe quando uma tentativa foi
+        -- interrompida SEM escrever na copia - e isso e o banco quem garante,
+        -- pela cadeia de impressoes abaixo.
+        CREATE TABLE certificacao_etapa_tentativa (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            execucao_id     INTEGER NOT NULL
+                                REFERENCES certificacao_execucao(id),
+            indice_etapa    INTEGER NOT NULL CHECK (indice_etapa >= 0),
+            tentativa       INTEGER NOT NULL CHECK (tentativa >= 1),
+            impressao_antes TEXT    NOT NULL CHECK (length(impressao_antes) = 64),
+            iniciada_em     TEXT    NOT NULL,
+            UNIQUE (execucao_id, indice_etapa, tentativa)
+        );
+
+        CREATE INDEX idx_cert_tentativa_exec
+            ON certificacao_etapa_tentativa(execucao_id, indice_etapa);
+
+        CREATE TRIGGER certificacao_etapa_tentativa_sem_update
+        BEFORE UPDATE ON certificacao_etapa_tentativa
+        BEGIN
+            SELECT RAISE(ABORT, 'tentativa de etapa e imutavel');
+        END;
+
+        CREATE TRIGGER certificacao_etapa_tentativa_sem_delete
+        BEFORE DELETE ON certificacao_etapa_tentativa
+        BEGIN
+            SELECT RAISE(ABORT, 'tentativa de etapa e imutavel');
+        END;
+
+        -- EM ORDEM: a etapa k so comeca com exatamente k etapas concluidas. A
+        -- copia e uma cadeia de estados, e rodar a etapa 5 antes da 4 seria
+        -- rodar sobre um laboratorio que o plano nao descreve.
+        CREATE TRIGGER etapa_em_ordem
+        BEFORE INSERT ON certificacao_etapa_tentativa
+        WHEN NEW.indice_etapa <> (SELECT COUNT(*) FROM certificacao_bloco
+                                   WHERE execucao_id = NEW.execucao_id
+                                     AND estado = 'concluido')
+        BEGIN
+            SELECT RAISE(ABORT,
+                'etapa fora de ordem: a etapa k so comeca depois de k etapas concluidas');
+        END;
+
+        CREATE TRIGGER etapa_dentro_do_plano
+        BEFORE INSERT ON certificacao_etapa_tentativa
+        WHEN NEW.indice_etapa >= (SELECT blocos_esperados
+                                    FROM certificacao_execucao
+                                   WHERE id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'etapa fora do plano congelado antes da primeira etapa');
+        END;
+
+        CREATE TRIGGER etapa_exige_copia_selada
+        BEFORE INSERT ON certificacao_etapa_tentativa
+        WHEN NOT EXISTS (SELECT 1 FROM certificacao_copia
+                          WHERE execucao_id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'etapa sem copia selada: nao ha laboratorio identificado onde rodar');
+        END;
+
+        CREATE TRIGGER etapa_recusada_se_abortada
+        BEFORE INSERT ON certificacao_etapa_tentativa
+        WHEN EXISTS (SELECT 1 FROM certificacao_aborto
+                      WHERE execucao_id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'execucao abortada: nenhuma etapa roda depois do aborto');
+        END;
+
+        -- A CADEIA: toda tentativa parte da impressao em que a etapa anterior
+        -- deixou a copia - ou da do selo, na primeira. Uma tentativa que
+        -- partisse de outra impressao estaria rodando sobre outro estado.
+        CREATE TRIGGER tentativa_parte_da_impressao_certa
+        BEFORE INSERT ON certificacao_etapa_tentativa
+        WHEN NEW.impressao_antes IS NOT (
+            CASE WHEN NEW.indice_etapa = 0
+                 THEN (SELECT impressao FROM certificacao_copia
+                        WHERE execucao_id = NEW.execucao_id)
+                 ELSE (SELECT json_extract(conteudo_json, '$.impressao_depois')
+                         FROM certificacao_bloco
+                        WHERE execucao_id = NEW.execucao_id
+                          AND indice_bloco = NEW.indice_etapa - 1
+                          AND estado = 'concluido')
+            END)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a tentativa nao parte da impressao em que a etapa anterior deixou a copia');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- Os BLOCOS do a1a parcelado
+        -- ----------------------------------------------------------------
+        CREATE TRIGGER bloco_a1a_exige_tentativa
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.escopo = 'a1a'
+         AND NOT EXISTS (SELECT 1 FROM certificacao_etapa_tentativa
+                          WHERE execucao_id = NEW.execucao_id
+                            AND indice_etapa = NEW.indice_bloco)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'resultado de etapa sem tentativa registrada no mesmo indice');
+        END;
+
+        CREATE TRIGGER bloco_a1a_carrega_impressoes
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.escopo = 'a1a' AND NEW.estado = 'concluido'
+         AND (COALESCE(length(json_extract(NEW.conteudo_json, '$.impressao_antes')), 0) <> 64
+           OR COALESCE(length(json_extract(NEW.conteudo_json, '$.impressao_depois')), 0) <> 64)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'etapa concluida sem as impressoes da copia antes e depois');
+        END;
+
+        CREATE TRIGGER bloco_recusado_se_abortada
+        BEFORE INSERT ON certificacao_bloco
+        WHEN EXISTS (SELECT 1 FROM certificacao_aborto
+                      WHERE execucao_id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'execucao abortada: nenhum resultado entra depois do aborto');
+        END;
+
+        CREATE TRIGGER manifesto_recusado_se_abortada
+        BEFORE INSERT ON certificacao_manifesto
+        WHEN EXISTS (SELECT 1 FROM certificacao_aborto
+                      WHERE execucao_id = NEW.execucao_id)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'execucao abortada nao produz manifesto');
+        END;
+
+        -- ----------------------------------------------------------------
+        -- O DESCARTE: uma vez por copia, e coerente com o fim da execucao
+        -- ----------------------------------------------------------------
+        CREATE TABLE certificacao_copia_descarte (
+            execucao_id   INTEGER PRIMARY KEY
+                              REFERENCES certificacao_copia(execucao_id),
+            motivo        TEXT    NOT NULL CHECK (motivo IN ('selada', 'abortada')),
+            -- 1 quando o diretorio sobreviveu a tentativa de apagar. O
+            -- resultado ja e o produto; o residuo fica NOMEADO.
+            residuo       INTEGER NOT NULL CHECK (residuo IN (0, 1)),
+            -- O tamanho da copia no instante em que foi apagada. E o custo de
+            -- DISCO da execucao inteira, e mora aqui porque e aqui que ele
+            -- fica conhecido: a linha da execucao nasce antes da copia, e e
+            -- imutavel.
+            bytes_no_descarte INTEGER NOT NULL CHECK (bytes_no_descarte >= 0),
+            descartada_em TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER certificacao_copia_descarte_sem_update
+        BEFORE UPDATE ON certificacao_copia_descarte
+        BEGIN
+            SELECT RAISE(ABORT, 'descarte e imutavel');
+        END;
+
+        CREATE TRIGGER certificacao_copia_descarte_sem_delete
+        BEFORE DELETE ON certificacao_copia_descarte
+        BEGIN
+            SELECT RAISE(ABORT, 'descarte e imutavel');
+        END;
+
+        CREATE TRIGGER descarte_coerente
+        BEFORE INSERT ON certificacao_copia_descarte
+        WHEN (NEW.motivo = 'selada'
+              AND NOT EXISTS (SELECT 1 FROM certificacao_manifesto
+                               WHERE execucao_id = NEW.execucao_id))
+          OR (NEW.motivo = 'abortada'
+              AND NOT EXISTS (SELECT 1 FROM certificacao_aborto
+                               WHERE execucao_id = NEW.execucao_id))
+        BEGIN
+            SELECT RAISE(ABORT,
+                'descarte sem o fim que ele declara: selada exige manifesto, abortada exige aborto');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

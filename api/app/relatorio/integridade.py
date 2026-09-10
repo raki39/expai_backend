@@ -53,6 +53,15 @@ ESTRUTURA_ESPERADA = {
     # certifica que defeito conhecido nao e promovido, e um protocolo que
     # recusasse tudo satisfaria isso de graca.
     31: ["certificacao_bloco"],
+    # Migracao 32 - OP-1: o A1a parcelado. A copia selada, as tentativas, o
+    # aborto e o descarte. O resultado de cada etapa mora em
+    # `certificacao_bloco`, que ja era imutavel e idempotente.
+    32: [
+        "certificacao_copia",
+        "certificacao_aborto",
+        "certificacao_etapa_tentativa",
+        "certificacao_copia_descarte",
+    ],
 }
 
 COLUNAS_ESPERADAS = {
@@ -80,6 +89,21 @@ GATILHOS_ESPERADOS = [
     "certificacao_bloco_sem_update", "certificacao_bloco_sem_delete",
     "bloco_cita_o_escopo_da_execucao", "bloco_dentro_do_declarado",
     "manifesto_exige_todos_os_blocos",
+    # Migracao 32 - o A1a parcelado. A cadeia de impressoes, a ordem e o
+    # aborto sao impostos pelo BANCO, e nao pela disciplina de quem chama.
+    "certificacao_copia_sem_update", "certificacao_copia_sem_delete",
+    "copia_so_em_execucao_parcelada",
+    "certificacao_aborto_sem_update", "certificacao_aborto_sem_delete",
+    "aborto_nao_desfaz_selo",
+    "certificacao_etapa_tentativa_sem_update",
+    "certificacao_etapa_tentativa_sem_delete",
+    "etapa_em_ordem", "etapa_dentro_do_plano", "etapa_exige_copia_selada",
+    "etapa_recusada_se_abortada", "tentativa_parte_da_impressao_certa",
+    "bloco_a1a_exige_tentativa", "bloco_a1a_carrega_impressoes",
+    "bloco_recusado_se_abortada", "manifesto_recusado_se_abortada",
+    "certificacao_copia_descarte_sem_update",
+    "certificacao_copia_descarte_sem_delete",
+    "descarte_coerente",
     "bbo_contrato_sem_update", "bbo_contrato_sem_delete",
     "bbo_amostra_sem_update", "bbo_amostra_sem_delete",
     "janela_piloto_sem_update", "janela_piloto_sem_delete",

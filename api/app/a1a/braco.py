@@ -307,18 +307,32 @@ def _injetar(
     return []
 
 
-def rodar(
+@dataclass(frozen=True)
+class Contexto:
+    """O que as seis famílias compartilham — derivado do banco, e não guardado.
+
+    Recalculável a qualquer momento a partir do banco em que o controle roda. É
+    isso que deixa a certificação parcelada (OP-1) rodar uma família por
+    requisição sem carregar estado em memória entre elas.
+    """
+
+    barras: list
+    duracao: int
+    decision_ts_ms: int
+
+
+def abrir(
     conn: sqlite3.Connection,
     *,
     dataset_id: int,
     config: ExperimentConfig,
     config_version_id: int,
-    settings=None,
-) -> ResultadoA1a:
-    """Os seis controles, cada um no seu run.
+) -> Contexto:
+    """Pré-condições, janela e orçamento. **A mesma abertura nos dois caminhos.**
 
-    `settings` entra e não é usado, como em B4: mantém a rota simétrica sem
-    que o controle ganhe acesso a credencial nenhuma.
+    `rodar` a chama uma vez antes do laço; a certificação parcelada, no começo
+    de cada família. As duas escrevem o mesmo: as conferências são leitura, e
+    `creditos.conceder` é idempotente — a segunda chamada lê e volta.
     """
     if not loader.esta_dividido(conn, dataset_id):
         raise SeparacaoAusente(
@@ -346,7 +360,6 @@ def rodar(
         if len(barras) >= 2
         else 900_000
     )
-    decision_ts_ms = int(barras[-1].open_time_ms)
 
     creditos_mod.conceder(
         conn,
@@ -354,22 +367,67 @@ def rodar(
         config_version_id=config_version_id,
         creditos=config.creditos_por_braco,
     )
+    return Contexto(
+        barras=barras,
+        duracao=duracao,
+        decision_ts_ms=int(barras[-1].open_time_ms),
+    )
+
+
+def rodar_familia(
+    conn: sqlite3.Connection,
+    familia: catalogo.Familia,
+    *,
+    dataset_id: int,
+    config: ExperimentConfig,
+    config_version_id: int,
+    contexto: Contexto,
+) -> ResultadoDeUm:
+    """UMA família, pelo mesmo `_rodar_um` do laço de `rodar`."""
+    return _rodar_um(
+        conn,
+        familia,
+        dataset_id=dataset_id,
+        config=config,
+        config_version_id=config_version_id,
+        barras=contexto.barras,
+        duracao=contexto.duracao,
+        decision_ts_ms=contexto.decision_ts_ms,
+    )
+
+
+def rodar(
+    conn: sqlite3.Connection,
+    *,
+    dataset_id: int,
+    config: ExperimentConfig,
+    config_version_id: int,
+    settings=None,
+) -> ResultadoA1a:
+    """Os seis controles, cada um no seu run.
+
+    `settings` entra e não é usado, como em B4: mantém a rota simétrica sem
+    que o controle ganhe acesso a credencial nenhuma.
+    """
+    contexto = abrir(
+        conn,
+        dataset_id=dataset_id,
+        config=config,
+        config_version_id=config_version_id,
+    )
 
     comeco = time.perf_counter_ns()
-    saida: list[ResultadoDeUm] = []
-    for familia in catalogo.FAMILIAS:
-        saida.append(
-            _rodar_um(
-                conn,
-                familia,
-                dataset_id=dataset_id,
-                config=config,
-                config_version_id=config_version_id,
-                barras=barras,
-                duracao=duracao,
-                decision_ts_ms=decision_ts_ms,
-            )
+    saida: list[ResultadoDeUm] = [
+        rodar_familia(
+            conn,
+            familia,
+            dataset_id=dataset_id,
+            config=config,
+            config_version_id=config_version_id,
+            contexto=contexto,
         )
+        for familia in catalogo.FAMILIAS
+    ]
 
     cpu = (time.perf_counter_ns() - comeco) // 1_000
     log.info(

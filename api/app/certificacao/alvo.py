@@ -132,19 +132,108 @@ def fechamento_transitivo(entradas: tuple[str, ...] = ENTRADAS) -> list[str]:
     return sorted(vistos)
 
 
-def _hash_de_arquivos(caminhos) -> str:
-    """Sha256 do conteúdo, em ordem determinística e com o nome dentro.
+#: A versão da política de canonicalização, **dentro do hash**.
+#:
+#: Sem ela, mudar a política produziria alvos diferentes sem que ninguém
+#: soubesse **por quê** — e dois certificados incomparáveis pareceriam
+#: descrever laboratórios diferentes quando o que mudou foi a régua. Com ela,
+#: a mudança de política é visível no próprio número.
+POLITICA_CANONICA = "canonico@1"
 
-    O nome entra no hash para que **renomear** um módulo mude o alvo: dois
-    arquivos com o mesmo conteúdo em lugares diferentes são laboratórios
-    diferentes.
+#: As extensões tratadas como TEXTO. O que não estiver aqui entra em bytes
+#: crus — um `.py` normalizado e um `.png` normalizado são coisas muito
+#: diferentes, e normalizar bytes de imagem corromperia o hash de um arquivo
+#: que ninguém edita em editor de texto.
+#:
+#: Hoje o fechamento é 100% `.py`. A lista existe para o dia em que não for.
+EXTENSOES_DE_TEXTO = frozenset({".py", ".pyi", ".txt", ".md", ".json", ".toml",
+                                ".cfg", ".ini", ".sql", ".yml", ".yaml"})
+
+
+def caminho_canonico(p: pathlib.Path) -> str:
+    """O caminho relativo em POSIX. É ele que entra no hash **e** na ordem.
+
+    `str(Path)` devolve `app\\a1a\\braco.py` no Windows e `app/a1a/braco.py`
+    no Linux, e os separadores ordenam diferente: `\\` é 0x5C e `/` é 0x2F, os
+    dois em relação a `.` (0x2E). Um conjunto que tivesse `app/x.py` **e**
+    `app/x/algo.py` sairia em ordens diferentes nos dois sistemas.
+
+    **Medido:** no fechamento de hoje as duas ordens coincidem — mas por acaso
+    do conjunto, e não por construção (um pacote não coexiste com um módulo de
+    mesmo nome). Ordenar pela mesma string que entra no hash tira a sorte da
+    conta.
+    """
+    return p.relative_to(_RAIZ).as_posix()
+
+
+def conteudo_canonico(p: pathlib.Path) -> bytes:
+    """Os bytes que representam o conteúdo LÓGICO deste arquivo.
+
+    ## Texto
+
+    1. **BOM UTF-8 removido.** Um editor que grava BOM não muda o programa —
+       Python ignora o BOM ao compilar —, e deixá-lo no hash faria "abri o
+       arquivo no editor errado" virar recertificação;
+    2. **CRLF e CR viram LF.** `\r\n` primeiro e `\r` solto depois: fazer o
+       contrário transformaria `\r\n` em `\n\n` e mudaria o conteúdo em vez de
+       normalizá-lo. O CR solto é o fim de linha do Mac clássico, e um arquivo
+       assim é raro — mas raro não é ausente, e a ordem das duas substituições é
+       de graça.
+
+    ## Binário
+
+    **Bytes crus.** Normalizar bytes de imagem, fonte ou `.pyc` corromperia o
+    hash de um arquivo que ninguém edita em editor de texto: `0x0D0A` dentro de
+    um PNG é dado, e não fim de linha.
+    """
+    bruto = p.read_bytes()
+    if p.suffix.lower() not in EXTENSOES_DE_TEXTO:
+        return bruto
+    if bruto.startswith(b"\xef\xbb\xbf"):
+        bruto = bruto[3:]
+    return bruto.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _hash_de_arquivos(caminhos) -> str:
+    """Sha256 do conteúdo LÓGICO, em ordem canônica e com o caminho dentro.
+
+    ## O defeito que isto conserta — OP-2, medido em 2026-09-10
+
+    O mesmo commit produzia alvos diferentes conforme o sistema de arquivos:
+
+    ```
+    local (Windows, 39 dos 69 com CRLF)   56d4a443ee51398b
+    producao (Linux, LF)                  8bfbef7e1914003a
+    ```
+
+    A função lia `read_bytes()` cru, então ela media o **checkout** e não o
+    conteúdo — e um certificado emitido no Linux não conferia no Windows sob o
+    mesmo commit.
+
+    ## Por que o caminho entra no hash
+
+    Para que **renomear** um módulo mude o alvo: dois arquivos com o mesmo
+    conteúdo em lugares diferentes são laboratórios diferentes. E ele entra em
+    POSIX, que é a mesma string usada para ordenar — ver `caminho_canonico`.
+
+    ## E por que a POLÍTICA entra também
+
+    `POLITICA_CANONICA` vai no início do hash. Mudar a régua de canonicalização
+    passa a ser visível **no número**, em vez de produzir dois certificados
+    incomparáveis que parecem descrever laboratórios diferentes.
     """
     h = hashlib.sha256()
-    for caminho in sorted(caminhos, key=lambda p: str(p)):
-        p = pathlib.Path(caminho)
-        h.update(str(p.relative_to(_RAIZ)).replace("\\", "/").encode())
+    h.update(POLITICA_CANONICA.encode("utf-8"))
+    h.update(b"\x00")
+    # Ordena pela MESMA string que entra no hash, e nao por `str(Path)`.
+    pares = sorted(
+        ((caminho_canonico(pathlib.Path(c)), pathlib.Path(c)) for c in caminhos),
+        key=lambda par: par[0],
+    )
+    for relativo, p in pares:
+        h.update(relativo.encode("utf-8"))
         h.update(b"\x00")
-        h.update(p.read_bytes())
+        h.update(conteudo_canonico(p))
         h.update(b"\x00")
     return h.hexdigest()
 

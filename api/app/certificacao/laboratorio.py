@@ -36,11 +36,34 @@ certificação achava que estava na cópia. Há teste varrendo isso por AST.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import pathlib
 import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
+
+
+#: Pragmas de DESEMPENHO, só da conexão da cópia. Medidos em 2026-09-10
+#: contra o padrão, com o resultado canônico exigido IDÊNTICO byte a byte —
+#: casos, comparação de baselines, B4 e digest de cada run (21.590 bytes):
+#:
+#: | variante | B4 | lucro só sem custos | total |
+#: |---|---|---|---|
+#: | padrão | 27,3 s | 66,7 s | 102,3 s |
+#: | `temp_store=MEMORY` | **14,3 s** | 61,9 s | **82,5 s** |
+#: | + `mmap_size` 256 MB e `cache_size` 128 MB | 15,7 s | 62,4 s | 85,0 s |
+#:
+#: Fica só `temp_store`: o GROUP BY da view de saldo monta uma B-tree
+#: temporária, e por padrão ela vai para ARQUIVO. `mmap` e `cache` não
+#: compraram nada e custariam memória. O banco OFICIAL não é tocado — isto vale
+#: só para a cópia, onde o resultado é conferido e o arquivo vai embora.
+#:
+#: Também medido, e RECUSADO: um índice de cobertura em `ledger_entry` e
+#: `ledger_transaction` comprou 1,2x e exigiria migração. O custo do controle
+#: de giro alto não é índice: é `saldo_da_conta` agregando o run inteiro a
+#: cada compra, porque o saldo é sempre DERIVADO dos lançamentos (regra 16).
+PRAGMAS_DA_COPIA = ("PRAGMA temp_store=MEMORY",)
 
 
 @dataclass(frozen=True)
@@ -96,6 +119,8 @@ def laboratorio_descartavel(oficial: sqlite3.Connection):
         _apagar(pasta)
         raise
     micros = (time.perf_counter_ns() - inicio) // 1_000
+    for pragma in PRAGMAS_DA_COPIA:
+        alvo.execute(pragma)
     try:
         yield Copia(
             conn=alvo, caminho=destino, micros_para_copiar=micros
@@ -103,6 +128,77 @@ def laboratorio_descartavel(oficial: sqlite3.Connection):
     finally:
         alvo.close()
         _apagar(pasta)
+
+
+# ---------------------------------------------------------------------------
+# A copia que ATRAVESSA requisicoes - o A1a parcelado (OP-1)
+# ---------------------------------------------------------------------------
+
+
+def criar_copia(oficial: sqlite3.Connection, destino: pathlib.Path) -> int:
+    """A cópia por `backup()` consistente. Devolve os micros. Nunca sobrescreve."""
+    from ..store import conectar
+
+    if destino.exists():
+        raise FileExistsError(
+            f"ja existe arquivo em {destino}: uma copia nunca e sobrescrita"
+        )
+    inicio = time.perf_counter_ns()
+    alvo = conectar(destino)
+    try:
+        oficial.backup(alvo)
+    finally:
+        alvo.close()
+    return (time.perf_counter_ns() - inicio) // 1_000
+
+
+def abrir_copia(caminho: pathlib.Path) -> sqlite3.Connection:
+    """Abre uma cópia QUE JÁ EXISTE. **Nunca cria.**
+
+    `sqlite3.connect` cria o arquivo quando ele não existe — e uma cópia
+    perdida viraria um banco VAZIO com o mesmo nome, sobre o qual a próxima
+    etapa rodaria como se nada tivesse acontecido. Com `mode=rw` a ausência
+    levanta, e a execução aborta explicitamente em vez de reconstruir.
+    """
+    from ..store import _PRAGMAS
+
+    if not caminho.exists():
+        raise FileNotFoundError(f"a copia {caminho} nao existe")
+    conn = sqlite3.connect(
+        caminho.resolve().as_uri() + "?mode=rw",
+        uri=True,
+        timeout=5.0,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    conn.row_factory = sqlite3.Row
+    for pragma in _PRAGMAS + PRAGMAS_DA_COPIA:
+        conn.execute(pragma)
+    return conn
+
+
+def impressao(caminho: pathlib.Path) -> str:
+    """O sha256 do arquivo principal, com o WAL zerado antes.
+
+    Com o WAL zerado, o arquivo principal contém tudo — e duas leituras sem
+    escrita no meio dão os mesmos bytes. Qualquer escrita, até um `UPDATE` que
+    não muda contagem nenhuma, muda a impressão. É ela que decide se uma etapa
+    interrompida pode rodar de novo.
+    """
+    conn = abrir_copia(caminho)
+    try:
+        ocupado = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    finally:
+        conn.close()
+    if ocupado:
+        raise RuntimeError(
+            "o checkpoint da copia nao completou: ha outra conexao aberta nela"
+        )
+    h = hashlib.sha256()
+    with caminho.open("rb") as arquivo:
+        for pedaco in iter(lambda: arquivo.read(1 << 20), b""):
+            h.update(pedaco)
+    return h.hexdigest()
 
 
 def _apagar(pasta: pathlib.Path) -> None:
@@ -136,8 +232,17 @@ TABELAS_QUE_A_CERTIFICACAO_NAO_PODE_TOCAR = (
     "ledger_entry",
     "ledger_transaction",
     "agent_event",
-    "holdout_uso",
+    # O nome REAL da tabela de uso do holdout. A lista dizia `holdout_uso`, que
+    # nunca existiu - e a fotografia gravava -1 dos dois lados e passava.
+    "holdout_access",
+    # Conceder orcamento tambem e escrever credito: um `conceder` que caisse no
+    # banco oficial abriria um braco de credito que ninguem pediu.
+    "test_credit_budget",
 )
+
+
+class FotografiaCega(RuntimeError):
+    """Uma tabela da lista não existe: a fotografia não vê o que devia vigiar."""
 
 
 def fotografia(conn: sqlite3.Connection) -> dict[str, int]:
@@ -147,18 +252,31 @@ def fotografia(conn: sqlite3.Connection) -> dict[str, int]:
     certificado. Não é a mesma coisa que confiar na cópia: é a evidência de que
     a cópia foi de fato onde a escrita aconteceu.
     """
-    fora = {}
-    for tabela in TABELAS_QUE_A_CERTIFICACAO_NAO_PODE_TOCAR:
-        try:
-            fora[tabela] = int(
-                conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0]
-            )
-        except sqlite3.OperationalError:
-            # Tabela que ainda nao existe neste schema: registrar a ausencia,
-            # e nao omitir a linha - omitir faria a comparacao passar por
-            # falta de dado.
-            fora[tabela] = -1
-    return fora
+    # Tabela ausente LEVANTA. A primeira versao gravava -1 e seguia, sob um
+    # comentario dizendo que isso impedia a comparacao de "passar por falta de
+    # dado" - e -1 antes igual a -1 depois PASSA. Os cinco certificados
+    # selados da cv9 publicaram `holdout_uso: -1`: a tabela nunca existiu (o
+    # nome real e `holdout_access`), e a conferencia de holdout passou sempre
+    # sem ver nada. Uma guarda cega nao pode passar por igualdade de cegueira.
+    existentes = {
+        linha[0]
+        for linha in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    faltando = [
+        t for t in TABELAS_QUE_A_CERTIFICACAO_NAO_PODE_TOCAR if t not in existentes
+    ]
+    if faltando:
+        raise FotografiaCega(
+            f"a fotografia do banco oficial nao ve {faltando}: a tabela nao"
+            " existe neste schema, e contar o que nao existe daria o mesmo"
+            " numero antes e depois - uma conferencia que passa sempre"
+        )
+    return {
+        tabela: int(conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0])
+        for tabela in TABELAS_QUE_A_CERTIFICACAO_NAO_PODE_TOCAR
+    }
 
 
 def conferir_intocado(antes: dict[str, int], depois: dict[str, int]) -> list[str]:

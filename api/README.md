@@ -160,9 +160,11 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | GET | `/api/a1a` | os seis controles negativos determinísticos (§14.4) e o que aconteceu com cada um |
 | POST | `/api/a1a` | **injeta os seis controles pelo mesmo caminho das reais — tolerância zero** |
 | GET | `/api/certificacao` | o **alvo de certificação** de hoje (sete componentes) e o certificado dele, se existir |
-| POST | `/api/certificacao` | roda a suíte de **um escopo** (`a1a`, `a2`, `a3` ou `a4`) numa **cópia descartável** e sela o manifesto. **Não gasta crédito, não registra hipótese e não move o contador do DSR** (ADR 0040) |
+| POST | `/api/certificacao` | roda a suíte de **um escopo** (`a2`, `a3` ou `a4` — o `a1a` é parcelado e recusa aqui com 422) numa **cópia descartável** e sela o manifesto. **Não gasta crédito, não registra hipótese e não move o contador do DSR** (ADR 0040) |
 | GET | `/api/certificacao/a1b` | o progresso dos **oito blocos** de 50 execuções, e qual falta — é por aqui que a retomada acontece |
 | POST | `/api/certificacao/a1b` | roda **um** bloco (idempotente pelo `UNIQUE`), ou sela quando os oito estiverem concluídos. Sem worker (regra 1) |
+| GET | `/api/certificacao/a1a` | o progresso das **oito etapas** do A1a parcelado — o plano congelado, a próxima, a em andamento, a cópia selada e o motivo do aborto, se houver (OP-1) |
+| POST | `/api/certificacao/a1a` | roda a **próxima** etapa sobre a cópia selada, ou sela quando as oito estiverem concluídas. Idempotente; etapa em andamento responde 409; cópia perdida ou fora da impressão **aborta**. `nova_execucao: true` recomeça depois de um aborto |
 | GET | `/api/a1b` | o calibre acumulado das nulas estocásticas, nos dois desenhos |
 | POST | `/api/a1b` | **roda um pedaço das 200 execuções por desenho (D29); idempotente por índice** |
 

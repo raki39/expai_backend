@@ -155,3 +155,20 @@ class PedidoBlocoA1b(BaseModel):
     author: str = Field(min_length=1, max_length=120)
     indice_bloco: int | None = Field(default=None, ge=0, le=7)
     selar: bool = False
+
+
+class PedidoEtapaA1a(BaseModel):
+    """A PRÓXIMA etapa do A1a parcelado, ou o selo. OP-1.
+
+    Não há índice no pedido: as etapas rodam em ordem sobre a mesma cópia, e
+    quem decide qual é a próxima é o registro. Repetir o pedido é o retry — ele
+    devolve o que já foi feito, e nunca roda duas vezes a mesma etapa.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    author: str = Field(min_length=1, max_length=120)
+    selar: bool = False
+    # Comecar outra execucao depois de um ABORTO e decisao explicita: um
+    # clique automatico do painel nao pode transformar aborto em recomeco.
+    nova_execucao: bool = False

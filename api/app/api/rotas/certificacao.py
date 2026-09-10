@@ -18,11 +18,12 @@ from fastapi import APIRouter, Body, HTTPException, Request, status
 from ...a1a import braco as a1a_braco
 from ...certificacao import alvo as alvo_mod
 from ...certificacao import escopos as escopos_mod
+from ...certificacao import parcelado
 from ...certificacao import suite as suite_mod
 from ...config import service as config_service
 from ...dataset import loader as dataset_loader
 from ..comum import _conn
-from ..modelos import PedidoBlocoA1b, PedidoCertificacao
+from ..modelos import PedidoBlocoA1b, PedidoCertificacao, PedidoEtapaA1a
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,18 @@ def certificacao_rodar(
     if atual is None:
         raise HTTPException(status_code=503, detail="configuracao nao inicializada")
     meta, fonte_hash = _fonte(conn)
+
+    if pedido.escopo == escopos_mod.A1A:
+        # O a1a NAO roda de uma vez pela API. Produção mediu 196 a 207 s numa
+        # requisicao so - o que o ADR 0018 chama de aposta no timeout.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "a1a e parcelado (OP-1): use POST /api/certificacao/a1a, uma"
+                " etapa por requisicao, sobre uma copia selada e com o estado"
+                " no banco"
+            ),
+        )
 
     log.info("certificacao.pedido", extra={"author": pedido.author})
     try:
@@ -250,6 +263,120 @@ def a1b_rodar_bloco(
                 **suite_mod.rodar_bloco(
                     conn, execucao_id=estado["execucao_id"], indice_bloco=indice
                 )}
+    except suite_mod.CertificacaoRecusada as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+        )
+
+
+# ---------------------------------------------------------------------------
+# A1a: oito etapas sobre UMA copia selada - sem worker (OP-1)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/a1a")
+def a1a_estado_certificacao(request: Request) -> dict[str, Any]:
+    """O progresso das oito etapas para o alvo de hoje.
+
+    É por aqui que o painel acompanha: `proxima` diz qual etapa falta,
+    `em_andamento` diz se uma está rodando agora, e `abortada` diz por quê,
+    quando for o caso.
+    """
+    conn = _conn(request)
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        return {"existe": False, "motivo": "configuracao nao inicializada"}
+    meta, fonte_hash = _fonte(conn)
+    o_alvo = alvo_mod.montar(conn, dataset_hash=fonte_hash)
+    execucao_id = parcelado.ultima_do_alvo(
+        conn, o_alvo["alvo_de_certificacao_hash"]
+    )
+    if execucao_id is None:
+        return {
+            "existe": True,
+            "iniciada": False,
+            "alvo_de_certificacao_hash": o_alvo["alvo_de_certificacao_hash"],
+            "plano": list(escopos_mod.PLANO_A1A),
+            "motivo": (
+                "nenhuma execucao a1a parcelada para este alvo. Um POST congela"
+                " o alvo e o plano, sela a copia e roda a primeira etapa"
+            ),
+        }
+    return {"existe": True, "iniciada": True, **parcelado.estado(conn, execucao_id)}
+
+
+@router.post("/a1a", status_code=status.HTTP_200_OK)
+def a1a_rodar_etapa(
+    request: Request, pedido: PedidoEtapaA1a = Body(...)
+) -> dict[str, Any]:
+    """Roda a PRÓXIMA etapa, ou sela quando as oito estiverem concluídas.
+
+    **Idempotente**: repetir o pedido devolve o que já foi feito. Uma etapa em
+    andamento responde 409 e não roda de novo — o painel lê o estado e chama
+    outra vez quando ela terminar. Uma cópia perdida ou fora da impressão
+    esperada **aborta** a execução, com o motivo gravado.
+    """
+    conn = _conn(request)
+    if config_service.run_ativo(conn) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="encerre o run ativo antes de certificar",
+        )
+    atual = config_service.versao_atual(conn)
+    if atual is None:
+        raise HTTPException(status_code=503, detail="configuracao nao inicializada")
+    meta, fonte_hash = _fonte(conn)
+
+    log.info("certificacao.a1a", extra={"author": pedido.author})
+    try:
+        estado = parcelado.iniciar(
+            conn,
+            dataset_id=meta.id,
+            config=atual.config,
+            config_version_id=atual.id,
+            dataset_hash=fonte_hash,
+            build_do_backend=_build(),
+            nova_execucao=pedido.nova_execucao,
+        )
+        if estado["selado"]:
+            return {"escopo": "a1a", **estado}
+        if pedido.selar:
+            certificado = parcelado.selar(
+                conn, execucao_id=estado["execucao_id"], config=atual.config
+            )
+            return {
+                "escopo": "a1a",
+                "execucao_id": certificado.execucao_id,
+                "alvo_de_certificacao_hash": certificado.alvo_hash,
+                "passa": certificado.passa,
+                "manifesto": certificado.manifesto,
+                **{
+                    k: v
+                    for k, v in parcelado.estado(conn, certificado.execucao_id).items()
+                    if k not in ("execucao_id", "alvo_de_certificacao_hash")
+                },
+            }
+        if estado["proxima"] is None:
+            return {
+                "escopo": "a1a",
+                "por_que": (
+                    "nao falta etapa nenhuma: mande `selar: true` para juntar as"
+                    " oito e selar o manifesto"
+                ),
+                **estado,
+            }
+        return {
+            "escopo": "a1a",
+            **parcelado.rodar_etapa(
+                conn, execucao_id=estado["execucao_id"], config=atual.config
+            ),
+        }
+    except (parcelado.EtapaEmAndamento, parcelado.ExecucaoAbortada) as e:
+        # 409, e nao 500: o mecanismo funcionou. Em andamento e "espere";
+        # abortada e "o registro diz por que, e recomecar e decisao sua".
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except suite_mod.CertificacaoRecusada as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:

@@ -13,7 +13,7 @@ nulas — *"o número que prova que ele não passou por ser surdo"*. Essa mediç
 
 | escopo | a pergunta | como é certificado |
 |---|---|---|
-| **a1a** | defeito conhecido é barrado? | 6 controles injetados pelo caminho real, numa **cópia descartável** |
+| **a1a** | defeito conhecido é barrado? | 6 controles injetados pelo caminho real, numa **cópia descartável selada**, em **8 etapas** (OP-1) |
 | **a1b** | e ele não é surdo? | 400 execuções em **8 blocos de 50**, sem cópia: `calibre.rodar` é pura |
 | **a2** | o simulador é honesto? | B1 perde, e perde proporcionalmente ao giro |
 | **a3** | nada vazou? | purga e embargo conferidos nas três janelas |
@@ -44,6 +44,8 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+from ..a1a import catalogo as catalogo_a1a
+
 A1A, A1B, A2, A3, A4 = "a1a", "a1b", "a2", "a3", "a4"
 TODOS = (A1A, A1B, A2, A3, A4)
 
@@ -57,8 +59,43 @@ CERTIFICADO, PENDENTE, FALHOU, INAPLICAVEL = (
 #: manifesto: uma suíte que quebrou no meio não vira documento.
 CASOS_ESPERADOS = {A1A: 6, A1B: 2, A2: 2, A3: 1, A4: 3}
 
-#: Só A1b é parcelado. 8 blocos de 50 = 400, que é o que a D29 fixou.
-BLOCOS = {A1B: 8}
+#: O plano do A1a PARCELADO — OP-1, derivado da MEDIÇÃO, e não de um palpite.
+#:
+#: > *"Primeiro meça quanto tempo cada parte dos 207 segundos consome e derive
+#: > as etapas dessa medição."* — o usuário, 2026-09-10
+#:
+#: Medido em 2026-09-10, cinco rodadas locais sobre 70.080 barras. Produção
+#: mediu 196 a 207 s para o total que aqui deu 101 a 117 s, e a coluna da
+#: direita reescala pela proporção (~1,9x):
+#:
+#: | unidade indivisível | local | parte | em produção |
+#: |---|---|---|---|
+#: | preparo: B2 + B3 + B1 x1000 | 5,3 a 6,5 s (uma de 19,3 s: o B3 fora da curva) | 5% | ~11 s |
+#: | preparo: B4, 16 hipóteses | 26,9 a 28,9 s; **14,3 s** com `temp_store` | 26% | ~53 s; **~27 s** |
+#: | a1a: duplicação disfarçada | 2,2 a 4,5 s | 3% | ~6 s |
+#: | a1a: lucro só sem custos | 65,0 a 67,0 s; 61,9 s com `temp_store` | 64% | **~118 s** |
+#: | a1a: os quatro estruturais | < 0,1 s cada | 0% | — |
+#:
+#: A unidade é o que não se parte sem partir um resultado ao meio: a comparação
+#: de baselines, o braço B4 e cada família. O plano é UMA etapa por unidade, na
+#: ordem em que o caminho de uma vez as roda — e o catálogo gera as seis
+#: últimas, para que uma família nova ganhe etapa sem ninguém lembrar.
+#:
+#: **O limite, medido e declarado.** `lucro_so_sem_custos` é 94% `executor
+#: .rodar` sobre 1.366 idas e voltas, e 72% `saldo_da_conta`: o saldo é sempre
+#: DERIVADO dos lançamentos (regra 16), então cada compra agrega o run inteiro
+#: e o run custa O(n²). Índice de cobertura comprou 1,2x; `mmap` e `cache`,
+#: nada; `temp_store`, 1,08x aqui. A etapa fica ISOLADA, e não mais curta — e
+#: continua acima dos 60 s do proxy do painel. O que o desenho garante é que
+#: isso não perde nada: a etapa conclui no backend, a trava a marca em
+#: andamento, e o pedido repetido não roda coisa alguma.
+PLANO_A1A: tuple[str, ...] = ("preparo.baselines", "preparo.b4") + tuple(
+    f"a1a.{familia.chave}" for familia in catalogo_a1a.FAMILIAS
+)
+
+#: Os escopos parcelados, e em quantos pedaços. A1b: 8 blocos de 50 = 400, que
+#: é o que a D29 fixou. A1a: uma etapa por unidade do plano acima.
+BLOCOS = {A1A: len(PLANO_A1A), A1B: 8}
 POR_BLOCO = 50
 
 PERGUNTA = {

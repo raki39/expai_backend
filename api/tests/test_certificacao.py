@@ -130,20 +130,24 @@ def test_um_controle_PROMOVIDO_recusa_o_certificado(conn, cenario, monkeypatch):
     from app.a1a import braco as a1a_braco
     from app.certificacao import suite
 
-    real = a1a_braco.rodar
+    from app.a1a import catalogo
 
-    def com_defeito(*args, **kwargs):
-        r = real(*args, **kwargs)
-        # Promove o primeiro controle - exatamente o que §14.4 diz que reprova.
+    # `rodar_familia`, e nao `rodar`: desde a OP-1 o a1a e certificado em
+    # etapas, e cada familia passa por aqui. Plantar o veneno no laco antigo
+    # deixava este teste VAZIO - a certificacao nunca o lia, e o teste falhou
+    # por nao conseguir plantar o defeito, que e exatamente como ele deve
+    # falhar.
+    real = a1a_braco.rodar_familia
+    primeira = catalogo.FAMILIAS[0].chave
+
+    def com_defeito(conn_, familia, **kwargs):
         import dataclasses
 
-        envenenado = [
-            dataclasses.replace(c, promovido=(i == 0))
-            for i, c in enumerate(r.controles)
-        ]
-        return dataclasses.replace(r, controles=envenenado)
+        r = real(conn_, familia, **kwargs)
+        # Promove o primeiro controle - exatamente o que o 14.4 diz que reprova.
+        return dataclasses.replace(r, promovido=(familia.chave == primeira))
 
-    monkeypatch.setattr(a1a_braco, "rodar", com_defeito)
+    monkeypatch.setattr(a1a_braco, "rodar_familia", com_defeito)
 
     antes = _foto(conn)
     with pytest.raises(suite.CertificacaoRecusada) as erro:
@@ -151,12 +155,20 @@ def test_um_controle_PROMOVIDO_recusa_o_certificado(conn, cenario, monkeypatch):
     assert "PROMOVIDO" in str(erro.value)
     assert "tolerancia zero" in str(erro.value) or "reprova a fase" in str(erro.value)
 
-    # E NADA foi gravado: nem execucao, nem caso, nem manifesto.
+    # O experimento: intocado.
     assert _foto(conn) == antes
-    for tabela in ("certificacao_execucao", "certificacao_caso",
-                   "certificacao_manifesto"):
+    # Nenhum caso e nenhum manifesto - um certificado recusado nao existe.
+    for tabela in ("certificacao_caso", "certificacao_manifesto"):
         n = conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0]
         assert n == 0, f"{tabela} recebeu linha de uma certificacao recusada"
+    # E a execucao fica REGISTRADA como abortada, com o motivo. Antes da OP-1
+    # ela nem nascia; agora nasce antes da primeira etapa, e o fim dela e um
+    # ABORTO explicito - apagar a tentativa seria o descarte de tentativa
+    # fracassada que a secao 8.6 chama de produtor de falsas descobertas.
+    motivos = [
+        l[0] for l in conn.execute("SELECT motivo FROM certificacao_aborto")
+    ]
+    assert len(motivos) == 1 and "PROMOVIDO" in motivos[0]
 
 
 def test_o_banco_recusa_gravar_caso_promovido(conn):
@@ -282,12 +294,28 @@ def test_custo_operacional_nao_e_credito(conn, cenario):
     assert custo["bytes_da_copia"] > 0
     assert custo["micros_para_copiar"] > 0
     assert "credito experimental" in custo["o_que_isso_NAO_e"]
-    # E ele mora em coluna propria, e nao em `test_credit_entry`.
-    linha = conn.execute(
-        "SELECT micros_para_copiar, bytes_da_copia FROM certificacao_execucao"
-        " WHERE id = ?", (cert.execucao_id,)
+    # E ele mora em coluna propria, e nao em test_credit_entry. No a1a
+    # parcelado (OP-1) as colunas sao as de onde cada custo NASCE: a copia
+    # guarda o custo de copiar, cada etapa o seu tempo, e o descarte os bytes
+    # que a copia tinha quando foi apagada. A linha da execucao nasce antes da
+    # copia, e e imutavel - la os tres ficam em zero.
+    eid = cert.execucao_id
+    copia = conn.execute(
+        "SELECT micros_para_copiar FROM certificacao_copia WHERE execucao_id = ?",
+        (eid,),
     ).fetchone()
-    assert int(linha["bytes_da_copia"]) == custo["bytes_da_copia"]
+    micros_das_etapas = conn.execute(
+        "SELECT SUM(micros) FROM certificacao_bloco WHERE execucao_id = ?",
+        (eid,),
+    ).fetchone()[0]
+    descarte = conn.execute(
+        "SELECT bytes_no_descarte FROM certificacao_copia_descarte"
+        " WHERE execucao_id = ?",
+        (eid,),
+    ).fetchone()
+    assert int(copia["micros_para_copiar"]) == custo["micros_para_copiar"]
+    assert int(micros_das_etapas) == custo["micros_da_suite"]
+    assert int(descarte["bytes_no_descarte"]) == custo["bytes_da_copia"]
 
 
 # ---------------------------------------------------------------------------
