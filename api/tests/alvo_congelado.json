@@ -1,8 +1,7 @@
 {
   "politica_canonica": "canonico@1",
   "implementacao_hash": "ed239872e6ae9bdb",
-  "alvo_em_producao": null,
-  "alvo_em_producao_pendente": "preenchido depois da recertificacao dos cinco escopos em producao, com o alvo que eles certificarem. Ate la, o fechamento congelado e o do codigo; o certificado dele ainda nao existe",
+  "alvo_em_producao": "1b4d15d82414c81cec6d12c917b44ec821d7b92f62299c18a65f839833bf920e",
   "alvo_anterior": {
     "alvo": "c36ff72e2fa3669206ddc052c6a641d02937538a80879313694d7cb763db257c",
     "implementacao_hash_lf": "8bfbef7e1914003a",
@@ -80,5 +79,7 @@
     "app.validador.estados": "c9af9416fef92544",
     "app.validador.lote": "5081986afdf313cc",
     "app.validador.promocao": "700e9197c953c8c5"
-  }
+  },
+  "implementacao_hash_em_producao": "ed239872e6ae9bdb",
+  "conferido": "o hash canonico da implementacao calculado no Windows e o reportado pelo container Linux sao o MESMO numero - a OP-2 funcionando entre maquinas"
 }
