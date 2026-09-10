@@ -16,6 +16,7 @@ from ...relatorio import auditoria as relatorio_auditoria
 from ...relatorio import portao_a as relatorio_portao_a
 from ...relatorio import monitoramento as relatorio_monitoramento
 from ...relatorio import viabilidade as relatorio_viabilidade
+from ...relatorio import checkpoint as relatorio_checkpoint
 from ...relatorio import fase_0c as relatorio_fase_0c
 from ...hipotese import dimensionamento
 from ...relatorio import quarentena as relatorio_quarentena
@@ -138,6 +139,24 @@ def viabilidade(request: Request) -> dict[str, Any]:
     porque ele era implicito.
     """
     return relatorio_viabilidade.montar(
+        _conn(request), potencia_ppm=dimensionamento.POTENCIA_ALVO_PPM
+    )
+
+
+@router.get("/checkpoint")
+def checkpoint(request: Request) -> dict[str, Any]:
+    """O checkpoint AUDITAVEL: alvo, manifestos, contadores, integridade, commit.
+
+    Um documento so, com a PROCEDENCIA de cada numero ao lado dele - de qual
+    `config_version`, sob qual alvo, com qual manifesto. E com o hash do
+    proprio conteudo, calculado sobre serializacao deterministica **menos**
+    `gerado_em`: dois checkpoints do mesmo estado tem o mesmo hash, e e isso
+    que permite compara-los.
+
+    NAO e backup e NAO e fonte de verdade. Se divergir do banco, o banco esta
+    certo e o checkpoint esta velho.
+    """
+    return relatorio_checkpoint.montar(
         _conn(request), potencia_ppm=dimensionamento.POTENCIA_ALVO_PPM
     )
 
@@ -496,6 +515,9 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # rodou - progresso, e nao veredito.
         ("certificacao_a1b", "/api/certificacao/a1b",
          lambda: a1b_estado_certificacao(request)),
+        # O checkpoint NAO entra no export, e o motivo esta em
+        # FORA_DO_EXPORT: ele CONTEM o export inteiro mais o resto, entao
+        # aninha-lo faria o documento carregar duas copias de si mesmo.
         ("a1b", "/api/a1b", lambda: a1b_estado(request)),
         # As quatro partes da 0B. Faltavam: este export foi escrito no
         # incremento 7 com uma tupla literal, e parou de descrever o sistema

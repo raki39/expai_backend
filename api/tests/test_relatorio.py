@@ -955,6 +955,11 @@ def test_o_export_reune_as_telas_e_baixa_como_arquivo(
 FORA_DO_EXPORT = {
     # Baixar o export nao inclui o export.
     "/api/relatorio/exportar": "e o proprio pacote",
+    # O checkpoint CONTEM o que o export carrega, mais alvo, manifestos e
+    # contadores. Aninha-lo faria o documento carregar duas copias de si
+    # mesmo - e a de dentro ficaria velha na primeira vez que alguem
+    # acrescentasse um bloco so na de fora.
+    "/api/relatorio/checkpoint": "contem o export, e nao o contrario",
     # Renderizacao do que `relatorio` ja carrega, em texto.
     "/api/relatorio/markdown": "mesma fonte que a parte `relatorio`",
     # Parametrizadas por id: sem id nao ha o que exportar, e exportar TODAS

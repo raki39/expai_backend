@@ -21,6 +21,42 @@ import sqlite3
 
 import pytest
 
+
+@pytest.fixture
+def cenario_com_lote(conn):
+    """Baselines, B4 e A1a: um lote de verdade sob a config 1.
+
+    Sem ele, `_as_duas_evidencias` sai pelo ramo de `lote_id is None` e o teste
+    passaria sem exercitar o caminho — que é como um `config_service` ausente
+    do import sobreviveu à suíte inteira.
+    """
+    from tests.test_portao_a import cenario as _cenario  # noqa: F401
+
+    from app.a1a import braco as a1a_braco
+
+    dataset_id, cfg = _fazer_cenario(conn)
+    a1a_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    return dataset_id, cfg
+
+
+def _fazer_cenario(conn):
+    from app.b4 import braco as b4_braco
+    from app.config.schema import ExperimentConfig
+    from app.maos_rapidas import baselines
+    from tests.test_maos_rapidas import criar_dataset, precos_passeio
+
+    dataset_id = criar_dataset(conn, precos_passeio(3_000))
+    cfg = ExperimentConfig()
+    baselines.rodar_comparacao(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1,
+        semente=cfg.default_seed,
+    )
+    b4_braco.rodar(conn, dataset_id=dataset_id, config=cfg, config_version_id=1)
+    return dataset_id, cfg
+
+
 from app.aovivo import bbo
 from app.hipotese import dimensionamento as dim
 from app.relatorio import fase_0c
@@ -489,3 +525,175 @@ def test_a_integridade_do_relatorio_e_a_da_rota_sao_A_MESMA(client):
         if "gerado" in campo or "em" == campo:
             continue
         assert a[campo] == b[campo], f"integridade divergiu em {campo}"
+
+
+# ---------------------------------------------------------------------------
+# AS DUAS EVIDÊNCIAS, e nenhuma substitui a outra
+# ---------------------------------------------------------------------------
+
+
+def test_as_duas_evidencias_sao_publicadas_SEPARADAS(conn, cenario_com_lote):
+    """Lote histórico e laboratório vigente, cada um com o seu sujeito.
+
+    Juntá-las já foi erro deste relatório uma vez. O lote responde *"o Portão A
+    passou sobre a evidência que existe?"* e tem como sujeito o **experimento**;
+    a certificação responde *"o laboratório de hoje ainda rejeita defeito?"* e
+    tem como sujeito o **código**.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import fase_0c
+
+    r = fase_0c.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    ev = r["evidencias"]
+
+    hist = ev["evidencia_historica_do_experimento"]
+    vig = ev["laboratorio_vigente_certificado"]
+    assert hist["config_version_id"] is not None, (
+        "o caminho do lote nao foi exercitado: sem lote este teste e vacuo"
+    )
+    assert hist["hipoteses_no_lote"] > 0
+    assert "passa" in hist, "o Portao A do lote nao foi calculado"
+    assert "condicoes" in hist
+    assert "EXPERIMENTO" in ev["nenhuma_substitui_a_outra"]
+    assert "CODIGO" in ev["nenhuma_substitui_a_outra"]
+
+    # E o laboratorio publica os CINCO escopos, com o alvo ao lado.
+    assert set(vig["escopos"]) == {"a1a", "a1b", "a2", "a3", "a4"}
+    assert len(vig["alvo_de_certificacao_hash"]) == 64
+    assert "implementacao" in vig["componentes"]
+
+    # As duas juntas NAO respondem a 0C.
+    assert "D38" in ev["e_o_que_as_duas_JUNTAS_nao_dizem"]
+
+
+def test_o_piloto_publica_as_SETE_metricas(conn, cenario_com_lote):
+    """As que o usuário pediu, e a estimativa diz que é operacional."""
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import fase_0c
+
+    r = fase_0c.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    p = r["piloto"]
+    if not p.get("disponivel"):
+        # Sem BBO no cenario: o bloco diz isso, e ainda assim declara o alvo.
+        assert p["observacoes"]["necessarias"] == 1_000
+        return
+    for campo in ("observacoes", "dias", "ultimas_24h", "maior_lacuna",
+                  "estimativa_OPERACIONAL_de_fechamento"):
+        assert campo in p, campo
+    assert p["observacoes"]["necessarias"] == 1_000
+    assert p["dias"]["minimo"] == 14
+    est = p["estimativa_OPERACIONAL_de_fechamento"]
+    assert "NAO e afirmacao sobre calibracao" in est["o_que_isso_NAO_e"]
+    assert "MAIS TARDE" in p["as_duas_travas"]
+
+
+def test_os_regimes_sao_DERIVADOS_e_nada_e_gravado(conn, cenario_com_lote):
+    """Classificar não é calibrar, e o campo diz isso.
+
+    `calibracao_regime` só nasce com a calibração — que não pode acontecer
+    antes de o piloto fechar. Então o regime é derivado do `stream_bar` com o
+    detector congelado da D40, pela janela causal.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import fase_0c
+
+    antes = conn.execute(
+        "SELECT COUNT(*) FROM calibracao_regime"
+    ).fetchone()[0]
+    r = fase_0c.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    reg = r["regimes_observados"]
+
+    assert "ADR 0033" in reg["regime_sem_amostra_fica"]
+    if reg.get("disponivel"):
+        assert "nao e calibracao" in reg["derivado_de"]
+        assert reg["cortes_congelados_mili_bps"]["inferior"] == 19_300
+        assert reg["cortes_congelados_mili_bps"]["superior"] == 25_300
+    # E NADA foi gravado.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM calibracao_regime"
+    ).fetchone()[0] == antes
+
+
+# ---------------------------------------------------------------------------
+# O CHECKPOINT auditável
+# ---------------------------------------------------------------------------
+
+
+def test_o_checkpoint_carrega_os_SETE_blocos(conn, cenario_com_lote):
+    """Alvo, manifestos, componentes, contadores, integridade, versões, commit."""
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import checkpoint
+
+    c = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    for bloco in (
+        "alvo_de_certificacao", "manifestos", "contadores", "integridade",
+        "versoes", "lote_historico", "piloto", "fase_0c",
+    ):
+        assert bloco in c, bloco
+    assert "commit" in c["versoes"]
+    assert c["versoes"]["schema"] >= 31
+    # Os componentes do hash vao publicados, e nao so o hash.
+    assert "componentes" in c["alvo_de_certificacao"]
+    assert set(c["alvo_de_certificacao"]["componentes"]) == {
+        "identidade_executavel", "schema", "metodologia_estatistica",
+        "suite_de_controles", "fonte_de_dados", "implementacao",
+        "ambiente_de_execucao",
+    }
+
+
+def test_o_hash_do_checkpoint_NAO_muda_com_o_relogio(conn, cenario_com_lote):
+    """Dois checkpoints do mesmo estado têm o mesmo hash. É o que permite comparar.
+
+    Se `gerado_em` entrasse na conta, cada leitura daria um hash novo e o campo
+    não serviria para nada — seria um identificador de requisição com nome de
+    identificador de estado.
+    """
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import checkpoint
+
+    a = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    b = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    assert a["checkpoint_hash"] == b["checkpoint_hash"]
+    assert len(a["checkpoint_hash"]) == 64
+    cobre = a["o_que_o_hash_cobre"]
+    # Lista POSITIVA: um bloco novo fica FORA ate alguem decidir inclui-lo.
+    assert "contadores" in cobre["blocos"]
+    assert "integridade" in cobre["blocos"]
+    assert "alvo_de_certificacao" in cobre["blocos"]
+    # E o que fica de fora diz POR QUE - o piloto depende do relogio de leitura.
+    assert "piloto" in cobre["o_que_fica_de_FORA_e_por_que"]
+    assert "relogio" in cobre["o_que_fica_de_FORA_e_por_que"]["piloto"]
+
+
+def test_o_hash_do_checkpoint_MUDA_quando_o_estado_muda(conn, cenario_com_lote):
+    """Não-vacuidade: um hash que nunca muda não vigia nada."""
+    from app.a1a import braco as a1a_braco
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import checkpoint
+
+    antes = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    dataset_id, cfg = cenario_com_lote
+    a1a_braco.rodar(
+        conn, dataset_id=dataset_id, config=cfg, config_version_id=1
+    )
+    depois = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    assert depois["checkpoint_hash"] != antes["checkpoint_hash"], (
+        "seis hipoteses novas nao moveram o hash do checkpoint: ele nao esta"
+        " cobrindo os contadores"
+    )
+    assert (
+        depois["contadores"]["total"] > antes["contadores"]["total"]
+    )
+
+
+def test_o_checkpoint_diz_por_que_o_commit_pode_faltar(conn, cenario_com_lote):
+    """Na imagem não há `.git`, e `None` sem explicação parece descuido."""
+    from app.hipotese import dimensionamento as d
+    from app.relatorio import checkpoint
+
+    c = checkpoint.montar(conn, potencia_ppm=d.POTENCIA_ALVO_PPM)
+    commit = c["versoes"]["commit"]
+    if commit["sha"] is None:
+        assert "nao contem `.git`" in commit["por_que_pode_faltar"]
+    else:
+        assert commit["por_que_pode_faltar"] is None

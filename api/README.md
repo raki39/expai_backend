@@ -184,6 +184,7 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | GET | `/api/relatorio/quarentena` | **nenhuma candidata admitida**, o motivo de cada exclusão e que o B3 foi só controle negativo (ADR 0034). A ausência é DECLARADA, não omitida |
 | GET | `/api/relatorio/monitoramento` | **o monitoramento contínuo de §8.8**: CUSUM unilateral inferior, dois limiares congelados, e a ausência de sujeito na 0C — nenhum conhecimento em uso (ADR 0035) |
 | GET | `/api/relatorio/viabilidade` | **a capacidade experimental do desenho** (D48): `n_minimo` contra o limiar da primeira rejeição do BY com potência-alvo de 80%, o menor efeito detectável por horizonte, e o déficit — variância e dependência **medidas** no in-sample |
+| GET | `/api/relatorio/checkpoint` | o **checkpoint auditável**: alvo, manifestos, componentes do hash, contadores, integridade, versões e commit — com o hash do próprio conteúdo sobre uma lista **positiva** de blocos |
 | GET | `/api/relatorio/fase-0c` | **o relatório da fase 0C** (incremento 21). Nasce **provisório**: gera tudo e não chama de definitivo enquanto três gates de evidência não fecham — piloto real, calibração **e** revalidação, e os critérios 5/6/7 do incremento 18 |
 | GET | `/api/relatorio/portao-b` | **o Portão B (§14.4): existe candidata digna de auditoria?** — só avaliado se o A passar |
 | POST | `/api/relatorio/portao-b` | roda o walk-forward das candidatas (§14.4 B5) — CPU e runs, sem dinheiro |

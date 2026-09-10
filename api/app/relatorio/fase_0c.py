@@ -51,9 +51,11 @@ from typing import Any
 from .. import fase as fase_mod
 from ..aovivo import bbo
 from ..calibracao import piloto
+from ..config import service as config_service
 from ..dataset import loader
 from ..hipotese import dimensionamento
 from . import integridade as relatorio_integridade
+from . import piloto_estado
 from . import viabilidade as relatorio_viabilidade
 
 #: O estado do relatorio enquanto a evidencia nao chega. Nome proprio, e nao um
@@ -223,6 +225,111 @@ def _gate_incremento_18(conn: sqlite3.Connection) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _as_duas_evidencias(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Lote histórico e laboratório vigente. **Nenhuma substitui a outra.**
+
+    > *"lote_certificado/cv6: evidência histórica do experimento;
+    > certificacao_da_vigente/cv9: laboratório atual certificado; nenhuma das
+    > duas substitui a outra."* — o usuário, 2026-09-10
+
+    São perguntas diferentes, e juntá-las já foi erro deste relatório uma vez:
+
+    | | pergunta | sujeito |
+    |---|---|---|
+    | **lote** | o Portão A passou sobre a evidência que existe? | o **experimento** — 23 hipóteses sob a `cv6` |
+    | **certificação** | o laboratório de hoje ainda rejeita defeito? | o **código** — 69 módulos sob o alvo da `cv9` |
+
+    Um pode passar sem o outro, e os dois passam hoje por motivos diferentes.
+    Se um dia o lote reprovar, isso não desfaz a certificação do laboratório —
+    e vice-versa. Publicá-los sob um campo só faria a resposta de um responder
+    pelo outro.
+    """
+    from ..certificacao import alvo as alvo_mod
+    from ..certificacao import escopos as escopos_mod
+    from ..dataset import loader as dataset_loader
+    from ..validador import lote_congelado
+
+    from . import portao_a as relatorio_portao_a
+
+    # ---------------------------------------------- 1. a evidencia HISTORICA
+    lote_id = lote_congelado.do_lote(conn)
+    historico: dict[str, Any] = {
+        "o_que_e": (
+            "o Portao A sobre a EVIDENCIA da 0B: os controles, os baselines e"
+            " as 400 execucoes que de fato rodaram, sob a config em que"
+            " rodaram"
+        ),
+        "config_version_id": lote_id,
+        "hipoteses_no_lote": (
+            lote_congelado.quantas_no_lote(conn, lote_id) if lote_id else 0
+        ),
+    }
+    if lote_id is not None:
+        lote_cfg = config_service.versao_por_id(conn, lote_id)
+        vigente = config_service.versao_atual(conn)
+        meta = dataset_loader.dataset_vigente(conn)
+        if lote_cfg is not None:
+            bloco = relatorio_portao_a.montar(
+                conn,
+                config_version_id=lote_id,
+                config=lote_cfg.config,
+                dataset_id=meta.id if meta else None,
+            )
+            historico["passa"] = bloco["passa"]
+            historico["condicoes"] = bloco["condicoes"]
+        if vigente is not None:
+            historico["relacao_com_a_vigente"] = lote_congelado.equivalencia(
+                conn, lote_id=lote_id, vigente_id=vigente.id
+            )
+
+    # ------------------------------------------- 2. o LABORATORIO de hoje
+    vigente_bloco: dict[str, Any]
+    try:
+        meta = dataset_loader.dataset_vigente(conn)
+        o_alvo = alvo_mod.montar(
+            conn,
+            dataset_hash=getattr(meta, "sha256", None) if meta else None,
+        )
+        composicao = escopos_mod.composicao(
+            conn, o_alvo["alvo_de_certificacao_hash"]
+        )
+        vigente_bloco = {
+            "o_que_e": (
+                "os CINCO escopos do Portao A recertificados sobre o alvo do"
+                " laboratorio de hoje - identidade executavel, schema,"
+                " metodologia, suite, fonte de dados, implementacao e ambiente"
+            ),
+            "alvo_de_certificacao_hash": o_alvo["alvo_de_certificacao_hash"],
+            "componentes": o_alvo["componentes"],
+            "passa": composicao["passa"],
+            "escopos": composicao["escopos"],
+            "certificados": composicao["certificados"],
+            "pendentes": composicao["pendentes"],
+            "falhou": composicao["falhou"],
+            "por_que_nao_basta_o_a1a": composicao["por_que_nao_basta_o_a1a"],
+        }
+    except ValueError as erro:
+        vigente_bloco = {"disponivel": False, "por_que": str(erro)}
+
+    return {
+        "evidencia_historica_do_experimento": historico,
+        "laboratorio_vigente_certificado": vigente_bloco,
+        "nenhuma_substitui_a_outra": (
+            "o lote responde 'o Portao A passou sobre a evidencia que existe?'"
+            " e tem como sujeito o EXPERIMENTO; a certificacao responde 'o"
+            " laboratorio de hoje ainda rejeita defeito?' e tem como sujeito o"
+            " CODIGO. Se um dia o lote reprovar, isso nao desfaz a"
+            " certificacao do laboratorio - e vice-versa"
+        ),
+        "e_o_que_as_duas_JUNTAS_nao_dizem": (
+            "nada sobre a 0C. A pergunta da fase e §14.5 - se uma candidata"
+            " sobrevive a dados que nao existiam quando foi registrada -, e a"
+            " D38 decidiu que NENHUMA entra no forward. As duas evidencias"
+            " dizem que a maquinaria funciona; a fase pergunta outra coisa"
+        ),
+    }
+
+
 def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
     """O relatorio da 0C, e ele diz que e provisorio enquanto for.
 
@@ -298,6 +405,11 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         # INTEIRAS: um relatorio de fase que afirma sobre resultado sem dizer
         # se o substrato que os produziu continua de pe pede confianca no lugar
         # de prova.
+        # AS DUAS EVIDENCIAS, separadas. Ver `_as_duas_evidencias`.
+        "evidencias": _as_duas_evidencias(conn),
+        # O PILOTO, com as metricas que o usuario pediu em 2026-09-10.
+        "piloto": piloto_estado.montar(conn),
+        "regimes_observados": piloto_estado.regimes_observados(conn),
         "integridade": relatorio_integridade.montar(conn),
         "dataset": (
             None
