@@ -114,6 +114,56 @@ def _estavel(valor: Any) -> str:
     )
 
 
+def _creditos(conn: sqlite3.Connection) -> dict[str, Any]:
+    """As TRES grandezas de credito, cada uma no seu campo, e o que cada uma e.
+
+    > "Nao deixe 'lancamentos' substituir silenciosamente o antigo contador de
+    > creditos." - o usuario, 2026-09-10
+
+    Foi o que eu fiz no relatorio da janela de manutencao: publiquei 33
+    "lancamentos" na linha onde antes estavam 65 "creditos". Sao grandezas
+    diferentes - um reteste e UMA linha e custa TRES creditos -, e trocar uma
+    pela outra sob o mesmo rotulo e a forma exata do padrao que este projeto
+    conta.
+
+    Derivado de creditos.calibracao, o dono do numero: nenhum SQL novo aqui. A
+    calibracao agrupa test_credit_entry por tipo com COUNT e SUM, e lista uma
+    linha por orcamento - entao as somas abaixo sao exatas, e nao estimativas.
+    Este modulo esta FORA dos 71 do alvo de certificacao, e mexer nele nao
+    invalida os cinco escopos.
+    """
+    from .. import creditos as creditos_mod
+
+    cal = creditos_mod.calibracao(conn)
+    por_tipo = cal.get("por_tipo", [])
+    por_braco = cal.get("por_braco", [])
+    total = sum(int(t["creditos"]) for t in por_tipo)
+    return {
+        "credit_entry_rows": sum(int(t["testes"]) for t in por_tipo),
+        "creditos_consumidos_total": total,
+        "orcamentos_de_credito": len(por_braco),
+        # A conferencia cruzada: o consumido por orcamento soma o total.
+        "consumo_confere_com_os_orcamentos": (
+            sum(int(b["consumido"]) for b in por_braco) == total
+        ),
+        "o_que_cada_um_e": {
+            "credit_entry_rows": (
+                "linhas de test_credit_entry: um TESTE cobrado por linha. NAO e"
+                " quantidade de credito - um reteste e uma linha e custa 3"
+            ),
+            "creditos_consumidos_total": (
+                "a soma dos creditos cobrados, com os pesos de 8.6.1 (in-sample"
+                " 1, reteste 3). E o contador de creditos dos relatorios"
+                " anteriores"
+            ),
+            "orcamentos_de_credito": (
+                "linhas de test_credit_budget: um orcamento concedido por"
+                " (braco, config_version). NAO e saldo nem consumo"
+            ),
+        },
+    }
+
+
 def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
     """O checkpoint inteiro, com o hash do próprio conteúdo no fim."""
     from ..certificacao import alvo as alvo_mod
@@ -201,6 +251,7 @@ def montar(conn: sqlite3.Connection, *, potencia_ppm: int) -> dict[str, Any]:
         # ----------------------------------------------------- contadores
         "contadores": {
             **validador_contador.resumo(conn),
+            "creditos": _creditos(conn),
             "o_que_eles_provam": (
                 "que a certificacao nao tocou o experimento: se algum destes"
                 " tiver andado entre dois checkpoints sem uma hipotese ter"
