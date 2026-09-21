@@ -172,11 +172,30 @@ def derivar(
             })
     maior = max(lacunas, key=lambda x: x["instantes"], default=None)
 
+    # DUAS grandezas, e elas foram confundidas uma vez - o registro de
+    # 2026-09-14 publicou 08:15 e esta rota publicava 08:00, sobre o MESMO
+    # dado. Nenhum estava errado: 08:00 e o instante de GRADE da 1.000-esima
+    # valida, e 08:15 e o fim EXCLUSIVO que a trava de contagem implica,
+    # `t + uma grade`. Publicar so um obriga quem le a saber qual, e foi
+    # exatamente isso que produziu a divergencia. Agora saem os dois, com
+    # nome, e a vizinhanca para conferir a mao.
     milesima = (
         validas[piloto.OBSERVACOES_MINIMAS - 1]["t_grid_ms"]
         if len(validas) >= piloto.OBSERVACOES_MINIMAS
         else None
     )
+    fim_por_observacoes = None if milesima is None else milesima + grade_ms
+    vizinhanca = [
+        {
+            "indice": i + 1,
+            "t_grid_ms": validas[i]["t_grid_ms"],
+            "utc": _iso(validas[i]["t_grid_ms"]),
+        }
+        for i in range(
+            max(0, piloto.OBSERVACOES_MINIMAS - 3),
+            min(len(validas), piloto.OBSERVACOES_MINIMAS + 1),
+        )
+    ]
     dias_x1000 = round((ate_ms_exclusive - de_ms) * 1000 / piloto.MS_POR_DIA)
     travas = {
         "dias": {
@@ -234,6 +253,25 @@ def derivar(
             "por_motivo": dict(sorted(por_motivo.items())),
             "instante_da_milesima_ms": milesima,
             "instante_da_milesima": _iso(milesima) if milesima else None,
+            "fim_pela_trava_de_observacoes_ms": fim_por_observacoes,
+            "fim_pela_trava_de_observacoes": (
+                _iso(fim_por_observacoes) if fim_por_observacoes else None
+            ),
+            "o_que_separa_os_dois": (
+                "UMA GRADE, e nao um erro de barra. `instante_da_milesima` e o"
+                " instante de grade A QUE a 1.000-esima valida pertence;"
+                " `fim_pela_trava_de_observacoes` e `esse instante + uma"
+                " grade`, o fim EXCLUSIVO que a trava 2 do ADR 0027 implica -"
+                " a mesma conta de `piloto.derivar`. Nenhum dos dois e"
+                " instante de disponibilidade: a amostra e capturada DENTRO"
+                " da tolerancia do proprio instante de grade, e nao 15"
+                " minutos depois"
+            ),
+            "vizinhanca_da_milesima": vizinhanca,
+            "o_que_e_a_vizinhanca": (
+                "as validas de indice 998 a 1.001, em ordem, para que a"
+                " 1.000-esima possa ser conferida a mao em vez de aceita"
+            ),
         },
         "lacunas": {
             "quantas": len(lacunas),

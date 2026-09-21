@@ -445,6 +445,90 @@ def test_fechada_por_e_publicado_como_TRAVA_e_nao_como_pessoa(
 # ===========================================================================
 
 
+def test_a_MILESIMA_e_o_FIM_DA_TRAVA_sao_duas_grandezas_e_saem_as_duas(
+    conn: sqlite3.Connection,
+):
+    """A divergencia de 2026-09-21, fixada como teste.
+
+    O registro anterior publicou `16/09 08:15` e esta rota publicava
+    `16/09 08:00`, sobre o mesmo dado. **Nenhum estava errado**, e a diferenca
+    e exatamente UMA GRADE:
+
+    | | o que e |
+    |---|---|
+    | `instante_da_milesima` | o instante de grade A QUE a 1.000-esima pertence |
+    | `fim_pela_trava_de_observacoes` | esse instante **+ uma grade**, EXCLUSIVO |
+
+    Nao e instante de disponibilidade: a amostra e capturada dentro da
+    tolerancia do proprio instante de grade (ADR 0032), e nao 15 minutos
+    depois. Publicar so um obriga quem le a saber qual - e foi isso que
+    produziu a divergencia.
+    """
+    janela_inteira(conn)
+    o = do_registro(conn)["manifesto"]["observacoes"]
+
+    assert o["fim_pela_trava_de_observacoes_ms"] == (
+        o["instante_da_milesima_ms"] + GRADE
+    ), "a diferenca e UMA grade, e nada mais"
+    assert "erro de barra" in o["o_que_separa_os_dois"]
+    assert "disponibilidade" in o["o_que_separa_os_dois"]
+
+
+def test_a_vizinhanca_da_milesima_mostra_998_a_1001_em_ordem(
+    conn: sqlite3.Connection,
+):
+    """Quatro linhas, para conferir a 1.000-esima a mao em vez de aceita."""
+    janela_inteira(conn)
+    o = do_registro(conn)["manifesto"]["observacoes"]
+    v = o["vizinhanca_da_milesima"]
+
+    assert [x["indice"] for x in v] == [998, 999, 1000, 1001]
+    assert [x["t_grid_ms"] for x in v] == sorted(x["t_grid_ms"] for x in v)
+    for a, b in zip(v, v[1:]):
+        assert b["t_grid_ms"] - a["t_grid_ms"] == GRADE, (
+            "consecutivas na janela cheia: sem lacuna entre elas"
+        )
+    milesima = next(x for x in v if x["indice"] == 1000)
+    assert milesima["t_grid_ms"] == o["instante_da_milesima_ms"], (
+        "a vizinhanca e o mesmo numero visto de perto, e nao um segundo calculo"
+    )
+
+
+def test_a_DEFINICAO_e_UNICA_quando_a_trava_de_observacoes_vence(
+    conn: sqlite3.Connection,
+):
+    """O unico ponto em que as duas contas TEM de coincidir, e ele e exercitado.
+
+    Quando a 1.000-esima valida cai DEPOIS dos 14 dias, quem vence e a trava
+    de contagem - e ai `piloto.derivar` fecha a janela exatamente em
+    `fim_pela_trava_de_observacoes`. Se as duas implementacoes discordassem,
+    e aqui que apareceria; no caso real (calendario vencendo) o numero da
+    trava de contagem nao aparece no fim da janela, e uma divergencia ficaria
+    invisivel - que foi, de novo, o que aconteceu.
+    """
+    # Uma valida a cada quatro instantes: 1.000 validas exigem ~4.000
+    # instantes, muito depois dos 1.344 dos 14 dias.
+    total = 4 * piloto.OBSERVACOES_MINIMAS + 40
+    bbo.receber(conn, SERIE, CONTRATO, [
+        amostra(i) if i % 4 == 0 else ausente(i) for i in range(total)
+    ])
+
+    prevista = piloto.derivar(conn, SERIE, CONTRATO)
+    assert prevista.fechada_por == "observacoes", "o cenario tem de ser este"
+
+    m = derivar_do_registro(conn, prevista)
+    assert m["observacoes"]["fim_pela_trava_de_observacoes_ms"] == (
+        prevista.ate_ms_exclusive
+    ), "duas implementacoes, um numero"
+
+
+def derivar_do_registro(conn: sqlite3.Connection, prevista) -> dict:
+    return manifesto.derivar(
+        conn, serie=SERIE, contrato=CONTRATO, de_ms=prevista.de_ms,
+        ate_ms_exclusive=prevista.ate_ms_exclusive, grade_ms=GRADE,
+    )
+
+
 def test_o_manifesto_publica_o_instante_da_MILESIMA(conn: sqlite3.Connection):
     janela_inteira(conn)
     m = fechar(conn)["manifesto"]
