@@ -19,7 +19,9 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ...aovivo import bbo
-from ...calibracao import ajuste, bootstrap, observacao, piloto, shadow
+from ...calibracao import (
+    ajuste, bootstrap, manifesto, observacao, piloto, shadow,
+)
 from ...dataset import loader as dataset_loader
 from ...maos_rapidas import baselines
 from ...config import service as config_service
@@ -387,4 +389,115 @@ def revalidar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
     except (ajuste.RevalidacaoNaoSelada, ajuste.NadaACalibrar) as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+
+
+# ===========================================================================
+# O FECHAMENTO da janela do piloto, e a leitura dele
+#
+# `piloto.fechar` existia com teste desde o incremento 18 e **sem caminho em
+# producao**: nenhuma rota o chamava. Sem ele a janela nunca era gravada, e
+# `estimar` recusava para sempre com `PilotoAberto` - uma funcao sem caminho e
+# a forma do defeito que este projeto ja registrou varias vezes.
+#
+# O que e GRAVADO e uma linha; o manifesto e DERIVADO. Ver
+# `app/calibracao/manifesto.py`.
+# ===========================================================================
+
+
+class PedidoDeFechamentoDoPiloto(BaseModel):
+    """Qual serie, e **nada mais**. Sem data, sem minimo, sem fronteira.
+
+    A ausencia e a garantia. Com `extra="forbid"`, um corpo que tente mandar
+    `de_ms`, `ate_ms_exclusive` ou um minimo proprio e recusado pelo MODELO, e
+    nao por uma checagem que alguem possa remover depois. A janela sai do
+    registro: primeira observacao valida mais as duas travas do ADR 0027.
+
+    **E nao ha `author`, de proposito.** As rotas irmas levam um - `revalidar`
+    grava o dela como autor da `config_version`, que e uma escolha de alguem.
+    Aqui nao ha escolha a atribuir, e nao existe coluna onde guardar um nome:
+    `janela_piloto.fechada_por` guarda a TRAVA que venceu. Aceitar um `author`
+    que so aparece numa linha de log seria um campo com cara de registro e sem
+    registro - e ele ficaria colado, na leitura, no campo que significa outra
+    coisa.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    venue: str = "binance"
+    symbol: str = "BTCUSDT"
+    contrato: str = CONTRATO_PADRAO
+
+
+def _serie_bbo(venue: str, symbol: str) -> bbo.Serie:
+    return bbo.Serie(
+        venue=venue, symbol=symbol, price_scale_exp=0, volume_scale_exp=0
+    )
+
+
+@router.get("/piloto")
+def piloto_janela(
+    request: Request,
+    venue: str = "binance",
+    symbol: str = "BTCUSDT",
+    contrato: str = CONTRATO_PADRAO,
+) -> dict[str, Any]:
+    """A janela do piloto e o manifesto derivado dela. **Nao escreve nada.**
+
+    Com a janela fechada, devolve o manifesto do intervalo fechado; sem ela,
+    devolve a PREVIA - o manifesto que o fechamento gravaria - dizendo, no
+    proprio corpo, que previa nao e fechamento.
+    """
+    conn = _conn(request)
+    try:
+        return manifesto.do_registro(
+            conn, serie=_serie_bbo(venue, symbol), contrato=contrato
+        )
+    except manifesto.ManifestoDivergente as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        ) from e
+
+
+@router.post("/piloto/fechar", status_code=status.HTTP_200_OK)
+def piloto_fechar(
+    request: Request, pedido: PedidoDeFechamentoDoPiloto
+) -> dict[str, Any]:
+    """Grava a linha de fechamento. Repetir devolve a que existe, SEM escrever.
+
+    **200, e nao 201, de proposito:** a segunda chamada nao cria nada, e um 201
+    fixo afirmaria criacao toda vez. Quem diz qual foi o caso e `criado_agora`.
+
+    O corpo devolvido e montado pela MESMA funcao que serve o `GET`, entao o
+    manifesto sai byte a byte igual nos dois - por construcao, e nao por
+    disciplina.
+
+    **Nao dispara estimativa, calibracao nem revalidacao.**
+    """
+    conn = _conn(request)
+    log.info(
+        "piloto.fechamento.pedido",
+        extra={"contrato": pedido.contrato, "symbol": pedido.symbol},
+    )
+    try:
+        return manifesto.fechar(
+            conn,
+            serie=_serie_bbo(pedido.venue, pedido.symbol),
+            contrato=pedido.contrato,
+        )
+    except (piloto.PilotoNaoFechaAinda, manifesto.GradeIncompleta) as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except manifesto.ManifestoDivergente as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e

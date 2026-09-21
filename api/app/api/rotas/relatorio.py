@@ -57,6 +57,7 @@ from .agente import agente_estado
 from .b4 import b4_estado
 from .baselines import comparacao_atual, curva
 from .calibracao import estado as calibracao_estado
+from .calibracao import piloto_janela as calibracao_piloto
 from .config import config_atual, config_historico
 from .aovivo import (
     estado as aovivo_estado,
@@ -461,6 +462,13 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # export com o resultado e sem a calibracao mostraria o numero sem a
         # regua que o sustenta.
         ("calibracao", "/api/calibracao", lambda: calibracao_estado(request)),
+        # `piloto` entra pelo mesmo argumento, um degrau antes: a janela
+        # fechada e a REGUA de todo numero de calibracao - o periodo que
+        # produziu `p10(E2)`. E o manifesto dela e DERIVADO da fonte
+        # imutavel, entao o pacote carrega a procedencia junto com o
+        # numero, e nao a promessa de que ela existe em algum lugar.
+        ("piloto", "/api/calibracao/piloto",
+         lambda: calibracao_piloto(request)),
         # `quarentena` ENTRA porque a garantia 5 do ADR 0034 e sobre RELATO:
         # uma ausencia que ninguem declara vira silencio, e silencio e lido
         # como esquecimento. Um export sem ela mostraria a fase sem a decisao
