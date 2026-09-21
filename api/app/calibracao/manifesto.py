@@ -42,7 +42,6 @@ import sqlite3
 from datetime import datetime, timezone
 
 from ..aovivo.bbo import Serie
-from ..store import bloco_atomico
 from . import piloto
 
 #: A versao do FORMATO entra no hash. Sem ela, mudar a serializacao um dia
@@ -376,10 +375,31 @@ def do_registro(
         )
         return {
             "fechado": False,
+            # Os SETE campos que o fechamento gravaria, e nao seis. A previa
+            # dizia "descreve a janela que o fechamento gravaria" e omitia
+            # `fechada_por` - a trava que vence -, que e justamente o campo
+            # que nao da para ler do manifesto. Deixa-lo de fora obrigaria
+            # quem le a DEDUZIR a trava de `dias_corridos_x1000`, e uma
+            # deducao correta hoje e a forma como um numero para de descrever.
+            "seria_gravado": {
+                "de_ms": prevista.de_ms,
+                "ate_ms_exclusive": prevista.ate_ms_exclusive,
+                "observacoes_validas": prevista.observacoes_validas,
+                "observacoes_totais": prevista.observacoes_totais,
+                "dias_corridos_x1000": prevista.dias_corridos_x1000,
+                "fechada_por": prevista.fechada_por,
+                "fechada_por_e": (
+                "a TRAVA que venceu - `dias` ou `observacoes` -, e nunca uma"
+                " pessoa. O fechamento nao tem autor porque nao tem escolha:"
+                " a janela sai do registro, e o pedido nao carrega decisao"
+                " nenhuma para atribuir a alguem"
+                ),
+            },
             "manifesto": previa,
             "por_que": (
                 "a janela ainda NAO foi gravada: este manifesto descreve a"
-                " janela que o fechamento gravaria, e nao um fechamento"
+                " janela que o fechamento gravaria, e `seria_gravado` traz os"
+                " sete campos da linha - mas nada foi escrito"
             ),
         }
 
@@ -426,24 +446,67 @@ def do_registro(
 
 
 def fechar(conn: sqlite3.Connection, *, serie: Serie, contrato: str) -> dict:
-    """Grava a linha de fechamento, e so ela. Idempotente.
+    """Grava a linha de fechamento, e so ela. Idempotente, e seguro na corrida.
 
-    A ordem importa e esta aqui: DENTRO de uma transacao, as duas travas sao
-    reconferidas sobre a janela derivada, a grade e exigida completa, a linha e
-    gravada, e entao o gravado e conferido contra o derivado. Qualquer recusa
-    desfaz tudo - e, como a escrita e UMA, nao existe fechamento pela metade
-    para alguem ler.
+    ## `BEGIN IMMEDIATE`, e por que nao `bloco_atomico` aqui
+
+    `bloco_atomico` abre um SAVEPOINT, e um SAVEPOINT em autocommit inicia uma
+    transacao **DEFERRED**: o lock de escrita so e tomado no `INSERT`. Duas
+    chamadas concorrentes entao leem "nao ha linha", as duas seguem, e a
+    segunda descobre tarde demais - com `IntegrityError` se chegar depois do
+    commit da primeira, ou com `database is locked` se chegar durante, porque
+    o SQLite **nao espera** para promover uma transacao de leitura a escrita:
+    esperar ali seria deadlock, entao ele recusa na hora e o `busy_timeout`
+    nao ajuda.
+
+    **Medido antes de corrigir**, com duas conexoes ao mesmo arquivo e uma
+    barreira: a perdedora subia `OperationalError: database is locked`, e a
+    rota devolvia 500. Uma linha so - a unicidade segurou -, mas com erro para
+    quem chamou, que e exatamente o "erro parcial" que nao pode existir.
+
+    Com `BEGIN IMMEDIATE` o lock e tomado **antes** de qualquer leitura, o
+    `busy_timeout` passa a valer, e a perdedora espera, entra, **ve a linha** e
+    devolve o mesmo fechamento com `criado_agora = False`. A decisao "ja
+    existe?" e o `INSERT` passam a ser o mesmo ato.
+
+    ## A ordem, e a escrita unica
+
+    Dentro do lock: a janela e derivada do registro, as duas travas sao
+    reconferidas, a grade e exigida completa, a linha e gravada, e o gravado e
+    conferido contra o derivado. Qualquer recusa desfaz tudo - e, como a
+    escrita e **UMA**, nao existe fechamento pela metade para alguem ler.
 
     **Nao dispara estimativa, calibracao nem revalidacao.** Elas pedem a janela
     fechada; fecha-las aqui juntaria dois atos que o ADR 0027 mantem separados.
     """
-    if piloto.ler(conn, serie, contrato) is not None:
-        return {"criado_agora": False, **do_registro(conn, serie=serie, contrato=contrato)}
+    if conn.in_transaction:
+        # `BEGIN` aninhado falha com "cannot start a transaction within a
+        # transaction". Fechar o piloto e ato de topo - uma rota -, e dizer
+        # isso alto e melhor que cair com a mensagem do SQLite, que manda
+        # procurar no lugar errado.
+        raise RuntimeError(
+            "fechar o piloto abre a propria transacao IMMEDIATE e nao pode"
+            " rodar dentro de outra ja aberta"
+        )
+
+    def resposta(criado_agora: bool) -> dict:
+        return {
+            "criado_agora": criado_agora,
+            **do_registro(conn, serie=serie, contrato=contrato),
+        }
 
     grade_ms = grade_do_contrato(conn, contrato)
-    with bloco_atomico(conn, "piloto_fechamento"):
-        # Recusa aqui se as travas nao cairam, ou se o dado ainda nao alcanca
-        # o fim da janela. A janela e DERIVADA do registro: nada do pedido.
+    # O lock de escrita ANTES da primeira leitura. E ele que serializa as duas
+    # chamadas; a `UNIQUE (contrato, venue, symbol)` continua sendo a garantia
+    # de ultima instancia, e nao o mecanismo.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if piloto.ler(conn, serie, contrato) is not None:
+            conn.execute("COMMIT")
+            return resposta(False)
+
+        # A janela e DERIVADA do registro: nada do pedido. Recusa aqui se as
+        # travas nao cairam, ou se o dado ainda nao alcanca o fim da janela.
         prevista = piloto.derivar(conn, serie, contrato)
         m = derivar(
             conn, serie=serie, contrato=contrato, de_ms=prevista.de_ms,
@@ -464,7 +527,10 @@ def fechar(conn: sqlite3.Connection, *, serie: Serie, contrato: str) -> dict:
             )
         piloto.fechar(conn, serie, contrato)
         gravada = piloto.ler(conn, serie, contrato)
-        assert gravada is not None  # acabou de ser gravada, na mesma transacao
+        assert gravada is not None  # gravada agora, na mesma transacao
         _conferir(gravada, prevista, m)
-
-    return {"criado_agora": True, **do_registro(conn, serie=serie, contrato=contrato)}
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return resposta(True)

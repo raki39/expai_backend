@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -97,6 +100,91 @@ def test_o_corpo_do_pedido_NAO_aceita_data_nem_minimo(client: TestClient):
     ):
         r = client.post("/api/calibracao/piloto/fechar", json=corpo)
         assert r.status_code == 422, corpo
+
+
+# ===========================================================================
+# Autenticacao e concorrencia
+# ===========================================================================
+
+
+def test_fechar_exige_a_MESMA_autenticacao_das_demais_operacoes(
+    client: TestClient,
+):
+    """Sem token, com token errado, e com o certo - os tres exercitados.
+
+    A dependencia nao mora nesta rota: `app/api/rotas/__init__.py` prende
+    `exigir_token_de_servico` no router que agrega TODOS. Isto aqui existe
+    porque "herda do agregador" e uma afirmacao sobre outro arquivo, e uma
+    rota nova podia ter sido pendurada fora dele sem nada acusar.
+
+    O 409 do caso autenticado e a prova de que o token passou: a recusa vem do
+    ESTADO (sem dado, o piloto nao fecha), e nao da credencial.
+    """
+    # `headers={"Authorization": None}` NAO remove o cabecalho do cliente: o
+    # httpx recusa `None` como valor. Tirar do proprio cliente e o unico jeito
+    # de exercitar "nenhuma credencial chegou".
+    token = client.headers.pop("Authorization")
+    try:
+        r = client.post("/api/calibracao/piloto/fechar", json={})
+        assert r.status_code == 401, r.text
+        assert r.json()["detail"] == "credencial ausente"
+
+        # E o GET tambem: ler o manifesto nao e mais publico que grava-lo.
+        assert client.get("/api/calibracao/piloto").status_code == 401
+    finally:
+        client.headers["Authorization"] = token
+
+    r = client.post(
+        "/api/calibracao/piloto/fechar", json={},
+        headers={"Authorization": "Bearer nao-e-o-token"},
+    )
+    assert r.status_code == 401, r.text
+    assert r.json()["detail"] == "credencial invalida"
+
+    r = client.post("/api/calibracao/piloto/fechar", json={})
+    assert r.status_code == 409, "com o token certo, a recusa e de ESTADO"
+
+
+def test_duas_chamadas_CONCORRENTES_dao_UMA_linha_e_o_mesmo_fechamento(
+    ambiente: Path, client: TestClient, conn: sqlite3.Connection,
+):
+    """Duas conexoes, duas threads, um arquivo - e uma linha so.
+
+    Nao e `TestClient` em paralelo: ele serializa, e um teste que passa por
+    serializacao do cliente nao diria nada sobre a corrida. Aqui sao duas
+    conexoes de verdade ao MESMO arquivo, como o threadpool do FastAPI produz
+    (`conexao_do_thread`, ADR 0031) - WAL, `busy_timeout`, e o
+    `UNIQUE (contrato, venue, symbol)` como quem serializa.
+
+    Antes da correcao, a perdedora subia `IntegrityError` e a rota devolvia
+    500: uma linha so, e um erro parcial para quem chamou.
+    """
+    from app.store import conexao_do_thread
+
+    janela_inteira(conn)
+    largada = threading.Barrier(2)
+
+    def fechar_em_thread(_: int) -> dict:
+        c = conexao_do_thread(ambiente)
+        largada.wait(timeout=10)
+        return manifesto.fechar(c, serie=SERIE, contrato=CONTRATO)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = list(pool.map(fechar_em_thread, [1, 2]))
+
+    linhas = conn.execute(
+        "SELECT COUNT(*) AS n FROM janela_piloto"
+    ).fetchone()["n"]
+    assert linhas == 1, "duas chamadas, uma linha"
+
+    assert {a["criado_agora"], b["criado_agora"]} == {True, False}, (
+        "exatamente uma criou; a outra reconheceu que perdeu a corrida"
+    )
+    assert a["fechado"] is True and b["fechado"] is True
+    assert a["gravado"] == b["gravado"]
+    assert json.dumps(a["manifesto"], sort_keys=True) == json.dumps(
+        b["manifesto"], sort_keys=True
+    ), "o mesmo fechamento, byte a byte, para as duas"
 
 
 # ===========================================================================
@@ -465,6 +553,23 @@ def test_o_GET_antes_do_fechamento_diz_que_e_PREVIA(
     assert corpo["fechado"] is False
     assert "NAO foi gravada" in corpo["por_que"]
     assert corpo["manifesto"]["grade"]["esperadas"] == INSTANTES_DA_JANELA
+
+    # A previa traz os SETE campos da linha, e nao seis: `fechada_por` e a
+    # unica coisa que nao se le do manifesto, e sem ela quem le teria de
+    # deduzir a trava vencedora de `dias_corridos_x1000`.
+    seria = corpo["seria_gravado"]
+    assert set(seria) == {
+        "de_ms", "ate_ms_exclusive", "observacoes_validas",
+        "observacoes_totais", "dias_corridos_x1000", "fechada_por",
+        "fechada_por_e",
+    }
+    assert seria["fechada_por"] == "dias", (
+        "a janela inteira alcanca 1.000 validas muito antes dos 14 dias,"
+        " entao quem vence e o CALENDARIO"
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM janela_piloto"
+    ).fetchone()["n"] == 0, "uma previa nao escreve nada"
 
 
 def test_o_GET_sem_dado_nenhum_diz_o_motivo_e_nao_quebra(client: TestClient):
