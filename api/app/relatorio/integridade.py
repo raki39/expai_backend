@@ -41,6 +41,12 @@ ESTRUTURA_ESPERADA = {
     28: ["monitor_limiar", "monitor_passo", "monitor_alarme",
          "monitor_reteste"],
     29: [],  # ALTER TABLE, conferido por coluna abaixo
+    # ADR 0041 (migracao 33): a finalidade da observacao, e as tres janelas
+    # disjuntas. `janela_revalidacao`, `revalidacao_uso`, `calibracao_versao`
+    # e `calibracao_regime` sao RECRIADAS - continuam existindo, e por isso
+    # nao aparecem aqui: a lista e de tabelas NOVAS.
+    33: ["janela_calibracao", "calibracao_regime_fechamento",
+         "calibracao_regime_regra"],
     # ADR 0040: a certificacao e objeto PROPRIO, fora de `hypothesis`.
     # E por isso que nenhuma consulta de DSR ou FDR precisa filtra-la.
     30: [
@@ -122,6 +128,14 @@ GATILHOS_ESPERADOS = [
     "monitor_passo_sem_update", "monitor_passo_sem_delete",
     "monitor_alarme_sem_update", "monitor_alarme_sem_delete",
     "monitor_critico_exige_alerta",
+    # ADR 0041, migracao 33.
+    "janela_calibracao_sem_update", "janela_calibracao_sem_delete",
+    "calibracao_regime_fechamento_sem_update",
+    "calibracao_regime_fechamento_sem_delete",
+    "calibracao_observacao_dentro_da_janela",
+    "calibracao_regime_regra_sem_update",
+    "calibracao_regime_regra_sem_delete",
+    "calibracao_observacao_identidade_congelada",
     "monitor_reteste_e_posterior", "monitor_reteste_sem_update",
     "hypothesis_dimensionamento_coerente",
 ]

@@ -4363,6 +4363,510 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        33,
+        "ADR 0041: finalidade da observacao, e tres janelas disjuntas",
+        """
+        -- ==================================================================
+        -- ADR 0041 - O PILOTO NAO CALIBRA. Aceito pelo usuario em 2026-09-22.
+        --
+        -- O ADR 0027 par.5 diz, em duas linhas seguidas, que do piloto SO saem
+        -- `sigma_e`, `tau` e a forma da cauda, e que os dados dele ficam fora
+        -- da calibracao E da revalidacao, em TODOS os regimes.
+        --
+        -- A implementacao fazia o contrario: `ajuste.estimar` rodava na janela
+        -- do piloto e `ajuste.derivar` transformava o `p10` dela em override
+        -- de `spread_bps`. A revalidacao estava certa - ela comeca onde o
+        -- piloto termina. O vazamento era pela OUTRA ponta, que e a que o ADR
+        -- nomeia na mesma frase.
+        --
+        -- NADA foi contaminado: `calibracao_observacao` esta vazia, nao ha
+        -- `calibracao_versao`, nao ha revalidacao selada e nenhum regime tem
+        -- override. Por isso as tabelas podem ser RECRIADAS, e nao migradas.
+        --
+        -- `janela_piloto` NAO e tocada: a linha de 2026-09-21 continua como
+        -- esta, e o manifesto dela continua derivando o mesmo hash.
+        -- ==================================================================
+
+        -- ------------------------------------------------------------------
+        -- 1. A JANELA DE CALIBRACAO - a peca que faltava
+        --
+        -- Ela e selada UMA vez e nao tem fim declarado: o fim e POR REGIME,
+        -- quando cada um alcanca o proprio `n_exigido` (decisao 5 do usuario).
+        -- Fixar um fim de calendario aqui seria o que a decisao 4 proibe -
+        -- parar porque o calendario acabou.
+        --
+        -- `de_ms > selada_em_ms` e a decisao 3, e ela fecha uma porta real: o
+        -- periodo entre o fim do piloto (18/09 16:15) e o selamento JA foi
+        -- inspecionado nas leituras de 21 e 22/09. Deixa-lo entrar seria
+        -- escolher o periodo de calibracao depois de ver o dado.
+        -- ------------------------------------------------------------------
+        CREATE TABLE janela_calibracao (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+
+            de_ms        INTEGER NOT NULL,
+            selada_em_ms INTEGER NOT NULL,
+            selada_em    TEXT    NOT NULL,
+
+            -- De onde ela nasceu. Guardar torna a disjuncao conferivel sem ir
+            -- procurar a outra tabela - mesmo desenho de `janela_revalidacao`.
+            piloto_ate_ms_exclusive INTEGER NOT NULL,
+            grade_ms                INTEGER NOT NULL CHECK (grade_ms > 0),
+
+            -- AS REGRAS DA REVALIDACAO, CONGELADAS AQUI - isto e, ANTES do
+            -- primeiro dado da calibracao, porque `de_ms > selada_em_ms`.
+            --
+            -- O resultado da calibracao pode fornecer o PERFIL que sera
+            -- revalidado; ele nao pode mexer em tamanho, alvo, metodo nem
+            -- duracao. Como estas colunas moram numa tabela imutavel selada
+            -- antes do dado, "nao pode" deixa de ser promessa.
+            --
+            -- Os `CHECK` de valor unico nao sao decoracao: eles impedem que
+            -- uma variante apareca um dia sem ADR. Trocar qualquer um destes
+            -- valores exige migracao, e migracao invalida o alvo.
+            confianca_ppm INTEGER NOT NULL CHECK (confianca_ppm = 950000),
+            metodo_bootstrap TEXT NOT NULL
+                CHECK (metodo_bootstrap = 'estacionario_politis_white'),
+            tratamento_dependencia TEXT NOT NULL
+                CHECK (tratamento_dependencia = 'hac_bartlett_newey_west'),
+            alvo TEXT NOT NULL
+                CHECK (alvo = 'lb95_p10_e2_maior_igual_zero'),
+            regra_encerramento TEXT NOT NULL
+                CHECK (regra_encerramento = 'n_efetivo_maior_igual_n_exigido'),
+            duracao_minima_ms INTEGER NOT NULL CHECK (duracao_minima_ms > 0),
+            delta_mili_bps INTEGER NOT NULL CHECK (delta_mili_bps = 500),
+
+            UNIQUE (contrato, venue, symbol),
+
+            -- DISJUNTA DO PILOTO, por construcao.
+            CHECK (de_ms >= piloto_ate_ms_exclusive),
+            -- POSTERIOR AO PROPRIO SELAMENTO (decisao 3).
+            CHECK (de_ms > selada_em_ms),
+            -- E numa FRONTEIRA DE GRADE.
+            CHECK (de_ms % grade_ms = 0)
+        );
+
+        CREATE TRIGGER janela_calibracao_sem_update
+        BEFORE UPDATE ON janela_calibracao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_calibracao e selada: mover a fronteira depois de selar e escolher o periodo que calibra bem');
+        END;
+
+        CREATE TRIGGER janela_calibracao_sem_delete
+        BEFORE DELETE ON janela_calibracao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_calibracao e selada: apagar e selar de novo e uma segunda chance de escolher a fronteira');
+        END;
+
+        -- O `n_exigido` de cada regime, CONGELADO no selamento. Ele vem do
+        -- PILOTO - `sigma_e` e `tau` medidos la -, e e por isso que pode ser
+        -- fixado antes de existir dado de calibracao.
+        --
+        -- `indefinido` nao entra: ele nao e regime, e nao tem fechamento,
+        -- override nem revalidacao.
+        CREATE TABLE calibracao_regime_regra (
+            janela_calibracao_id INTEGER NOT NULL
+                                 REFERENCES janela_calibracao(id),
+            regime TEXT NOT NULL
+                CHECK (regime IN ('vol_baixa', 'vol_media', 'vol_alta')),
+
+            n_exigido       INTEGER NOT NULL CHECK (n_exigido > 0),
+            sigma_e_x1000   INTEGER NOT NULL,
+            tau_x1000       INTEGER NOT NULL,
+            piloto_n        INTEGER NOT NULL,
+
+            PRIMARY KEY (janela_calibracao_id, regime)
+        );
+
+        CREATE TRIGGER calibracao_regime_regra_sem_update
+        BEFORE UPDATE ON calibracao_regime_regra
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a regra do regime e congelada no selamento: mudar `n_exigido` depois de ver o dado e escolher o tamanho que faz parar');
+        END;
+
+        CREATE TRIGGER calibracao_regime_regra_sem_delete
+        BEFORE DELETE ON calibracao_regime_regra
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a regra do regime e congelada: apaga-la e recomecar o dimensionamento sabendo o que ja se mediu');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 2. O FECHAMENTO POR REGIME - a parada da decisao 5
+        --
+        -- Um regime fecha quando o SEU `n_efetivo` alcanca o SEU `n_exigido`,
+        -- e `n_exigido` vem do piloto com `delta` fixo. `indefinido` nao entra:
+        -- ele nao e regime, e o CHECK recusa.
+        -- ------------------------------------------------------------------
+        CREATE TABLE calibracao_regime_fechamento (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            janela_calibracao_id INTEGER NOT NULL
+                                 REFERENCES janela_calibracao(id),
+            regime              TEXT    NOT NULL
+                CHECK (regime IN ('vol_baixa', 'vol_media', 'vol_alta')),
+
+            n_exigido         INTEGER NOT NULL CHECK (n_exigido > 0),
+            n_efetivo_x1000   INTEGER NOT NULL,
+            fim_ms_exclusive  INTEGER NOT NULL,
+            delta_mili_bps    INTEGER NOT NULL CHECK (delta_mili_bps = 500),
+            fechado_em        TEXT    NOT NULL,
+
+            UNIQUE (janela_calibracao_id, regime),
+            CHECK (n_efetivo_x1000 >= n_exigido * 1000)
+        );
+
+        CREATE TRIGGER calibracao_regime_fechamento_sem_update
+        BEFORE UPDATE ON calibracao_regime_fechamento
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o fechamento de um regime e gravado UMA vez: reabri-lo e continuar coletando ate o numero agradar');
+        END;
+
+        CREATE TRIGGER calibracao_regime_fechamento_sem_delete
+        BEFORE DELETE ON calibracao_regime_fechamento
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o fechamento de um regime nao e apagavel: descartar a parada inconveniente e o mecanismo que produz falsa calibracao');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 3. A REVALIDACAO passa a ser POR REGIME
+        --
+        -- A antiga `janela_revalidacao` comecava onde o PILOTO termina, e sob
+        -- o ADR 0041 isso deixou de descrever: ela tem de comecar depois da
+        -- CALIBRACAO DAQUELE REGIME (requisito 6 do usuario). Como cada regime
+        -- fecha em instante proprio, a janela tambem e propria.
+        --
+        -- As duas tabelas antigas estao VAZIAS em producao e sao recriadas.
+        -- ------------------------------------------------------------------
+        DROP TRIGGER revalidacao_uso_sem_update;
+        DROP TRIGGER revalidacao_uso_sem_delete;
+        DROP TABLE revalidacao_uso;
+        DROP TRIGGER janela_revalidacao_sem_update;
+        DROP TRIGGER janela_revalidacao_sem_delete;
+        DROP TABLE janela_revalidacao;
+
+        CREATE TABLE janela_revalidacao (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+            regime   TEXT    NOT NULL
+                CHECK (regime IN ('vol_baixa', 'vol_media', 'vol_alta')),
+
+            de_ms            INTEGER NOT NULL,
+            ate_ms_exclusive INTEGER NOT NULL,
+
+            -- De onde ela nasceu: o fim da calibracao DAQUELE regime.
+            calibracao_fechamento_id INTEGER NOT NULL
+                REFERENCES calibracao_regime_fechamento(id),
+            calibracao_ate_ms_exclusive INTEGER NOT NULL,
+
+            selada_em_ms INTEGER NOT NULL,
+            selada_em    TEXT    NOT NULL,
+            grade_ms     INTEGER NOT NULL CHECK (grade_ms > 0),
+
+            UNIQUE (contrato, venue, symbol, regime),
+            -- NO MAXIMO UMA revalidacao por fechamento. A segunda e recusada
+            -- pelo BANCO, e nao por um `if` - repetir a confirmacao ate passar
+            -- e a forma mais barata de aprovar o que nao passou.
+            UNIQUE (calibracao_fechamento_id),
+
+            CHECK (ate_ms_exclusive > de_ms),
+            -- DISJUNTA DA CALIBRACAO DAQUELE REGIME.
+            CHECK (de_ms >= calibracao_ate_ms_exclusive),
+            -- E NO FUTURO: dado que ja existia quando a janela foi selada nao
+            -- entra. Sem isto, "reservar o periodo" seria escolher um periodo
+            -- ja visto, que e a quinta pergunta do teste de escopo.
+            CHECK (de_ms > selada_em_ms),
+            CHECK (de_ms % grade_ms = 0)
+        );
+
+        CREATE TRIGGER janela_revalidacao_sem_update
+        BEFORE UPDATE ON janela_revalidacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_revalidacao e selada: mover a fronteira depois de selar e escolher o periodo que confirma');
+        END;
+
+        CREATE TRIGGER janela_revalidacao_sem_delete
+        BEFORE DELETE ON janela_revalidacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'janela_revalidacao e selada: apagar e selar de novo e repetir o teste ate passar');
+        END;
+
+        CREATE TABLE revalidacao_uso (
+            janela_id            INTEGER PRIMARY KEY
+                                 REFERENCES janela_revalidacao(id),
+            calibracao_versao_id INTEGER NOT NULL
+                                 REFERENCES calibracao_versao(id),
+            lb95_mili_bps        INTEGER NOT NULL,
+            p10_mili_bps         INTEGER NOT NULL,
+            n                    INTEGER NOT NULL,
+            passou               INTEGER NOT NULL CHECK (passou IN (0, 1)),
+            usada_em             TEXT    NOT NULL
+        );
+
+        CREATE TRIGGER revalidacao_uso_sem_update
+        BEFORE UPDATE ON revalidacao_uso
+        BEGIN
+            SELECT RAISE(ABORT,
+                'revalidacao_uso e de uso UNICO: revalidar de novo na mesma janela e repetir o teste ate passar');
+        END;
+
+        CREATE TRIGGER revalidacao_uso_sem_delete
+        BEFORE DELETE ON revalidacao_uso
+        BEGIN
+            SELECT RAISE(ABORT,
+                'revalidacao_uso e de uso UNICO: apagar o uso e recomprar a tentativa');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 4. `calibracao_observacao` GANHA FINALIDADE, e PERDE a config da
+        --    chave primaria
+        --
+        -- Tirar `config_version_id` da chave e o coracao da correcao. Com ele
+        -- na chave, recalcular a previsao do MESMO instante sob outra config
+        -- era um INSERT novo, e nada acusava - "rodar de novo ate o numero
+        -- agradar" tinha caminho. Fora dela, o segundo INSERT colide.
+        --
+        -- A tabela esta VAZIA em producao; nada e perdido.
+        -- ------------------------------------------------------------------
+        DROP TRIGGER calibracao_observacao_sem_update;
+        DROP TRIGGER calibracao_observacao_sem_delete;
+        DROP INDEX idx_calibracao_observacao_serie;
+        DROP TABLE calibracao_observacao;
+
+        CREATE TABLE calibracao_observacao (
+            contrato          TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue             TEXT    NOT NULL,
+            symbol            TEXT    NOT NULL,
+            t_grid_ms         INTEGER NOT NULL,
+            lado              TEXT    NOT NULL CHECK (lado IN ('compra', 'venda')),
+
+            -- A FINALIDADE, e ela e da JANELA e nao de quem insere. O gatilho
+            -- abaixo confere que o instante cai dentro da janela desta
+            -- finalidade, e recusa quando nao ha janela selada.
+            finalidade TEXT NOT NULL
+                CHECK (finalidade IN ('piloto', 'calibracao', 'revalidacao')),
+
+            -- A IDENTIDADE EXECUTAVEL que produziu `p_exec_previsto`. As duas
+            -- metades, porque `config_hash` sozinho parou de identificar o
+            -- comportamento quando o ADR 0033 pos o perfil fora do payload.
+            config_version_id      INTEGER NOT NULL REFERENCES config_version(id),
+            calibracao_perfil_hash TEXT    NOT NULL,
+
+            -- O hash do INTERVALO a que a observacao pertence. Para o piloto e
+            -- o do manifesto (`ee5a0413...`): uma insercao tardia ou um
+            -- manifesto que mudasse apareceriam como divergencia.
+            janela_hash TEXT NOT NULL,
+
+            abertura INTEGER NOT NULL CHECK (abertura > 0),
+
+            bbo_bid     INTEGER NOT NULL CHECK (bbo_bid > 0),
+            bbo_bid_qty INTEGER NOT NULL CHECK (bbo_bid_qty > 0),
+            bbo_ask     INTEGER NOT NULL CHECK (bbo_ask > 0),
+            bbo_ask_qty INTEGER NOT NULL CHECK (bbo_ask_qty > 0),
+
+            p_exec_previsto INTEGER NOT NULL CHECK (p_exec_previsto > 0),
+
+            e1_mili_bps INTEGER NOT NULL,
+            e2_mili_bps INTEGER NOT NULL,
+
+            nocional_cents INTEGER NOT NULL CHECK (nocional_cents > 0),
+            dentro_do_l1   INTEGER NOT NULL CHECK (dentro_do_l1 IN (0, 1)),
+
+            criado_em TEXT NOT NULL,
+
+            -- SEM `config_version_id` e SEM `finalidade`: um instante pertence
+            -- a UMA janela e tem UMA previsao. As duas no lugar errado eram a
+            -- porta para materializar o mesmo instante duas vezes.
+            PRIMARY KEY (contrato, venue, symbol, t_grid_ms, lado),
+            CHECK (bbo_bid <= bbo_ask)
+        );
+
+        CREATE INDEX idx_calibracao_observacao_serie
+            ON calibracao_observacao(contrato, venue, symbol, lado,
+                                     finalidade, t_grid_ms);
+
+        CREATE TRIGGER calibracao_observacao_sem_update
+        BEFORE UPDATE ON calibracao_observacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_observacao e apenas por acrescimo: reescrever uma previsao depois de ver o mercado e a definicao de ajustar a regua olhando o resultado');
+        END;
+
+        CREATE TRIGGER calibracao_observacao_sem_delete
+        BEFORE DELETE ON calibracao_observacao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_observacao e apenas por acrescimo: descartar a observacao inconveniente e o mecanismo exato que produz falsa calibracao');
+        END;
+
+        -- A BARREIRA: o instante tem de cair DENTRO da janela da finalidade
+        -- declarada, e a janela tem de existir. Sem isso, `finalidade` seria
+        -- um rotulo que quem insere escolhe - e um rotulo escolhido nao separa
+        -- nada.
+        CREATE TRIGGER calibracao_observacao_dentro_da_janela
+        BEFORE INSERT ON calibracao_observacao
+        WHEN NOT (
+            (NEW.finalidade = 'piloto' AND EXISTS (
+                SELECT 1 FROM janela_piloto j
+                 WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
+                   AND j.symbol = NEW.symbol
+                   AND NEW.t_grid_ms >= j.de_ms
+                   AND NEW.t_grid_ms < j.ate_ms_exclusive))
+            OR
+            (NEW.finalidade = 'calibracao' AND EXISTS (
+                SELECT 1 FROM janela_calibracao j
+                 WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
+                   AND j.symbol = NEW.symbol
+                   AND NEW.t_grid_ms >= j.de_ms))
+            OR
+            (NEW.finalidade = 'revalidacao' AND EXISTS (
+                SELECT 1 FROM janela_revalidacao j
+                 WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
+                   AND j.symbol = NEW.symbol
+                   AND NEW.t_grid_ms >= j.de_ms
+                   AND NEW.t_grid_ms < j.ate_ms_exclusive))
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'observacao fora da janela da finalidade declarada: a finalidade e da JANELA SELADA, e nao de quem insere');
+        END;
+
+        -- A IDENTIDADE E CONGELADA POR JANELA. A primeira linha fixa, e toda
+        -- linha seguinte tem de coincidir: `config_version_id`,
+        -- `calibracao_perfil_hash` e `janela_hash`. Sem isto, metade da janela
+        -- mediria um simulador e metade mediria outro, e a serie resultante
+        -- nao descreveria nenhum dos dois.
+        CREATE TRIGGER calibracao_observacao_identidade_congelada
+        BEFORE INSERT ON calibracao_observacao
+        WHEN EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.finalidade = NEW.finalidade
+               AND (o.config_version_id != NEW.config_version_id
+                 OR o.calibracao_perfil_hash != NEW.calibracao_perfil_hash
+                 OR o.janela_hash != NEW.janela_hash)
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'identidade executavel divergente na mesma janela: ela e congelada na primeira observacao, e remedir sob outra config e trocar o simulador no meio da medicao');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 5. `calibracao_versao` deixa de dizer PILOTO
+        --
+        -- As colunas se chamavam `piloto_de_ms` e `piloto_ate_ms_exclusive`
+        -- porque a estimativa rodava sobre o piloto. Sob o ADR 0041 elas
+        -- passariam a guardar a janela de CALIBRACAO com nome de piloto - que
+        -- e exatamente o defeito que esta migracao existe para corrigir, com
+        -- outra roupa.
+        --
+        -- E `janela_revalidacao_id` sai: a revalidacao passou a ser POR
+        -- REGIME, entao uma versao de calibracao nao tem UMA janela de
+        -- revalidacao. O vinculo vive em `revalidacao_uso`, que ja aponta para
+        -- as duas pontas.
+        --
+        -- As duas tabelas estao VAZIAS em producao.
+        -- ------------------------------------------------------------------
+        DROP TRIGGER IF EXISTS calibracao_versao_sem_update;
+        DROP TRIGGER IF EXISTS calibracao_versao_sem_delete;
+        DROP TRIGGER IF EXISTS calibracao_regime_sem_update;
+        DROP TRIGGER IF EXISTS calibracao_regime_sem_delete;
+        DROP TABLE calibracao_regime;
+        DROP TABLE calibracao_versao;
+
+        CREATE TABLE calibracao_versao (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            contrato TEXT    NOT NULL REFERENCES bbo_contrato(contrato),
+            venue    TEXT    NOT NULL,
+            symbol   TEXT    NOT NULL,
+
+            config_version_origem INTEGER NOT NULL REFERENCES config_version(id),
+            config_version_nova   INTEGER REFERENCES config_version(id),
+
+            janela_calibracao_id        INTEGER NOT NULL
+                                        REFERENCES janela_calibracao(id),
+            calibracao_de_ms            INTEGER NOT NULL,
+            calibracao_ate_ms_exclusive INTEGER NOT NULL,
+
+            delta_mili_bps   INTEGER NOT NULL CHECK (delta_mili_bps = 500),
+            n                INTEGER NOT NULL,
+            n_efetivo_x1000  INTEGER NOT NULL,
+            tau_x1000        INTEGER NOT NULL,
+            sigma_e_x1000    INTEGER NOT NULL,
+            p10_mili_bps     INTEGER NOT NULL,
+            n_necessario     INTEGER NOT NULL,
+
+            aplicado  INTEGER NOT NULL CHECK (aplicado IN (0, 1)),
+            motivo    TEXT    NOT NULL,
+            criado_em TEXT    NOT NULL,
+
+            CHECK (calibracao_ate_ms_exclusive > calibracao_de_ms),
+            CHECK ((aplicado = 1 AND config_version_nova IS NOT NULL)
+                OR (aplicado = 0 AND config_version_nova IS NULL))
+        );
+
+        CREATE TRIGGER calibracao_versao_sem_update
+        BEFORE UPDATE ON calibracao_versao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_versao e apenas por acrescimo: reescrever um ajuste depois de ver o resultado e refazer a regua sabendo a resposta');
+        END;
+
+        CREATE TRIGGER calibracao_versao_sem_delete
+        BEFORE DELETE ON calibracao_versao
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_versao e apenas por acrescimo: apagar o ajuste inconveniente e recomecar a calibracao sem que nada conte');
+        END;
+
+        CREATE TABLE calibracao_regime (
+            calibracao_versao_id INTEGER NOT NULL
+                                 REFERENCES calibracao_versao(id),
+            regime TEXT NOT NULL CHECK (
+                regime IN ('vol_baixa', 'vol_media', 'vol_alta', 'indefinido')
+            ),
+
+            n               INTEGER NOT NULL,
+            n_efetivo_x1000 INTEGER NOT NULL,
+            p10_mili_bps    INTEGER,
+            n_necessario    INTEGER,
+
+            estado TEXT NOT NULL CHECK (estado IN ('calibrado', 'nao_calibrado')),
+            motivo TEXT,
+
+            spread_bps_x1000 INTEGER,
+
+            PRIMARY KEY (calibracao_versao_id, regime),
+            -- `indefinido` NUNCA e calibrado: ele nao e regime (decisao 5).
+            CHECK (regime != 'indefinido' OR estado = 'nao_calibrado')
+        );
+
+        CREATE TRIGGER calibracao_regime_sem_update
+        BEFORE UPDATE ON calibracao_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_regime e apenas por acrescimo: mudar o veredito de um regime depois e escolher qual regime calibrou');
+        END;
+
+        CREATE TRIGGER calibracao_regime_sem_delete
+        BEFORE DELETE ON calibracao_regime
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_regime e apenas por acrescimo: apagar o regime nao calibrado faria a cobertura parecer maior do que e');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

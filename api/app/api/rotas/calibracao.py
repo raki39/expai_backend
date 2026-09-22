@@ -20,7 +20,8 @@ from pydantic import BaseModel, Field
 
 from ...aovivo import bbo
 from ...calibracao import (
-    ajuste, bootstrap, manifesto, observacao, piloto, shadow,
+    ajuste, bootstrap, dimensionamento, manifesto, materializacao,
+    observacao, piloto, shadow,
 )
 from ...dataset import loader as dataset_loader
 from ...maos_rapidas import baselines
@@ -30,6 +31,17 @@ from ..comum import _conn
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/calibracao", tags=["calibracao"])
+
+
+def _agora_ms() -> int:
+    """O relogio do SISTEMA. Nenhuma rota recebe data no corpo.
+
+    Um instante vindo do pedido faria o selo ser escolhido por quem pede - e o
+    selo e justamente o que separa "dado que ja existia" de "dado futuro".
+    """
+    from datetime import datetime, timezone
+
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 CONTRATO_PADRAO = bbo.CONTRATO_PADRAO
 
@@ -241,22 +253,106 @@ class PedidoDeAjuste(BaseModel):
     lado: str = Field(default="compra", pattern="^(compra|venda)$")
 
 
+class PedidoPorRegime(PedidoDeAjuste):
+    """O `regime` e OBRIGATORIO e nao tem default.
+
+    O caminho global deixou de existir (ADR 0041): nao ha como selar nem
+    consumir uma revalidacao sem regime. Um default aqui reabriria a porta que
+    a migracao 33 fechou no banco - `janela_revalidacao.regime` e `NOT NULL`, e
+    `calibracao_fechamento_id` tambem.
+
+    O `pattern` recusa `indefinido`: ele nao e regime, e nao pode ter
+    fechamento, override nem revalidacao.
+    """
+
+    regime: str = Field(pattern="^(vol_baixa|vol_media|vol_alta)$")
+
+
+@router.post("/selar-calibracao", status_code=status.HTTP_201_CREATED)
+def selar_calibracao(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
+    """Sela a janela de CALIBRACAO, que comeca DEPOIS do proprio selamento.
+
+    O relogio e do SISTEMA: o corpo nao carrega data nenhuma. As regras da
+    revalidacao - `n_exigido` por regime, duracao, metodo, confianca, alvo,
+    tratamento de dependencia e regra de encerramento - sao congeladas aqui,
+    antes do primeiro dado da calibracao.
+    """
+    conn = _conn(request)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status_code=503, detail="sem config_version")
+    try:
+        c = bbo.ler_contrato(conn, pedido.contrato)
+        janela = ajuste.selar_calibracao(
+            conn, contrato=pedido.contrato, venue=pedido.venue,
+            symbol=pedido.symbol, config=versao.config,
+            agora_ms=_agora_ms(), grade_ms=c.grade_ms,
+        )
+    except ajuste.PilotoAberto as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except dimensionamento.PilotoNaoMaterializado as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    return {"janela_de_calibracao": janela}
+
+
+@router.post("/fechar-regime", status_code=status.HTTP_201_CREATED)
+def fechar_regime(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
+    """Fecha a calibracao DE UM regime, quando ele alcanca o `n_exigido`.
+
+    Idempotente. O `n_efetivo` e MEDIDO aqui, e nao recebido: um numero vindo
+    do corpo seria a parada escolhida por quem pede.
+    """
+    conn = _conn(request)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status_code=503, detail="sem config_version")
+    conta = ajuste.medir_regime(
+        conn, contrato=pedido.contrato, venue=pedido.venue,
+        symbol=pedido.symbol, config=versao.config,
+        config_version_id=versao.id, regime=pedido.regime, lado=pedido.lado,
+    )
+    try:
+        c = bbo.ler_contrato(conn, pedido.contrato)
+        fechamento = ajuste.fechar_regime(
+            conn, contrato=pedido.contrato, venue=pedido.venue,
+            symbol=pedido.symbol, regime=pedido.regime,
+            n_efetivo=conta["n_efetivo"],
+            ultimo_t_grid_ms=conta["ultimo_t_grid_ms"], grade_ms=c.grade_ms,
+        )
+    except (ajuste.SemJanelaDeCalibracao, ajuste.RegraNaoCongelada,
+            ajuste.AmostraInsuficienteNoRegime) as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    return {"fechamento": fechamento, "medido": conta}
+
+
 @router.post("/selar-revalidacao", status_code=status.HTTP_201_CREATED)
 def selar_revalidacao(
-    request: Request, pedido: PedidoDeAjuste
+    request: Request, pedido: PedidoPorRegime
 ) -> dict[str, Any]:
-    """Sela o periodo posterior reservado. **Antes do ajuste.**
+    """Sela a revalidacao DAQUELE regime, depois do fechamento dele.
 
-    Idempotente: chamar de novo devolve a janela que ja existe, e nunca uma
-    nova. Uma segunda janela seria uma segunda chance de escolher a fronteira.
+    **Nao existe caminho global.** O `regime` e obrigatorio, e a janela so
+    nasce a partir de um `calibracao_regime_fechamento` - a segunda para o
+    mesmo fechamento e recusada pelo BANCO, por `UNIQUE`.
+
+    O horario do selo e do sistema. A janela comeca na primeira grade
+    estritamente posterior a ele e posterior ao ultimo instante usado na
+    calibracao, entao dado que ja existia no selamento nao entra.
     """
     conn = _conn(request)
     try:
         janela = ajuste.selar_revalidacao(
             conn, contrato=pedido.contrato, venue=pedido.venue,
-            symbol=pedido.symbol,
+            symbol=pedido.symbol, regime=pedido.regime,
+            agora_ms=_agora_ms(),
         )
-    except ajuste.PilotoAberto as e:
+    except ajuste.CalibracaoDoRegimeNaoFechada as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e
@@ -356,7 +452,7 @@ def _b1_negativo(conn, resultado: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/revalidar", status_code=status.HTTP_201_CREATED)
-def revalidar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
+def revalidar(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
     """Confirma na janela selada, **sem novo ajuste**, uma unica vez."""
     conn = _conn(request)
     versao = config_service.versao_atual(conn)
@@ -380,7 +476,7 @@ def revalidar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, config=versao.config,
             config_version_id=versao.id, calibracao_id=int(ultima["id"]),
-            lado=pedido.lado,
+            lado=pedido.lado, regime=pedido.regime,
         )
     except ajuste.RevalidacaoJaConsumida as e:
         raise HTTPException(

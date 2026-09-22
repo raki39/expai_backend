@@ -62,6 +62,10 @@ from . import viabilidade as relatorio_viabilidade
 #: booleano: `definitivo: false` deixaria o leitor supor que o contrario e
 #: `true`, e nao ha terceira opcao - ha "aguardando", que e o estado normal de
 #: uma fase em curso.
+#: O bootstrap de quantil precisa de dez pontos (`bootstrap.SerieCurtaDemais`).
+#: Abaixo disso nao ha estimativa, e o criterio 5 nao pode afirmar medicao.
+MINIMO_PARA_ESTIMAR = 10
+
 PROVISORIO = "provisorio_aguardando_evidencia"
 DEFINITIVO = "definitivo"
 
@@ -204,18 +208,57 @@ def _gate_incremento_18(conn: sqlite3.Connection) -> dict[str, Any]:
     dependem - e derivar de duas fontes faria os dois divergirem.
     """
     piloto_ok = _gate_piloto(conn)["cumprido"]
+
+    # CRITERIO 5 - DERIVADO, e nao proxy. Ele valia `piloto_ok`, isto e "a
+    # janela fechou", sob um nome que afirma que `p10(E2)` foi MEDIDO. Em
+    # 2026-09-22 o relatorio da fase dizia `true` e a rota de calibracao dizia
+    # "veio 0" - no mesmo dia, sobre o mesmo banco.
+    #
+    # Fechar a janela nao mede nada. Agora o criterio conta OBSERVACAO.
+    medidas = conn.execute(
+        "SELECT COUNT(*) AS n FROM calibracao_observacao"
+        " WHERE finalidade = 'piloto' AND dentro_do_l1 = 1"
+    ).fetchone()["n"]
+    c5 = piloto_ok and int(medidas or 0) >= MINIMO_PARA_ESTIMAR
+
+    # CRITERIO 6 - tambem derivado: existe override por regime gravado?
+    overrides = conn.execute(
+        "SELECT COUNT(*) AS n FROM calibracao_perfil_regime"
+    ).fetchone()["n"]
+    c6 = int(overrides or 0) > 0
+
+    # CRITERIO 7 - `bytes_descomprimidos` vive no manifesto do COLETOR, em
+    # Singapura, e daqui nao ha como conta-lo. Fica ancorado no piloto ter
+    # fechado, e o motivo vai escrito: um proxy declarado e outra coisa que um
+    # proxy silencioso.
+    c7 = piloto_ok
+
+    criterios = {
+        "5_p10_de_E2_medido_no_piloto_real": c5,
+        "6_spread_por_regime_derivado_da_medicao": c6,
+        "7_bytes_descomprimidos_auditaveis_no_manifesto": c7,
+    }
     return {
-        "cumprido": piloto_ok,
-        "criterios": {
-            "5_p10_de_E2_medido_no_piloto_real": piloto_ok,
-            "6_spread_por_regime_derivado_da_medicao": piloto_ok,
-            "7_bytes_descomprimidos_auditaveis_no_manifesto": piloto_ok,
-        },
+        "cumprido": all(criterios.values()),
+        "criterios": criterios,
+        "observacoes_do_piloto_na_estatistica": int(medidas or 0),
+        "minimo_para_estimar": MINIMO_PARA_ESTIMAR,
+        "regimes_com_override": int(overrides or 0),
+        "o_criterio_5_NAO_e_a_data": (
+            "ele conta observacao de E2 materializada na janela do piloto."
+            " Antes era `piloto_ok` - a janela estar fechada -, e fechar a"
+            " janela nao mede nada (ADR 0041 par.6)"
+        ),
+        "o_criterio_7_e_PROXY_declarado": (
+            "`bytes_descomprimidos` esta no manifesto do coletor, fora deste"
+            " banco. Ele segue ancorado no piloto ter fechado, e dizer isso e"
+            " o que o separa do criterio 5, que era proxy sem avisar"
+        ),
         "por_que_bloqueia": (
             None
-            if piloto_ok
-            else "os tres estao CONSTRUIDOS e testados, e nao cumpridos:"
-            " dependem do piloto real, e `estimar` recusa ate a janela fechar"
+            if all(criterios.values())
+            else "criterios nao cumpridos: "
+            + ", ".join(k for k, v in criterios.items() if not v)
         ),
     }
 

@@ -57,6 +57,12 @@ BPS = Decimal(10_000)
 
 LADOS = ("compra", "venda")
 
+#: As tres finalidades do ADR 0041. Uma observacao pertence a EXATAMENTE uma,
+#: e quem confere e o gatilho `calibracao_observacao_dentro_da_janela` - a
+#: lista aqui existe para recusar o erro de digitacao antes do banco, e nao
+#: para ser a garantia.
+FINALIDADES = ("piloto", "calibracao", "revalidacao")
+
 
 class ContratoIncompativel(Exception):
     """A config vigente nao e a que o contrato assume. NAO calibrar."""
@@ -166,29 +172,106 @@ def calcular(
     )
 
 
+@dataclass(frozen=True)
+class Materializacao:
+    """O que a materializacao publica, e os seis numeros sao SEPARADOS.
+
+    Requisito 8 do usuario (ADR 0041 par.7). Instante e observacao sao
+    grandezas diferentes, e troca-las sob o mesmo rotulo e o padrao que este
+    projeto conta trinta e uma vezes - a ultima foi "33 lancamentos" no lugar
+    de "65 creditos", em 2026-09-10.
+
+        instantes_validos -> candidatos_de_lado -> comparaveis -> na_estatistica
+                              (x 2 lados)          (- sem barra)  (- fora do L1)
+    """
+
+    finalidade: str
+    de_ms: int
+    ate_ms_exclusive: int
+    janela_hash: str
+    instantes_validos_na_janela: int
+    candidatos_de_lado: int
+    comparaveis: int
+    sem_barra_pareada: int
+    excluidos_por_l1: int
+    na_estatistica: int
+    gravadas: int
+    ja_existiam: int
+    lados: tuple[str, ...]
+
+    def como_dict(self) -> dict:
+        return {
+            "finalidade": self.finalidade,
+            "janela": {
+                "de_ms": self.de_ms,
+                "ate_ms_exclusive": self.ate_ms_exclusive,
+                "hash": self.janela_hash,
+            },
+            "instantes_validos_na_janela": self.instantes_validos_na_janela,
+            "candidatos_de_lado": self.candidatos_de_lado,
+            "comparaveis": self.comparaveis,
+            "sem_barra_pareada": self.sem_barra_pareada,
+            "excluidos_por_l1": self.excluidos_por_l1,
+            "na_estatistica": self.na_estatistica,
+            "gravadas": self.gravadas,
+            "ja_existiam": self.ja_existiam,
+            "lados": list(self.lados),
+            "o_que_cada_um_e": {
+                "instantes_validos_na_janela":
+                    "instantes de GRADE com BBO valida dentro da janela",
+                "candidatos_de_lado":
+                    "instantes validos x lados. NAO e o mesmo numero: cada"
+                    " instante rende uma observacao de compra e uma de venda",
+                "comparaveis":
+                    "candidatos que acharam barra do MESMO instante. Sem barra"
+                    " nao ha `abertura`, e sem ela nao ha previsao a comparar",
+                "excluidos_por_l1":
+                    "comparaveis cujo nocional passa do tamanho cotado no topo."
+                    " Ficam GRAVADOS e saem da estatistica (ADR 0027)",
+                "na_estatistica":
+                    "comparaveis - excluidos. E o UNICO que alimenta o"
+                    " bootstrap",
+            },
+        }
+
+
 def registrar(
     conn: sqlite3.Connection,
     *,
+    finalidade: str,
     contrato: str,
     venue: str,
     symbol: str,
     config: ExperimentConfig,
     config_version_id: int,
+    calibracao_perfil_hash: str,
+    janela_hash: str,
+    de_ms: int,
+    ate_ms_exclusive: int,
     orcamento_cents: int,
-    de_ms: int | None = None,
-    ate_ms_exclusive: int | None = None,
     lados: tuple[str, ...] = LADOS,
-) -> dict:
+) -> Materializacao:
     """Pareia BBO com barra fechada e grava a observacao de cada instante.
+
+    **A FINALIDADE e obrigatoria e nao tem default.** Ela e da JANELA, e quem
+    confere que o instante cai dentro dela e o gatilho
+    `calibracao_observacao_dentro_da_janela` - nao este codigo. Um default
+    aqui faria a barreira depender de quem chama (ADR 0041 par.3).
 
     **Confere o contrato ANTES de olhar qualquer amostra.** Se a semantica de
     execucao vigente nao for a que o contrato assume, nada e medido - as
     amostras foram alinhadas na abertura da barra porque a D20 fixou a
     referencia ali, e usa-las sob outra semantica mediria o instante errado.
 
-    Idempotente: reprocessar o mesmo periodo sob a mesma config nao duplica
-    nada, e a chave primaria e quem garante.
+    Idempotente: a chave primaria e `(contrato, venue, symbol, t_grid_ms,
+    lado)` - **sem** `config_version_id`. Reprocessar sob a MESMA identidade
+    nao duplica nada; sob outra, o gatilho de congelamento **recusa** em vez de
+    acrescentar (ADR 0041 par.8).
     """
+    if finalidade not in FINALIDADES:
+        raise ValueError(
+            f"finalidade {finalidade!r} nao existe; sao {FINALIDADES}"
+        )
     try:
         c = bbo.conferir_contrato(
             conn, contrato,
@@ -199,14 +282,14 @@ def registrar(
     except bbo.ContratoNaoDescreveMais as e:
         raise ContratoIncompativel(str(e)) from e
 
-    onde = ["a.venue = ?", "a.symbol = ?", "a.contrato = ?", "a.disponivel = 1"]
-    args: list[object] = [venue, symbol, contrato]
-    if de_ms is not None:
-        onde.append("a.t_grid_ms >= ?")
-        args.append(de_ms)
-    if ate_ms_exclusive is not None:
-        onde.append("a.t_grid_ms < ?")
-        args.append(ate_ms_exclusive)
+    # Os instantes VALIDOS da janela, independentemente de haver barra. E o
+    # denominador honesto: perder barra e perda nossa, e tem de aparecer.
+    instantes_validos = conn.execute(
+        "SELECT COUNT(*) AS n FROM bbo_amostra"
+        " WHERE venue = ? AND symbol = ? AND contrato = ? AND disponivel = 1"
+        "   AND t_grid_ms >= ? AND t_grid_ms < ?",
+        (venue, symbol, contrato, de_ms, ate_ms_exclusive),
+    ).fetchone()["n"]
 
     # O JOIN e o que torna a comparacao honesta: so ha observacao quando
     # EXISTEM a cotacao e a barra do MESMO instante. `stream_bar` e mercado
@@ -218,12 +301,14 @@ def registrar(
         "  JOIN stream_bar b"
         "    ON b.venue = a.venue AND b.symbol = a.symbol"
         "   AND b.timeframe = ? AND b.open_time_ms = a.t_grid_ms"
-        f" WHERE {' AND '.join(onde)}"
+        " WHERE a.venue = ? AND a.symbol = ? AND a.contrato = ?"
+        "   AND a.disponivel = 1"
+        "   AND a.t_grid_ms >= ? AND a.t_grid_ms < ?"
         " ORDER BY a.t_grid_ms",
-        [c.timeframe, *args],
+        (c.timeframe, venue, symbol, contrato, de_ms, ate_ms_exclusive),
     ).fetchall()
 
-    gravadas = repetidas = 0
+    gravadas = ja_existiam = excluidos = 0
     agora = _agora()
     with bloco_atomico(conn, "calibracao_registrar"):
         for linha in linhas:
@@ -233,56 +318,71 @@ def registrar(
                     abertura=int(linha["abertura"]), amostra=linha,
                     config=config, orcamento_cents=orcamento_cents,
                 )
+                if not o.dentro_do_l1:
+                    excluidos += 1
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO calibracao_observacao ("
-                    " contrato, venue, symbol, t_grid_ms, lado,"
-                    " config_version_id, abertura, bbo_bid, bbo_bid_qty,"
-                    " bbo_ask, bbo_ask_qty, p_exec_previsto, e1_mili_bps,"
-                    " e2_mili_bps, nocional_cents, dentro_do_l1, criado_em)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (contrato, venue, symbol, o.t_grid_ms, o.lado,
-                     config_version_id, o.abertura, o.bbo_bid, o.bbo_bid_qty,
-                     o.bbo_ask, o.bbo_ask_qty, o.p_exec_previsto,
-                     o.e1_mili_bps, o.e2_mili_bps, o.nocional_cents,
+                    " contrato, venue, symbol, t_grid_ms, lado, finalidade,"
+                    " config_version_id, calibracao_perfil_hash, janela_hash,"
+                    " abertura, bbo_bid, bbo_bid_qty, bbo_ask, bbo_ask_qty,"
+                    " p_exec_previsto, e1_mili_bps, e2_mili_bps,"
+                    " nocional_cents, dentro_do_l1, criado_em)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (contrato, venue, symbol, o.t_grid_ms, o.lado, finalidade,
+                     config_version_id, calibracao_perfil_hash, janela_hash,
+                     o.abertura, o.bbo_bid, o.bbo_bid_qty, o.bbo_ask,
+                     o.bbo_ask_qty, o.p_exec_previsto, o.e1_mili_bps,
+                     o.e2_mili_bps, o.nocional_cents,
                      1 if o.dentro_do_l1 else 0, agora),
                 )
                 if cur.rowcount:
                     gravadas += 1
                 else:
-                    repetidas += 1
+                    ja_existiam += 1
 
+    candidatos = instantes_validos * len(lados)
+    comparaveis = len(linhas) * len(lados)
+    r = Materializacao(
+        finalidade=finalidade, de_ms=de_ms,
+        ate_ms_exclusive=ate_ms_exclusive, janela_hash=janela_hash,
+        instantes_validos_na_janela=instantes_validos,
+        candidatos_de_lado=candidatos,
+        comparaveis=comparaveis,
+        sem_barra_pareada=candidatos - comparaveis,
+        excluidos_por_l1=excluidos,
+        na_estatistica=comparaveis - excluidos,
+        gravadas=gravadas, ja_existiam=ja_existiam, lados=tuple(lados),
+    )
     log.info("calibracao.observacoes", extra={
-        "contrato": contrato, "symbol": symbol,
+        "contrato": contrato, "symbol": symbol, "finalidade": finalidade,
         "config_version_id": config_version_id,
-        "instantes": len(linhas), "gravadas": gravadas, "repetidas": repetidas,
+        "comparaveis": comparaveis, "gravadas": gravadas,
+        "ja_existiam": ja_existiam,
     })
-    return {
-        "instantes_pareados": len(linhas),
-        "gravadas": gravadas,
-        "repetidas": repetidas,
-        "lados": list(lados),
-    }
+    return r
 
 
-def serie_e2(
-    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
-    lado: str, config_version_id: int,
-    de_ms: int | None = None, ate_ms_exclusive: int | None = None,
-    apenas_dentro_do_l1: bool = True,
+# ===========================================================================
+# A LEITURA E POR FUNCAO, E NAO POR PARAMETRO
+#
+# Uma funcao por finalidade, cada uma com o valor como LITERAL no SQL. E o
+# mesmo desenho de `acesso = 'agente'` do incremento 9: nenhum argumento faz o
+# caminho da calibracao devolver dado do piloto.
+#
+# `ajuste.py` importa SO `serie_e2_da_calibracao` e `serie_e2_da_revalidacao`,
+# e ha guarda estrutural por AST conferindo que ele nao alcanca a do piloto
+# (ADR 0041 par.4).
+# ===========================================================================
+
+
+def _serie(
+    conn: sqlite3.Connection, *, sql_finalidade: str, contrato: str,
+    venue: str, symbol: str, lado: str,
+    de_ms: int | None, ate_ms_exclusive: int | None,
+    apenas_dentro_do_l1: bool,
 ) -> list[int]:
-    """A serie de `E2` em mili-bps, em ordem de tempo.
-
-    **Ordenada, e nao um conjunto.** O block bootstrap precisa da ordem: ele
-    reamostra BLOCOS contiguos justamente para preservar a dependencia que o
-    embaralhamento destruiria.
-
-    `apenas_dentro_do_l1` e o default porque o ADR 0027 exclui da estatistica a
-    observacao cujo nocional passa do tamanho cotado - ali o preco do topo de
-    livro nao descreve o que a ordem encontraria. Ela continua GRAVADA.
-    """
-    onde = ["contrato = ?", "venue = ?", "symbol = ?", "lado = ?",
-            "config_version_id = ?"]
-    args: list[object] = [contrato, venue, symbol, lado, config_version_id]
+    onde = ["contrato = ?", "venue = ?", "symbol = ?", "lado = ?"]
+    args: list[object] = [contrato, venue, symbol, lado]
     if apenas_dentro_do_l1:
         onde.append("dentro_do_l1 = 1")
     if de_ms is not None:
@@ -291,12 +391,114 @@ def serie_e2(
     if ate_ms_exclusive is not None:
         onde.append("t_grid_ms < ?")
         args.append(ate_ms_exclusive)
-
     return [
         int(r["e2_mili_bps"])
         for r in conn.execute(
             "SELECT e2_mili_bps FROM calibracao_observacao"
-            f" WHERE {' AND '.join(onde)} ORDER BY t_grid_ms",
+            f" WHERE {sql_finalidade} AND {' AND '.join(onde)}"
+            " ORDER BY t_grid_ms",
             args,
         )
     ]
+
+
+def serie_e2_do_piloto(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+    lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
+    apenas_dentro_do_l1: bool = True,
+) -> list[int]:
+    """`E2` do PILOTO. **So dimensionamento e diagnostico.**
+
+    O ADR 0027 par.5 e literal: do piloto saem `sigma_e`, `tau` e a forma da
+    cauda, e nada mais. O `p10` desta serie NAO produz override de parametro -
+    quem calibra le `serie_e2_da_calibracao`, sobre janela propria.
+
+    **Ordenada, e nao um conjunto.** O block bootstrap precisa da ordem: ele
+    reamostra BLOCOS contiguos justamente para preservar a dependencia que o
+    embaralhamento destruiria.
+    """
+    return _serie(
+        conn, sql_finalidade="finalidade = 'piloto'", contrato=contrato,
+        venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
+        ate_ms_exclusive=ate_ms_exclusive,
+        apenas_dentro_do_l1=apenas_dentro_do_l1,
+    )
+
+
+def serie_e2_da_calibracao(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+    lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
+    apenas_dentro_do_l1: bool = True,
+) -> list[int]:
+    """`E2` da CALIBRACAO. A unica serie que vira override de `spread_bps`.
+
+    `apenas_dentro_do_l1` e o default porque o ADR 0027 exclui da estatistica a
+    observacao cujo nocional passa do tamanho cotado - ali o preco do topo de
+    livro nao descreve o que a ordem encontraria. Ela continua GRAVADA.
+    """
+    return _serie(
+        conn, sql_finalidade="finalidade = 'calibracao'", contrato=contrato,
+        venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
+        ate_ms_exclusive=ate_ms_exclusive,
+        apenas_dentro_do_l1=apenas_dentro_do_l1,
+    )
+
+
+def serie_e2_da_revalidacao(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+    lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
+    apenas_dentro_do_l1: bool = True,
+) -> list[int]:
+    """`E2` da REVALIDACAO. Confirma, e nunca reajusta."""
+    return _serie(
+        conn, sql_finalidade="finalidade = 'revalidacao'", contrato=contrato,
+        venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
+        ate_ms_exclusive=ate_ms_exclusive,
+        apenas_dentro_do_l1=apenas_dentro_do_l1,
+    )
+
+
+def quantas(
+    conn: sqlite3.Connection, *, finalidade: str, contrato: str, venue: str,
+    symbol: str,
+) -> dict:
+    """Quantas observacoes existem, por finalidade. **Fato, nao data.**
+
+    Usado pelo criterio 5 do incremento 18, que antes era um proxy de "a janela
+    fechou" - e fechar a janela nao mede nada (ADR 0041 par.6).
+    """
+    if finalidade not in FINALIDADES:
+        raise ValueError(f"finalidade {finalidade!r} nao existe")
+    linha = conn.execute(
+        "SELECT COUNT(*) AS total,"
+        "       SUM(dentro_do_l1) AS na_estatistica,"
+        "       COUNT(DISTINCT t_grid_ms) AS instantes,"
+        "       MIN(t_grid_ms) AS de_ms, MAX(t_grid_ms) AS ate_ms"
+        "  FROM calibracao_observacao"
+        " WHERE finalidade = ? AND contrato = ? AND venue = ? AND symbol = ?",
+        (finalidade, contrato, venue, symbol),
+    ).fetchone()
+    identidades = conn.execute(
+        "SELECT DISTINCT config_version_id, calibracao_perfil_hash,"
+        "       janela_hash"
+        "  FROM calibracao_observacao"
+        " WHERE finalidade = ? AND contrato = ? AND venue = ? AND symbol = ?",
+        (finalidade, contrato, venue, symbol),
+    ).fetchall()
+    return {
+        "finalidade": finalidade,
+        "observacoes": int(linha["total"] or 0),
+        "na_estatistica": int(linha["na_estatistica"] or 0),
+        "instantes_distintos": int(linha["instantes"] or 0),
+        "de_ms": linha["de_ms"],
+        "ate_ms": linha["ate_ms"],
+        "identidades": [
+            {
+                "config_version_id": int(r["config_version_id"]),
+                "calibracao_perfil_hash": r["calibracao_perfil_hash"],
+                "janela_hash": r["janela_hash"],
+            }
+            for r in identidades
+        ],
+        "identidade_unica": len(identidades) <= 1,
+    }

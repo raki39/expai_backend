@@ -147,3 +147,26 @@ def test_a_DIVIDA_do_fim_de_linha_foi_PAGA():
             "a OP-2 continua registrada como aberta em `16-divida-tecnica.md`"
             " depois de paga"
         )
+
+
+def test_a_INVALIDACAO_do_alvo_esta_DECLARADA_e_nao_silenciada():
+    """Atualizar o congelamento não pode virar "recertificado por edição".
+
+    A guarda anterior nomeia quem mudou e manda **recertificar ou reverter**.
+    Atualizar o arquivo satisfaz a guarda — e, sem este teste, satisfazê-la
+    seria indistinguível de ter recertificado. O bloco `certificacao` é o que
+    torna a diferença legível, e ele tem de dizer as quatro coisas: que está
+    invalidada, o que mudou, quem autorizou e o que falta.
+
+    É a mesma forma do `METODOLOGIA_V1`, que ficou registrada como
+    `invalidado_por_serie_incorreta` em vez de ser apagada.
+    """
+    c = _gravado().get("certificacao")
+    assert c is not None, (
+        "o congelamento foi atualizado sem declarar o estado da certificacao:"
+        " quem ler nao consegue distinguir 'recertificado' de 'reeditado'"
+    )
+    assert "INVALIDADA" in c["estado"]
+    assert c["o_que_mudou"], "a invalidacao tem de nomear os modulos"
+    assert "usuario" in c["autorizada_por"]
+    assert "RECERTIFICAR" in c["o_que_falta"]
