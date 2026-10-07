@@ -119,13 +119,13 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 
 | Método | Rota | Função |
 |---|---|---|
-| POST | `/api/calibracao/rodar` | shadow do B3 sobre o fluxo, e as observações do período. **Não aceita regra**: §11.2.1 manda rodar só o B3, e a recusa é por construção |
-| GET | `/api/calibracao` | previsto contra observado: `p10(E2)`, o limite inferior do IC, τ e o tamanho de amostra necessário. **Só sai com o piloto fechado** |
+| POST | `/api/calibracao/rodar` | materializa a janela **selada** da `finalidade` pedida (`piloto`, `calibracao` ou `revalidacao`) e roda o shadow do B3 no mesmo intervalo. **Não aceita regra** — §11.2.1 manda rodar só o B3 — **nem período**: `de_ms` e `ate_ms_exclusive` saíram do corpo, porque com eles a finalidade era um rótulo escolhido por quem chamava |
+| GET | `/api/calibracao` | previsto contra observado **no piloto**: `p10(E2)`, o limite inferior do IC, τ e o tamanho de amostra necessário. **Só sai com o piloto fechado**, e o próprio corpo declara que aquilo é dimensionamento e diagnóstico — não calibração. Traz também os cinco estados por regime e a contagem de observações por finalidade |
 | GET | `/api/calibracao/piloto` | a janela do piloto e o **manifesto derivado** dela: grade esperada contra gravada, válidas, lacunas, instante da milésima e hash do intervalo. Sem a janela fechada, devolve a prévia e diz que é prévia |
 | POST | `/api/calibracao/piloto/fechar` | grava a **linha de fechamento** da janela — uma vez, com as duas travas reconferidas na transação e a grade exigida completa. Repetir devolve a que existe, sem escrever. Não dispara estimativa nem calibração |
-| POST | `/api/calibracao/selar-calibracao` | sela a janela de **calibração**, que começa numa fronteira de grade **posterior ao próprio selamento**. Congela aqui as regras da revalidação: `n_exigido` por regime, duração, método, confiança, alvo, dependência e encerramento |
+| POST | `/api/calibracao/selar-calibracao` | sela a janela de **calibração**, que começa na **primeira** fronteira de grade posterior ao próprio selamento. O instante vem do **relógio do banco** e a grade vem do contrato — o corpo não carrega nenhum dos dois. Congela aqui as regras da revalidação: os **dois** alvos de amostra por regime, duração, método, confiança, alvo, dependência e encerramento |
 | POST | `/api/calibracao/fechar-regime` | fecha a calibração **de um regime**, quando ele alcança o próprio `n_exigido`. Idempotente, e o `n_efetivo` é medido — nunca recebido no corpo |
-| POST | `/api/calibracao/selar-revalidacao` | sela a revalidação **daquele regime**, depois do fechamento dele. **Não existe caminho global**: `regime` é obrigatório e a janela nasce de um `calibracao_regime_fechamento`. Começa no futuro, então dado que já existia no selamento não entra |
+| POST | `/api/calibracao/selar-revalidacao` | sela a revalidação **daquele regime**, depois do fechamento dele. **Recebe identidade, e nada mais** — sem data, `n_exigido`, δ, método, confiança ou duração, que vêm congelados do selamento da calibração. **Não existe caminho global**: `regime` é obrigatório e a janela nasce de um `calibracao_regime_fechamento`, com o regime conferido por gatilho contra o dele |
 | POST | `/api/calibracao/ajustar` | estima sobre o piloto, deriva o ajuste e **reexecuta o B1 negativo** sob a versão calibrada. Nunca torna o simulador mais otimista |
 | POST | `/api/calibracao/revalidar` | confirma na janela selada, **sem novo ajuste** e **uma única vez**. Exige `LB₉₅(p10(E2)) ≥ 0`, não o ponto |
 

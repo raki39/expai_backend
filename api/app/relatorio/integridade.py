@@ -136,6 +136,23 @@ GATILHOS_ESPERADOS = [
     "calibracao_regime_regra_sem_update",
     "calibracao_regime_regra_sem_delete",
     "calibracao_observacao_identidade_congelada",
+    # As garantias que o usuario exigiu antes do commit, em 2026-09-22.
+    "janela_calibracao_selo_do_relogio_do_banco",
+    "janela_revalidacao_selo_do_relogio_do_banco",
+    "janela_calibracao_sem_dado_preexistente",
+    "janela_revalidacao_sem_dado_preexistente",
+    "janela_revalidacao_regime_do_fechamento",
+    "calibracao_observacao_regime_fechado",
+    "calibracao_observacao_revalidacao_consumida",
+    "calibracao_observacao_identidade_da_revalidacao",
+    # 2026-10-07: a fronteira deixou de ser conferida e passou a ser
+    # CALCULADA pelo banco, e as fronteiras de origem deixaram de ter duas
+    # fontes.
+    "janela_calibracao_de_ms_calculado_pelo_banco",
+    "janela_calibracao_fronteiras_conferidas",
+    "janela_revalidacao_de_ms_calculado_pelo_banco",
+    "janela_revalidacao_fronteiras_conferidas",
+    "janela_revalidacao_duracao_congelada",
     "monitor_reteste_e_posterior", "monitor_reteste_sem_update",
     "hypothesis_dimensionamento_coerente",
 ]

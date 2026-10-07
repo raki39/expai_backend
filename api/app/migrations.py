@@ -4407,9 +4407,20 @@ MIGRACOES: list[tuple[int, str, str]] = [
             venue    TEXT    NOT NULL,
             symbol   TEXT    NOT NULL,
 
-            de_ms        INTEGER NOT NULL,
-            selada_em_ms INTEGER NOT NULL,
-            selada_em    TEXT    NOT NULL,
+            de_ms INTEGER NOT NULL,
+
+            -- O SELO E DO RELOGIO DO BANCO, e nao de quem insere.
+            --
+            -- `CHECK (de_ms > selada_em_ms)` sozinho nao garante nada se um
+            -- INSERT cru puder escolher `selada_em_ms`: bastaria data-lo no
+            -- passado para que um periodo JA INSPECIONADO passasse por futuro.
+            -- O DEFAULT gera, e o gatilho `..._selo_do_relogio_do_banco`
+            -- CONFERE contra o relogio do banco - as duas coisas, porque o
+            -- DEFAULT sozinho e sobreposto por quem nomeia a coluna.
+            selada_em_ms INTEGER NOT NULL
+                DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+            selada_em    TEXT    NOT NULL
+                DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
 
             -- De onde ela nasceu. Guardar torna a disjuncao conferivel sem ir
             -- procurar a outra tabela - mesmo desenho de `janela_revalidacao`.
@@ -4446,8 +4457,30 @@ MIGRACOES: list[tuple[int, str, str]] = [
             -- POSTERIOR AO PROPRIO SELAMENTO (decisao 3).
             CHECK (de_ms > selada_em_ms),
             -- E numa FRONTEIRA DE GRADE.
-            CHECK (de_ms % grade_ms = 0)
+            CHECK (de_ms % grade_ms = 0),
+            -- E A PRIMEIRA FRONTEIRA ADMISSIVEL, e nao uma qualquer adiante.
+            --
+            -- Sem isto, "posterior ao selamento" deixaria escolher QUAO
+            -- posterior - e escolher o inicio e escolher o periodo. A conta e
+            -- direta: se a grade ANTERIOR ainda satisfizesse as duas
+            -- condicoes, entao `de_ms` nao era a primeira.
+            CHECK (NOT ((de_ms - grade_ms) > selada_em_ms
+                    AND (de_ms - grade_ms) >= piloto_ate_ms_exclusive))
         );
+
+        -- O relogio e o do BANCO. A tolerancia existe porque `strftime` trunca
+        -- ao segundo e a transacao leva algum tempo; ela e larga o bastante
+        -- para nao piscar e curta o bastante para que um selo retroativo -
+        -- que e o unico que serve para trapacear - nao caiba nela.
+        CREATE TRIGGER janela_calibracao_selo_do_relogio_do_banco
+        BEFORE INSERT ON janela_calibracao
+        WHEN ABS(NEW.selada_em_ms
+                 - CAST(strftime('%s', 'now') AS INTEGER) * 1000) > 60000
+        BEGIN
+            SELECT RAISE(ABORT,
+                'selo fora do relogio do BANCO: datar o selamento no passado faria um periodo ja inspecionado passar por futuro');
+        END;
+
 
         CREATE TRIGGER janela_calibracao_sem_update
         BEFORE UPDATE ON janela_calibracao
@@ -4475,12 +4508,34 @@ MIGRACOES: list[tuple[int, str, str]] = [
             regime TEXT NOT NULL
                 CHECK (regime IN ('vol_baixa', 'vol_media', 'vol_alta')),
 
-            n_exigido       INTEGER NOT NULL CHECK (n_exigido > 0),
+            -- OS DOIS ALVOS DE AMOSTRA, EM COLUNAS SEPARADAS.
+            --
+            -- Eles valem o mesmo numero, e a igualdade e DECISAO declarada -
+            -- nao reuso silencioso de uma coluna. As duas janelas medem a
+            -- mesma grandeza (`E2` do mesmo regime) com o mesmo `delta` e o
+            -- mesmo `sigma_e` do piloto, entao a formula devolve o mesmo `n`.
+            --
+            -- Uma coluna so faria a igualdade ser INFERIDA por quem lesse, e
+            -- no dia em que um dos dois mudasse - por exemplo se a revalidacao
+            -- passasse a exigir mais - o outro mudaria junto sem que nada
+            -- avisasse. E o padrao que este projeto conta trinta e uma vezes.
+            n_exigido_calibracao  INTEGER NOT NULL
+                                  CHECK (n_exigido_calibracao > 0),
+            n_exigido_revalidacao INTEGER NOT NULL
+                                  CHECK (n_exigido_revalidacao > 0),
+            alvos_iguais_por_decisao INTEGER NOT NULL
+                CHECK (alvos_iguais_por_decisao IN (0, 1)),
+            por_que_os_alvos TEXT NOT NULL,
+
             sigma_e_x1000   INTEGER NOT NULL,
             tau_x1000       INTEGER NOT NULL,
             piloto_n        INTEGER NOT NULL,
 
-            PRIMARY KEY (janela_calibracao_id, regime)
+            PRIMARY KEY (janela_calibracao_id, regime),
+
+            -- A declaracao nao pode mentir sobre os numeros que ela declara.
+            CHECK (alvos_iguais_por_decisao
+                   = (n_exigido_calibracao = n_exigido_revalidacao))
         );
 
         CREATE TRIGGER calibracao_regime_regra_sem_update
@@ -4511,14 +4566,20 @@ MIGRACOES: list[tuple[int, str, str]] = [
             regime              TEXT    NOT NULL
                 CHECK (regime IN ('vol_baixa', 'vol_media', 'vol_alta')),
 
-            n_exigido         INTEGER NOT NULL CHECK (n_exigido > 0),
+            -- O NOME DIZ QUAL DOS DOIS ALVOS. `n_exigido` sozinho valia
+            -- para os dois e nomeava nenhum: o fechamento alcanca o alvo da
+            -- CALIBRACAO, e o da revalidacao vive em
+            -- `calibracao_regime_regra.n_exigido_revalidacao`, congelado no
+            -- mesmo selamento e lido de la.
+            n_exigido_calibracao INTEGER NOT NULL
+                                 CHECK (n_exigido_calibracao > 0),
             n_efetivo_x1000   INTEGER NOT NULL,
             fim_ms_exclusive  INTEGER NOT NULL,
             delta_mili_bps    INTEGER NOT NULL CHECK (delta_mili_bps = 500),
             fechado_em        TEXT    NOT NULL,
 
             UNIQUE (janela_calibracao_id, regime),
-            CHECK (n_efetivo_x1000 >= n_exigido * 1000)
+            CHECK (n_efetivo_x1000 >= n_exigido_calibracao * 1000)
         );
 
         CREATE TRIGGER calibracao_regime_fechamento_sem_update
@@ -4568,8 +4629,12 @@ MIGRACOES: list[tuple[int, str, str]] = [
                 REFERENCES calibracao_regime_fechamento(id),
             calibracao_ate_ms_exclusive INTEGER NOT NULL,
 
-            selada_em_ms INTEGER NOT NULL,
-            selada_em    TEXT    NOT NULL,
+            -- Mesmo desenho de `janela_calibracao`: o DEFAULT gera e o
+            -- gatilho CONFERE contra o relogio do banco.
+            selada_em_ms INTEGER NOT NULL
+                DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+            selada_em    TEXT    NOT NULL
+                DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             grade_ms     INTEGER NOT NULL CHECK (grade_ms > 0),
 
             UNIQUE (contrato, venue, symbol, regime),
@@ -4579,14 +4644,60 @@ MIGRACOES: list[tuple[int, str, str]] = [
             UNIQUE (calibracao_fechamento_id),
 
             CHECK (ate_ms_exclusive > de_ms),
-            -- DISJUNTA DA CALIBRACAO DAQUELE REGIME.
+            -- AS QUATRO CONDICOES DO INICIO, SIMULTANEAS:
+            --
+            --   2. posterior ao ultimo instante usado na calibracao DELE
             CHECK (de_ms >= calibracao_ate_ms_exclusive),
-            -- E NO FUTURO: dado que ja existia quando a janela foi selada nao
-            -- entra. Sem isto, "reservar o periodo" seria escolher um periodo
-            -- ja visto, que e a quinta pergunta do teste de escopo.
+            --   1. no futuro do proprio selamento - dado que ja existia
+            --      quando a janela foi selada nao entra. Sem isto, "reservar
+            --      o periodo" seria escolher um periodo ja visto, que e a
+            --      quinta pergunta do teste de escopo
             CHECK (de_ms > selada_em_ms),
-            CHECK (de_ms % grade_ms = 0)
+            --   3. alinhado a grade
+            CHECK (de_ms % grade_ms = 0),
+            --   1b. e a PRIMEIRA grade que satisfaz as duas primeiras: se a
+            --      anterior ainda servisse, `de_ms` nao seria a primeira, e
+            --      escolher quao adiante comecar e escolher o periodo
+            CHECK (NOT ((de_ms - grade_ms) > selada_em_ms
+                    AND (de_ms - grade_ms) >= calibracao_ate_ms_exclusive))
         );
+
+        -- CONDICAO 4 - nenhuma observacao JA EXISTENTE no instante do selo
+        -- pode entrar. Ela nao mora aqui: o gatilho que a impoe le
+        -- `calibracao_observacao`, que so e recriada mais abaixo, e SQLite
+        -- resolve os nomes ao CRIAR o gatilho. Ver a secao 6.
+
+        CREATE TRIGGER janela_revalidacao_selo_do_relogio_do_banco
+        BEFORE INSERT ON janela_revalidacao
+        WHEN ABS(NEW.selada_em_ms
+                 - CAST(strftime('%s', 'now') AS INTEGER) * 1000) > 60000
+        BEGIN
+            SELECT RAISE(ABORT,
+                'selo fora do relogio do BANCO: datar o selamento no passado faria um periodo ja inspecionado passar por futuro');
+        END;
+
+        -- O REGIME DA JANELA E O REGIME DO FECHAMENTO, e a mesma serie.
+        --
+        -- O fato "de que regime e esta revalidacao" tem DUAS fontes - a coluna
+        -- daqui e a do fechamento a que ela se liga -, e duas fontes do mesmo
+        -- fato divergem. Um fechamento de `vol_baixa` com janela declarada
+        -- `vol_alta` passaria por todos os CHECK acima: as datas fechariam, o
+        -- UNIQUE fecharia, e a revalidacao mediria um regime confirmando
+        -- outro.
+        CREATE TRIGGER janela_revalidacao_regime_do_fechamento
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM calibracao_regime_fechamento f
+              JOIN janela_calibracao j ON j.id = f.janela_calibracao_id
+             WHERE f.id = NEW.calibracao_fechamento_id
+               AND f.regime = NEW.regime
+               AND j.contrato = NEW.contrato AND j.venue = NEW.venue
+               AND j.symbol = NEW.symbol
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'vinculo cruzado: o regime e a serie da janela de revalidacao tem de ser os do fechamento a que ela se liga, senao um regime confirmaria outro');
+        END;
 
         CREATE TRIGGER janela_revalidacao_sem_update
         BEFORE UPDATE ON janela_revalidacao
@@ -4657,6 +4768,21 @@ MIGRACOES: list[tuple[int, str, str]] = [
             finalidade TEXT NOT NULL
                 CHECK (finalidade IN ('piloto', 'calibracao', 'revalidacao')),
 
+            -- O REGIME DO INSTANTE, gravado com a observacao.
+            --
+            -- Ele era DERIVADO a cada leitura pelo detector congelado (ADR
+            -- 0026), e derivar bastava enquanto ninguem precisava do fato
+            -- dentro do BANCO. Precisa agora: a parada e por regime, e o
+            -- gatilho que congela a serie de um regime fechado nao tem como
+            -- saber de que regime e o instante se o instante nao disser.
+            --
+            -- `indefinido` NAO e regime - e a declaracao de que ainda nao da
+            -- para dizer -, e por isso ele entra aqui e nao entra em
+            -- fechamento, override nem revalidacao.
+            regime TEXT NOT NULL CHECK (
+                regime IN ('vol_baixa', 'vol_media', 'vol_alta', 'indefinido')
+            ),
+
             -- A IDENTIDADE EXECUTAVEL que produziu `p_exec_previsto`. As duas
             -- metades, porque `config_hash` sozinho parou de identificar o
             -- comportamento quando o ADR 0033 pos o perfil fora do payload.
@@ -4694,7 +4820,7 @@ MIGRACOES: list[tuple[int, str, str]] = [
 
         CREATE INDEX idx_calibracao_observacao_serie
             ON calibracao_observacao(contrato, venue, symbol, lado,
-                                     finalidade, t_grid_ms);
+                                     finalidade, regime, t_grid_ms);
 
         CREATE TRIGGER calibracao_observacao_sem_update
         BEFORE UPDATE ON calibracao_observacao
@@ -4730,10 +4856,13 @@ MIGRACOES: list[tuple[int, str, str]] = [
                    AND j.symbol = NEW.symbol
                    AND NEW.t_grid_ms >= j.de_ms))
             OR
+            -- A janela de revalidacao e POR REGIME: sem `j.regime =
+            -- NEW.regime`, um instante de `vol_alta` entraria na janela de
+            -- `vol_baixa` e um regime confirmaria outro.
             (NEW.finalidade = 'revalidacao' AND EXISTS (
                 SELECT 1 FROM janela_revalidacao j
                  WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
-                   AND j.symbol = NEW.symbol
+                   AND j.symbol = NEW.symbol AND j.regime = NEW.regime
                    AND NEW.t_grid_ms >= j.de_ms
                    AND NEW.t_grid_ms < j.ate_ms_exclusive))
         )
@@ -4864,6 +4993,255 @@ MIGRACOES: list[tuple[int, str, str]] = [
         BEGIN
             SELECT RAISE(ABORT,
                 'calibracao_regime e apenas por acrescimo: apagar o regime nao calibrado faria a cobertura parecer maior do que e');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 6. AS BARREIRAS QUE ATRAVESSAM TABELAS
+        --
+        -- Todas leem `calibracao_observacao`, que so existe na forma nova a
+        -- partir da secao 4 - e SQLite resolve os nomes ao CRIAR o gatilho.
+        -- Por isso elas moram aqui, e nao ao lado da tabela que vigiam.
+        --
+        -- As tres ultimas trazem `NOT EXISTS (a linha ja existe)` de
+        -- proposito: `registrar` usa `INSERT OR IGNORE` e reprocessa a janela
+        -- inteira, e `RAISE(ABORT)` dispara ANTES da resolucao de conflito.
+        -- Sem essa clausula, rematerializar recusaria no primeiro instante ja
+        -- gravado - e a barreira e contra instante NOVO, nao contra repeticao
+        -- inofensiva do mesmo.
+        -- ------------------------------------------------------------------
+
+        -- (a) A janela de calibracao nao pode nascer sobre dado ja existente.
+        CREATE TRIGGER janela_calibracao_sem_dado_preexistente
+        BEFORE INSERT ON janela_calibracao
+        WHEN EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.t_grid_ms >= NEW.de_ms
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'ja ha observacao materializada em instante dentro da janela que se quer selar: reservar um periodo ja visto e escolher o periodo depois de ver o dado');
+        END;
+
+        -- (b) Nem a de revalidacao. O recorte e POR REGIME porque a
+        -- calibracao dos outros regimes segue correndo: o que nao pode e
+        -- existir observacao DESTE regime dentro da janela reservada para
+        -- confirma-lo. E a condicao 4 do inicio da revalidacao.
+        CREATE TRIGGER janela_revalidacao_sem_dado_preexistente
+        BEFORE INSERT ON janela_revalidacao
+        WHEN EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.regime = NEW.regime
+               AND o.t_grid_ms >= NEW.de_ms
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'ja ha observacao deste regime em instante dentro da janela de revalidacao que se quer selar: confirmar sobre dado ja visto nao confirma nada');
+        END;
+
+        -- (c) FECHOU, CONGELOU. Depois do fechamento de um regime, nenhuma
+        -- observacao NOVA de finalidade `calibracao` entra nele.
+        --
+        -- Sem isto, "parar em `n_exigido`" seria so o momento em que alguem
+        -- resolveu olhar: a serie continuaria crescendo e a proxima leitura
+        -- daria outro `p10`. A parada tem de congelar o que foi medido.
+        CREATE TRIGGER calibracao_observacao_regime_fechado
+        BEFORE INSERT ON calibracao_observacao
+        WHEN NEW.finalidade = 'calibracao'
+         AND NOT EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.t_grid_ms = NEW.t_grid_ms
+               AND o.lado = NEW.lado)
+         AND EXISTS (
+            SELECT 1 FROM calibracao_regime_fechamento f
+              JOIN janela_calibracao j ON j.id = f.janela_calibracao_id
+             WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
+               AND j.symbol = NEW.symbol AND f.regime = NEW.regime)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a calibracao deste regime esta FECHADA: acrescentar observacao depois da parada faria o p10 medido deixar de ser o p10 que fechou');
+        END;
+
+        -- (d) CONSUMIU, CONGELOU. Depois do uso da revalidacao, nenhuma
+        -- observacao NOVA de finalidade `revalidacao` entra naquela janela.
+        --
+        -- A janela e de uso unico (PRIMARY KEY de `revalidacao_uso`). Deixar a
+        -- serie crescer depois do veredito permitiria reler o mesmo `LB95`
+        -- sobre outra amostra - repetir o teste ate passar, pela porta dos
+        -- fundos.
+        CREATE TRIGGER calibracao_observacao_revalidacao_consumida
+        BEFORE INSERT ON calibracao_observacao
+        WHEN NEW.finalidade = 'revalidacao'
+         AND NOT EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.t_grid_ms = NEW.t_grid_ms
+               AND o.lado = NEW.lado)
+         AND EXISTS (
+            SELECT 1 FROM revalidacao_uso u
+              JOIN janela_revalidacao jr ON jr.id = u.janela_id
+             WHERE jr.contrato = NEW.contrato AND jr.venue = NEW.venue
+               AND jr.symbol = NEW.symbol AND jr.regime = NEW.regime
+               AND NEW.t_grid_ms >= jr.de_ms
+               AND NEW.t_grid_ms < jr.ate_ms_exclusive)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'esta janela de revalidacao ja foi consumida: acrescentar observacao depois do veredito e repetir o teste ate passar pela porta dos fundos');
+        END;
+
+        -- (e) A REVALIDACAO CONFIRMA O QUE A CALIBRACAO PRODUZIU, e nada mais.
+        --
+        -- A identidade executavel da observacao de revalidacao tem de ser
+        -- EXATAMENTE a que saiu da calibracao daquele regime: a
+        -- `config_version` que o ajuste criou, e o perfil que ela referencia.
+        --
+        -- A vigente NAO serve, e e o caso perigoso: ela e a que esta a mao.
+        -- Confirmar sob a config vigente mediria um simulador diferente
+        -- daquele que o override descreve, e o veredito valeria sobre outra
+        -- coisa. Um perfil de outra calibracao tambem nao serve - e o
+        -- `estado = 'calibrado'` exige que aquele regime tenha de fato ganho
+        -- override naquela versao.
+        CREATE TRIGGER calibracao_observacao_identidade_da_revalidacao
+        BEFORE INSERT ON calibracao_observacao
+        WHEN NEW.finalidade = 'revalidacao'
+         AND NOT EXISTS (
+            SELECT 1 FROM calibracao_observacao o
+             WHERE o.contrato = NEW.contrato AND o.venue = NEW.venue
+               AND o.symbol = NEW.symbol AND o.t_grid_ms = NEW.t_grid_ms
+               AND o.lado = NEW.lado)
+         AND NOT EXISTS (
+            SELECT 1
+              FROM janela_revalidacao jr
+              JOIN calibracao_regime_fechamento f
+                ON f.id = jr.calibracao_fechamento_id
+              JOIN calibracao_versao cv
+                ON cv.janela_calibracao_id = f.janela_calibracao_id
+               AND cv.aplicado = 1
+              JOIN calibracao_regime cr
+                ON cr.calibracao_versao_id = cv.id AND cr.regime = jr.regime
+               AND cr.estado = 'calibrado'
+              JOIN config_version nova ON nova.id = cv.config_version_nova
+             WHERE jr.contrato = NEW.contrato AND jr.venue = NEW.venue
+               AND jr.symbol = NEW.symbol AND jr.regime = NEW.regime
+               AND NEW.t_grid_ms >= jr.de_ms
+               AND NEW.t_grid_ms < jr.ate_ms_exclusive
+               AND NEW.config_version_id = cv.config_version_nova
+               AND NEW.calibracao_perfil_hash = nova.calibracao_perfil_hash)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'identidade errada na revalidacao: ela confirma a config_version e o perfil que a calibracao DAQUELE regime produziu, e nunca a configuracao vigente nem o perfil de outra calibracao');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 7. O INICIO E CALCULADO PELO BANCO, E NAO CONFERIDO CONTRA O SELO
+        --
+        -- O `CHECK (NOT ((de_ms - grade_ms) > selada_em_ms AND ...))` diz que
+        -- `de_ms` e a primeira grade admissivel **em relacao ao selo gravado**.
+        -- Isso nao basta: o selo tem tolerancia de 60 s contra o relogio do
+        -- banco, e 60 s de folga perto de uma virada de grade bastam para
+        -- escolher a fronteira.
+        --
+        -- O ataque, concreto: o relogio real esta 10 s depois da fronteira B.
+        -- Um `INSERT` cru carimba `selada_em_ms = agora - 59 s`, que cai ANTES
+        -- de B, e declara `de_ms = B`. Os dois `CHECK` passam - `de_ms >
+        -- selada_em_ms`, e a grade anterior nao serve. E a janela comeca num
+        -- instante que JA PASSOU, cuja amostra de BBO ja foi capturada (a
+        -- tolerancia do ADR 0032 e de 2 s). Uma grade inteira de dado
+        -- pre-existente entra, e o gatilho `..._sem_dado_preexistente` nao
+        -- pega: a observacao ainda nao foi materializada.
+        --
+        -- Aqui `de_ms` deixa de ser CONFERIDO e passa a ser CALCULADO:
+        --
+        --     de_ms = MAX(primeira grade > relogio do BANCO, fim do anterior)
+        --
+        -- O selo continua gravado e continua conferido, mas ele deixou de ter
+        -- qualquer influencia sobre a fronteira. E a tolerancia volta a ser o
+        -- que deve ser: uma folga para o carimbo, e nao uma folga para a
+        -- escolha.
+        --
+        -- `strftime` e nao-deterministico, entao isto NAO pode ser `CHECK`:
+        -- SQLite recusa funcao nao-deterministica em `CHECK`. Tem de ser
+        -- gatilho.
+        -- ------------------------------------------------------------------
+        CREATE TRIGGER janela_calibracao_de_ms_calculado_pelo_banco
+        BEFORE INSERT ON janela_calibracao
+        WHEN NEW.de_ms != MAX(
+                (CAST(strftime('%s', 'now') AS INTEGER) * 1000
+                 / NEW.grade_ms + 1) * NEW.grade_ms,
+                NEW.piloto_ate_ms_exclusive)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'de_ms nao e a primeira grade admissivel pelo relogio do BANCO: a fronteira e CALCULADA, e nao conferida contra o selo - 60 s de tolerancia perto de uma virada de grade bastariam para escolhe-la');
+        END;
+
+        -- E AS FRONTEIRAS DE ORIGEM NAO SAO DECLARADAS: elas sao conferidas.
+        --
+        -- `piloto_ate_ms_exclusive` e `grade_ms` existiam em duas fontes - a
+        -- coluna daqui e a tabela de origem -, e duas fontes do mesmo fato
+        -- divergem. Pior: as duas entram na conta de `de_ms` acima, entao
+        -- declarar um fim de piloto adiante empurraria a janela para onde
+        -- quem insere quisesse, com todos os `CHECK` fechando.
+        CREATE TRIGGER janela_calibracao_fronteiras_conferidas
+        BEFORE INSERT ON janela_calibracao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM janela_piloto p, bbo_contrato c
+             WHERE p.contrato = NEW.contrato AND p.venue = NEW.venue
+               AND p.symbol = NEW.symbol
+               AND p.ate_ms_exclusive = NEW.piloto_ate_ms_exclusive
+               AND c.contrato = NEW.contrato
+               AND c.grade_ms = NEW.grade_ms
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'piloto_ate_ms_exclusive ou grade_ms nao coincidem com janela_piloto e bbo_contrato: a fronteira de origem e CONFERIDA, e nao declarada');
+        END;
+
+        -- O mesmo nas tres pontas da revalidacao.
+        CREATE TRIGGER janela_revalidacao_de_ms_calculado_pelo_banco
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NEW.de_ms != MAX(
+                (CAST(strftime('%s', 'now') AS INTEGER) * 1000
+                 / NEW.grade_ms + 1) * NEW.grade_ms,
+                NEW.calibracao_ate_ms_exclusive)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'de_ms nao e a primeira grade admissivel pelo relogio do BANCO: a fronteira da revalidacao e CALCULADA, e nao conferida contra o selo');
+        END;
+
+        CREATE TRIGGER janela_revalidacao_fronteiras_conferidas
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM calibracao_regime_fechamento f
+              JOIN janela_calibracao j ON j.id = f.janela_calibracao_id
+             WHERE f.id = NEW.calibracao_fechamento_id
+               AND f.fim_ms_exclusive = NEW.calibracao_ate_ms_exclusive
+               AND j.grade_ms = NEW.grade_ms
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'calibracao_ate_ms_exclusive ou grade_ms nao coincidem com o fechamento a que a janela se liga: a fronteira de origem e CONFERIDA, e nao declarada');
+        END;
+
+        -- E A DURACAO E A CONGELADA, imposta pelo banco.
+        --
+        -- O parametro `dias` saiu da assinatura de `selar_revalidacao`, e isso
+        -- fechava o caminho do codigo. Um `INSERT` cru ainda podia encurtar a
+        -- confirmacao - e encurtar a confirmacao e escolher quanta evidencia
+        -- ela vai exigir. A duracao vem de `janela_calibracao`, selada antes do
+        -- primeiro dado da calibracao.
+        CREATE TRIGGER janela_revalidacao_duracao_congelada
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM calibracao_regime_fechamento f
+              JOIN janela_calibracao j ON j.id = f.janela_calibracao_id
+             WHERE f.id = NEW.calibracao_fechamento_id
+               AND NEW.ate_ms_exclusive = NEW.de_ms + j.duracao_minima_ms
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a duracao da revalidacao nao e a congelada em janela_calibracao.duracao_minima_ms: encurtar a confirmacao e escolher quanta evidencia ela exige');
         END;
         """,
     ),

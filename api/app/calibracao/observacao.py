@@ -47,6 +47,7 @@ from ..config.schema import ExperimentConfig
 from ..dataset.loader import BarraCarregada
 from ..simulador.execucao import preco_executado, preco_referencia
 from ..store import bloco_atomico
+from . import regimes
 
 log = logging.getLogger(__name__)
 
@@ -198,6 +199,8 @@ class Materializacao:
     gravadas: int
     ja_existiam: int
     lados: tuple[str, ...]
+    por_regime: dict[str, int]
+    fora_do_regime_da_janela: int
 
     def como_dict(self) -> dict:
         return {
@@ -216,6 +219,8 @@ class Materializacao:
             "gravadas": self.gravadas,
             "ja_existiam": self.ja_existiam,
             "lados": list(self.lados),
+            "por_regime": dict(sorted(self.por_regime.items())),
+            "fora_do_regime_da_janela": self.fora_do_regime_da_janela,
             "o_que_cada_um_e": {
                 "instantes_validos_na_janela":
                     "instantes de GRADE com BBO valida dentro da janela",
@@ -231,6 +236,16 @@ class Materializacao:
                 "na_estatistica":
                     "comparaveis - excluidos. E o UNICO que alimenta o"
                     " bootstrap",
+                "por_regime":
+                    "candidatos de lado por regime do instante, pelo detector"
+                    " congelado do ADR 0026. `indefinido` NAO e regime: e a"
+                    " declaracao de que ainda nao ha 672 barras anteriores"
+                    " para classificar",
+                "fora_do_regime_da_janela":
+                    "candidatos PULADOS porque o regime do instante nao e o da"
+                    " janela. Só a revalidacao tem janela por regime; na"
+                    " calibracao e no piloto este numero e zero por"
+                    " construcao, porque a janela nao tem regime",
             },
         }
 
@@ -250,6 +265,7 @@ def registrar(
     ate_ms_exclusive: int,
     orcamento_cents: int,
     lados: tuple[str, ...] = LADOS,
+    apenas_regime: str | None = None,
 ) -> Materializacao:
     """Pareia BBO com barra fechada e grava a observacao de cada instante.
 
@@ -267,6 +283,19 @@ def registrar(
     lado)` - **sem** `config_version_id`. Reprocessar sob a MESMA identidade
     nao duplica nada; sob outra, o gatilho de congelamento **recusa** em vez de
     acrescentar (ADR 0041 par.8).
+
+    ## `apenas_regime`, e por que ele e obrigatorio na revalidacao
+
+    A janela de revalidacao e POR REGIME; a observacao e por INSTANTE. Uma
+    janela de catorze dias atravessa varios regimes - e o gatilho
+    `calibracao_observacao_dentro_da_janela` recusa um instante cujo regime nao
+    seja o da janela.
+
+    Recusar e o comportamento certo do gatilho e seria o comportamento ERRADO
+    aqui: sem o filtro, o primeiro instante de outro regime abortaria a
+    materializacao INTEIRA, e a revalidacao nunca sairia do chao. Quem nao
+    pertence e PULADO e CONTADO em `fora_do_regime_da_janela` - pulado em
+    silencio seria outro defeito.
     """
     if finalidade not in FINALIDADES:
         raise ValueError(
@@ -308,10 +337,27 @@ def registrar(
         (c.timeframe, venue, symbol, contrato, de_ms, ate_ms_exclusive),
     ).fetchall()
 
-    gravadas = ja_existiam = excluidos = 0
+    # O REGIME DE CADA INSTANTE, calculado UMA vez e gravado com a linha.
+    #
+    # Ele era derivado a cada leitura. Passou a ser coluna porque a parada e
+    # POR REGIME e o gatilho que congela a serie de um regime fechado precisa
+    # saber, DENTRO DO BANCO, de que regime e o instante que esta entrando.
+    mapa = regimes.regimes_das_barras(
+        conn, venue=venue, symbol=symbol, timeframe=c.timeframe
+    )
+
+    gravadas = ja_existiam = excluidos = fora_do_regime = 0
+    por_regime: dict[str, int] = {}
     agora = _agora()
     with bloco_atomico(conn, "calibracao_registrar"):
         for linha in linhas:
+            regime = regimes.regime_do_instante(
+                mapa, int(linha["t_grid_ms"])
+            )
+            por_regime[regime] = por_regime.get(regime, 0) + len(lados)
+            if apenas_regime is not None and regime != apenas_regime:
+                fora_do_regime += len(lados)
+                continue
             for lado in lados:
                 o = calcular(
                     t_grid_ms=int(linha["t_grid_ms"]), lado=lado,
@@ -323,12 +369,14 @@ def registrar(
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO calibracao_observacao ("
                     " contrato, venue, symbol, t_grid_ms, lado, finalidade,"
-                    " config_version_id, calibracao_perfil_hash, janela_hash,"
+                    " regime, config_version_id, calibracao_perfil_hash,"
+                    " janela_hash,"
                     " abertura, bbo_bid, bbo_bid_qty, bbo_ask, bbo_ask_qty,"
                     " p_exec_previsto, e1_mili_bps, e2_mili_bps,"
                     " nocional_cents, dentro_do_l1, criado_em)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (contrato, venue, symbol, o.t_grid_ms, o.lado, finalidade,
+                     regime,
                      config_version_id, calibracao_perfil_hash, janela_hash,
                      o.abertura, o.bbo_bid, o.bbo_bid_qty, o.bbo_ask,
                      o.bbo_ask_qty, o.p_exec_previsto, o.e1_mili_bps,
@@ -341,7 +389,9 @@ def registrar(
                     ja_existiam += 1
 
     candidatos = instantes_validos * len(lados)
-    comparaveis = len(linhas) * len(lados)
+    # Os que nao pertencem a janela saem do numerador E do denominador: eles
+    # nao sao perda nossa, sao instantes de outro regime.
+    comparaveis = len(linhas) * len(lados) - fora_do_regime
     r = Materializacao(
         finalidade=finalidade, de_ms=de_ms,
         ate_ms_exclusive=ate_ms_exclusive, janela_hash=janela_hash,
@@ -352,6 +402,7 @@ def registrar(
         excluidos_por_l1=excluidos,
         na_estatistica=comparaveis - excluidos,
         gravadas=gravadas, ja_existiam=ja_existiam, lados=tuple(lados),
+        por_regime=por_regime, fora_do_regime_da_janela=fora_do_regime,
     )
     log.info("calibracao.observacoes", extra={
         "contrato": contrato, "symbol": symbol, "finalidade": finalidade,
@@ -379,12 +430,19 @@ def _serie(
     conn: sqlite3.Connection, *, sql_finalidade: str, contrato: str,
     venue: str, symbol: str, lado: str,
     de_ms: int | None, ate_ms_exclusive: int | None,
-    apenas_dentro_do_l1: bool,
+    apenas_dentro_do_l1: bool, regime: str | None,
 ) -> list[int]:
     onde = ["contrato = ?", "venue = ?", "symbol = ?", "lado = ?"]
     args: list[object] = [contrato, venue, symbol, lado]
     if apenas_dentro_do_l1:
         onde.append("dentro_do_l1 = 1")
+    if regime is not None:
+        # A COLUNA, e nao o detector rodado de novo. O regime foi decidido na
+        # materializacao e gravado com a linha; recalcula-lo aqui criaria uma
+        # segunda derivacao do mesmo fato, que e como o `n_efetivo` do run 30
+        # passou a ter dois valores.
+        onde.append("regime = ?")
+        args.append(regime)
     if de_ms is not None:
         onde.append("t_grid_ms >= ?")
         args.append(de_ms)
@@ -405,7 +463,7 @@ def _serie(
 def serie_e2_do_piloto(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
-    apenas_dentro_do_l1: bool = True,
+    apenas_dentro_do_l1: bool = True, regime: str | None = None,
 ) -> list[int]:
     """`E2` do PILOTO. **So dimensionamento e diagnostico.**
 
@@ -421,14 +479,14 @@ def serie_e2_do_piloto(
         conn, sql_finalidade="finalidade = 'piloto'", contrato=contrato,
         venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
         ate_ms_exclusive=ate_ms_exclusive,
-        apenas_dentro_do_l1=apenas_dentro_do_l1,
+        apenas_dentro_do_l1=apenas_dentro_do_l1, regime=regime,
     )
 
 
 def serie_e2_da_calibracao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
-    apenas_dentro_do_l1: bool = True,
+    apenas_dentro_do_l1: bool = True, regime: str | None = None,
 ) -> list[int]:
     """`E2` da CALIBRACAO. A unica serie que vira override de `spread_bps`.
 
@@ -440,21 +498,28 @@ def serie_e2_da_calibracao(
         conn, sql_finalidade="finalidade = 'calibracao'", contrato=contrato,
         venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
         ate_ms_exclusive=ate_ms_exclusive,
-        apenas_dentro_do_l1=apenas_dentro_do_l1,
+        apenas_dentro_do_l1=apenas_dentro_do_l1, regime=regime,
     )
 
 
 def serie_e2_da_revalidacao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     lado: str, de_ms: int | None = None, ate_ms_exclusive: int | None = None,
-    apenas_dentro_do_l1: bool = True,
+    apenas_dentro_do_l1: bool = True, regime: str | None = None,
 ) -> list[int]:
-    """`E2` da REVALIDACAO. Confirma, e nunca reajusta."""
+    """`E2` da REVALIDACAO. Confirma, e nunca reajusta.
+
+    **O `regime` e obrigatorio na pratica**, e quem o exige e `ajuste.revalidar`:
+    a janela de revalidacao e POR REGIME desde o ADR 0041, e ler a janela
+    inteira sem filtrar faria instantes de `vol_alta` confirmarem o override de
+    `vol_baixa`. Ele fica opcional na assinatura porque `_serie` e comum as
+    tres finalidades; a obrigatoriedade mora no chamador, que nao tem default.
+    """
     return _serie(
         conn, sql_finalidade="finalidade = 'revalidacao'", contrato=contrato,
         venue=venue, symbol=symbol, lado=lado, de_ms=de_ms,
         ate_ms_exclusive=ate_ms_exclusive,
-        apenas_dentro_do_l1=apenas_dentro_do_l1,
+        apenas_dentro_do_l1=apenas_dentro_do_l1, regime=regime,
     )
 
 
@@ -469,6 +534,15 @@ def quantas(
     """
     if finalidade not in FINALIDADES:
         raise ValueError(f"finalidade {finalidade!r} nao existe")
+    por_regime = {
+        str(r["regime"]): int(r["n"])
+        for r in conn.execute(
+            "SELECT regime, COUNT(*) AS n FROM calibracao_observacao"
+            " WHERE finalidade = ? AND contrato = ? AND venue = ?"
+            "   AND symbol = ? GROUP BY regime ORDER BY regime",
+            (finalidade, contrato, venue, symbol),
+        )
+    }
     linha = conn.execute(
         "SELECT COUNT(*) AS total,"
         "       SUM(dentro_do_l1) AS na_estatistica,"
@@ -501,4 +575,5 @@ def quantas(
             for r in identidades
         ],
         "identidade_unica": len(identidades) <= 1,
+        "por_regime": por_regime,
     }

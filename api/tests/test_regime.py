@@ -475,3 +475,102 @@ def test_ha_UMA_definicao_de_condicoes_da_config():
     c = ExperimentConfig()
     assert canonica(c) == pelo_cerebro(c) == pelas_maos(c)
     assert canonica(c).regimes_elegiveis is not None
+
+
+# ===========================================================================
+# REGIME INSTANTANEO x EPISODIO QUALIFICADO
+#
+# Sao DUAS grandezas, e confundi-las e o que tornaria `calibracao_observacao.
+# regime` retroativo. A exigencia do usuario em 2026-10-07:
+#
+#   - o regime GRAVADO e a classificacao CAUSAL do instante, calculada so com
+#     dado disponivel ate ele;
+#   - acrescentar barras futuras NAO pode altera-lo;
+#   - a permanencia de sete dias qualifica um EPISODIO depois, para cobertura e
+#     calibracao, e nao reclassifica a observacao.
+#
+# Os dois testes abaixo medem as duas metades: a primeira TEM de ser estavel, e
+# a segunda TEM de mudar. Se a segunda nao mudasse, `episodios` nao estaria
+# fazendo o trabalho dele.
+# ===========================================================================
+
+
+def test_barras_FUTURAS_nao_alteram_o_regime_INSTANTANEO():
+    """A propriedade que torna a coluna `regime` gravavel.
+
+    A janela de `t` e `retornos[t-janela : t]` - posicoes estritamente
+    anteriores. Acrescentar barras DEPOIS nao toca nenhuma delas, entao a
+    classificacao de `t` nao se move. Aqui as barras futuras sao de
+    volatilidade enorme, para que uma janela nao-causal gritasse.
+    """
+    J = 4
+    base = [1_000] * 20
+    antes = deteccao.classificar_serie(serie(base), janela=J)
+    depois = deteccao.classificar_serie(
+        serie(base + [900_000] * 20), janela=J
+    )
+
+    assert len(depois) > len(antes)
+    for a, b in zip(antes, depois):
+        assert (a.open_time_ms, a.regime, a.vol_mili_bps, a.motivo) == (
+            b.open_time_ms, b.regime, b.vol_mili_bps, b.motivo
+        ), f"o instante {a.open_time_ms} foi RECLASSIFICADO por barra futura"
+
+
+def test_o_EPISODIO_qualificado_MUDA_com_barras_futuras_e_tem_de_mudar():
+    """A outra metade, e ela e o contraste que torna a primeira legivel.
+
+    Um episodio so existe quando a corrida alcanca a permanencia, e a corrida
+    so se sabe completa olhando adiante. Ele qualifica DEPOIS - e e por isso
+    que ele nao pode ser o que se grava por instante.
+    """
+    J, P = 4, 6
+    base = [1_000] * 12
+    antes = deteccao.classificar_serie(serie(base), janela=J)
+    depois = deteccao.classificar_serie(serie(base + [1_000] * 12), janela=J)
+
+    ep_antes = deteccao.episodios(antes, permanencia=P)
+    ep_depois = deteccao.episodios(depois, permanencia=P)
+
+    assert ep_antes and ep_depois
+    assert ep_depois[0].barras > ep_antes[0].barras, (
+        "a corrida tem de crescer com as barras novas - senao `episodios` nao"
+        " esta medindo permanencia"
+    )
+    assert ep_depois[0].regime == ep_antes[0].regime
+
+
+def test_a_direcao_que_MUDA_e_o_BACKFILL_e_ela_fica_declarada():
+    """O que **pode** mover um instante ja classificado: dado que chega ATRASADO
+    para DENTRO da janela dele.
+
+    Nao e defeito nem contradiz o acima: a classificacao e funcao do conteudo
+    da janela, e o conteudo mudou. O apagao de 19 a 21/09 foi preenchido por
+    backfill, entao isto e real neste projeto, e nao hipotetico.
+
+    **A consequencia de desenho:** o valor GRAVADO e a classificacao no
+    instante da materializacao - a que calibrou -, e e ela a autoridade.
+    Recalcular depois pode divergir, e a divergencia tem de ser VISIVEL. Quem a
+    publica e `regimes.divergencias_do_gravado`.
+    """
+    J = 4
+    # a barra de indice 5 falta; o retorno que TERMINA em 6 fica `None`
+    com_lacuna = [
+        (i * 900_000, (None if i == 6 else 1_000))
+        for i in range(12) if i != 5
+    ]
+    depois_do_backfill = [(i * 900_000, 1_000) for i in range(12)]
+
+    a = {c.open_time_ms: c.regime
+         for c in deteccao.classificar_serie(com_lacuna, janela=J)}
+    b = {c.open_time_ms: c.regime
+         for c in deteccao.classificar_serie(depois_do_backfill, janela=J)}
+
+    mudaram = [ms for ms in a if ms in b and a[ms] != b[ms]]
+    assert mudaram, (
+        "se o backfill NAO mudasse nada, a nota acima estaria errada e a"
+        " deteccao de divergencia seria codigo sem motivo"
+    )
+    # e o que muda e sempre de INDEFINIDO para um regime - nunca de um regime
+    # para outro: o buraco era o que impedia classificar.
+    assert all(a[ms] is None for ms in mudaram)

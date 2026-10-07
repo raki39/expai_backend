@@ -150,6 +150,119 @@ def da_calibracao(
     }
 
 
+class IdentidadeDaCalibracaoAusente(Exception):
+    """Nao ha calibracao APLICADA para este regime.
+
+    A revalidacao confirma o que a calibracao produziu; sem override nao ha o
+    que confirmar, e materializar sob a config vigente mediria outro simulador.
+    """
+
+
+def da_revalidacao(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+    regime: str, orcamento_cents: int,
+) -> dict:
+    """Materializa a janela de REVALIDACAO daquele regime.
+
+    **A identidade executavel nao e recebida: ela e DERIVADA do fechamento a
+    que a janela se liga.** A `config_version` e o perfil sao os que o ajuste
+    daquele regime criou, e a simulacao roda sob ELES - nao sob a configuracao
+    vigente, que e a que esta a mao e por isso a tentacao.
+
+    Confirmar sob a config vigente mediria um simulador diferente daquele que o
+    override descreve, e o `LB95` valeria sobre outra coisa. O gatilho
+    `calibracao_observacao_identidade_da_revalidacao` recusa no BANCO; esta
+    funcao simplesmente nao tem como errar, porque nao ha parametro de
+    identidade para passar.
+    """
+    from ..config import service as config_service
+    from . import ajuste as ajuste_mod
+
+    janela = ajuste_mod.ler_revalidacao(
+        conn, contrato=contrato, venue=venue, symbol=symbol, regime=regime
+    )
+    if janela is None:
+        raise JanelaNaoSelada(
+            f"nao ha janela de revalidacao selada para o regime {regime!r}."
+            f" Ela nasce do fechamento da calibracao DELE, e materializar"
+            f" antes de selar seria escolher o periodo depois de ver o dado"
+        )
+
+    identidade = conn.execute(
+        # A identidade sai do CAMINHO INTEIRO: janela -> fechamento -> versao
+        # de calibracao aplicada -> o regime que de fato ganhou override ->
+        # a `config_version` nova e o perfil que ela referencia.
+        "SELECT cv.id AS calibracao_versao_id,"
+        "       cv.config_version_nova AS config_version_id,"
+        "       nova.calibracao_perfil_hash AS perfil"
+        "  FROM janela_revalidacao jr"
+        "  JOIN calibracao_regime_fechamento f"
+        "    ON f.id = jr.calibracao_fechamento_id"
+        "  JOIN calibracao_versao cv"
+        "    ON cv.janela_calibracao_id = f.janela_calibracao_id"
+        "   AND cv.aplicado = 1"
+        "  JOIN calibracao_regime cr"
+        "    ON cr.calibracao_versao_id = cv.id AND cr.regime = jr.regime"
+        "   AND cr.estado = 'calibrado'"
+        "  JOIN config_version nova ON nova.id = cv.config_version_nova"
+        " WHERE jr.id = ?",
+        (int(janela["id"]),),
+    ).fetchone()
+    if identidade is None:
+        raise IdentidadeDaCalibracaoAusente(
+            f"o regime {regime!r} nao tem calibracao APLICADA: nao ha"
+            f" `config_version` nem perfil produzidos por ela, e a revalidacao"
+            f" confirma exatamente esses dois. A configuracao vigente NAO"
+            f" ocupa o lugar deles"
+        )
+
+    versao = config_service.versao_por_id(
+        conn, int(identidade["config_version_id"])
+    )
+    if versao is None:  # pragma: no cover - a FK acima ja garante
+        raise IdentidadeDaCalibracaoAusente(
+            "a config_version produzida pela calibracao nao existe mais"
+        )
+
+    janela_hash = _hash_do_selo(
+        "revalidacao", contrato, venue, symbol, regime,
+        janela["de_ms"], janela["ate_ms_exclusive"], janela["selada_em_ms"],
+        janela["grade_ms"],
+    )
+    r = observacao.registrar(
+        conn, finalidade="revalidacao", contrato=contrato, venue=venue,
+        symbol=symbol, config=versao.config,
+        config_version_id=int(identidade["config_version_id"]),
+        calibracao_perfil_hash=str(identidade["perfil"]),
+        janela_hash=janela_hash, de_ms=int(janela["de_ms"]),
+        ate_ms_exclusive=int(janela["ate_ms_exclusive"]),
+        orcamento_cents=orcamento_cents,
+        # A janela e POR REGIME, e catorze dias atravessam varios. Sem este
+        # filtro o primeiro instante de outro regime abortaria a
+        # materializacao inteira, pelo gatilho `..._dentro_da_janela`.
+        apenas_regime=regime,
+    )
+    return {
+        **r.como_dict(),
+        "regime": regime,
+        "identidade_executavel": {
+            "config_version_id": int(identidade["config_version_id"]),
+            "calibracao_perfil_hash": str(identidade["perfil"]),
+            "calibracao_versao_id": int(identidade["calibracao_versao_id"]),
+            "de_onde_veio": (
+                "do fechamento a que esta janela se liga, e nao da"
+                " configuracao vigente. A revalidacao confirma o simulador que"
+                " a calibracao DAQUELE regime produziu"
+            ),
+        },
+        "o_que_o_janela_hash_e": (
+            "o hash do SELO desta janela - periodo declarado, regime e"
+            " instante do selamento -, e nao do conteudo: o dado ainda vai"
+            " chegar"
+        ),
+    }
+
+
 def ler_janela_de_calibracao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
 ) -> sqlite3.Row | None:

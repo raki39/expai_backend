@@ -21,11 +21,12 @@ from pydantic import BaseModel, Field
 from ...aovivo import bbo
 from ...calibracao import (
     ajuste, bootstrap, dimensionamento, manifesto, materializacao,
-    observacao, piloto, shadow,
+    observacao, piloto, regimes, shadow,
 )
 from ...dataset import loader as dataset_loader
 from ...maos_rapidas import baselines
 from ...config import service as config_service
+from ...calibracao.identidade import SEM_PERFIL
 from ..comum import _conn
 
 log = logging.getLogger(__name__)
@@ -33,15 +34,13 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/calibracao", tags=["calibracao"])
 
 
-def _agora_ms() -> int:
-    """O relogio do SISTEMA. Nenhuma rota recebe data no corpo.
-
-    Um instante vindo do pedido faria o selo ser escolhido por quem pede - e o
-    selo e justamente o que separa "dado que ja existia" de "dado futuro".
-    """
-    from datetime import datetime, timezone
-
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+# `_agora_ms()` MORREU AQUI, e a morte e a correcao.
+#
+# Ele lia o relogio do PROCESSO e o passava as funcoes de selamento. Isso era
+# melhor que receber a data no corpo e ainda era escolha de quem chama: um
+# segundo caminho ate o selo, e nada no banco recusava um valor errado. Hoje o
+# instante sai do RELOGIO DO BANCO, dentro de `ajuste`, e os gatilhos
+# `..._selo_do_relogio_do_banco` conferem o que foi gravado contra ele.
 
 CONTRATO_PADRAO = bbo.CONTRATO_PADRAO
 
@@ -57,6 +56,12 @@ class PedidoDeCalibracao(BaseModel):
     **Sem campo de regra, e a ausencia e o ponto.** Um campo `regra` aqui,
     ainda que validado, tornaria "roda apenas o B3" uma checagem em vez de uma
     propriedade - e checagem se remove.
+
+    **E sem `de_ms` / `ate_ms_exclusive`, que e correcao do ADR 0041.** Eles
+    existiam, e com eles a finalidade de uma observacao era, na pratica,
+    escolhida por quem chamava: bastava mandar o intervalo do piloto para
+    materializar dentro dele. A janela passou a ser da JANELA SELADA, e quem
+    a deriva e `materializacao`, uma funcao por finalidade.
     """
 
     model_config = {"extra": "forbid"}
@@ -64,8 +69,10 @@ class PedidoDeCalibracao(BaseModel):
     venue: str = "binance"
     symbol: str = "BTCUSDT"
     contrato: str = CONTRATO_PADRAO
-    de_ms: int | None = Field(default=None, ge=0)
-    ate_ms_exclusive: int | None = Field(default=None, ge=0)
+    finalidade: str = Field(pattern="^(piloto|calibracao|revalidacao)$")
+    regime: str | None = Field(
+        default=None, pattern="^(vol_baixa|vol_media|vol_alta)$"
+    )
 
 
 def _capital_por_ordem_cents(conn, config) -> int:
@@ -86,13 +93,19 @@ def _capital_por_ordem_cents(conn, config) -> int:
 
 @router.post("/rodar", status_code=status.HTTP_200_OK)
 def rodar(request: Request, pedido: PedidoDeCalibracao) -> dict[str, Any]:
-    """Roda o shadow do B3 e registra as observacoes do periodo.
+    """Materializa a janela SELADA da finalidade pedida, pelo caminho oficial.
 
-    As duas coisas juntas porque sao duas metades da mesma medicao: o shadow
-    produz o CAMINHO (regra congelada -> sinal -> ordem no instante real), e a
-    observacao produz a BASE ESTATISTICA (todo instante da grade, nos dois
-    lados). `E2` e computavel sem ordem nenhuma ter existido, e e por isso que
-    a base e maior que o caminho.
+    As duas metades da medicao continuam juntas: o shadow produz o CAMINHO
+    (regra congelada -> sinal -> ordem no instante real), e a observacao produz
+    a BASE ESTATISTICA (todo instante da grade, nos dois lados). `E2` e
+    computavel sem ordem nenhuma ter existido, e e por isso que a base e maior
+    que o caminho.
+
+    **O periodo nao vem do corpo.** Cada finalidade tem a sua janela selada, e
+    `materializacao` deriva o intervalo dela: `janela_piloto` para o piloto,
+    `janela_calibracao` para a calibracao, e a `janela_revalidacao` DAQUELE
+    regime para a revalidacao. Um `de_ms` no corpo faria a finalidade ser um
+    rotulo escolhido por quem chama.
     """
     conn = _conn(request)
     versao = config_service.versao_atual(conn)
@@ -101,21 +114,76 @@ def rodar(request: Request, pedido: PedidoDeCalibracao) -> dict[str, Any]:
             status_code=status.HTTP_409_CONFLICT,
             detail="nao ha config_version: o boot deveria ter criado a 1",
         )
+    if pedido.finalidade == "revalidacao" and pedido.regime is None:
+        raise HTTPException(
+            status_code=422,
+            detail="a revalidacao e POR REGIME: sem `regime` nao ha janela. O "
+                   "caminho global deixou de existir (ADR 0041)",
+        )
 
+    comum = dict(contrato=pedido.contrato, venue=pedido.venue,
+                 symbol=pedido.symbol)
+    orcamento = _capital_por_ordem_cents(conn, versao.config)
     try:
-        r_shadow = shadow.rodar(
-            conn, contrato=pedido.contrato, venue=pedido.venue,
-            symbol=pedido.symbol, config=versao.config,
-            config_version_id=versao.id,
-            de_ms=pedido.de_ms, ate_ms_exclusive=pedido.ate_ms_exclusive,
-        )
-        r_obs = observacao.registrar(
-            conn, contrato=pedido.contrato, venue=pedido.venue,
-            symbol=pedido.symbol, config=versao.config,
-            config_version_id=versao.id,
-            orcamento_cents=_capital_por_ordem_cents(conn, versao.config),
-            de_ms=pedido.de_ms, ate_ms_exclusive=pedido.ate_ms_exclusive,
-        )
+        if pedido.finalidade == "piloto":
+            r_obs = materializacao.do_piloto(
+                conn, **comum, config=versao.config,
+                config_version_id=versao.id,
+                calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
+                orcamento_cents=orcamento,
+            )
+        elif pedido.finalidade == "calibracao":
+            janela = materializacao.ler_janela_de_calibracao(conn, **comum)
+            if janela is None:
+                raise materializacao.JanelaNaoSelada(
+                    "nao ha janela de calibracao selada: sele antes, e ela"
+                    " comeca numa fronteira de grade posterior ao selamento"
+                )
+            r_obs = materializacao.da_calibracao(
+                conn, **comum, config=versao.config,
+                config_version_id=versao.id,
+                calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
+                orcamento_cents=orcamento,
+                ate_ms_exclusive=_alcance_do_dado(conn, pedido),
+            )
+        else:
+            r_obs = materializacao.da_revalidacao(
+                conn, **comum, regime=str(pedido.regime),
+                orcamento_cents=orcamento,
+            )
+        # O shadow roda no MESMO intervalo que a observacao acabou de
+        # materializar - o da janela selada, e nao um pedido a parte.
+        #
+        # **"Sem barras" e FATO DA JANELA, e nao erro do pedido.** Uma janela
+        # selada comeca no futuro: entre o selo e a chegada do dado ela esta
+        # legitimamente vazia. Devolver 409 ali seria pior que inutil - a
+        # observacao JA foi gravada quando o shadow roda, entao um 409
+        # relataria como falha uma chamada que escreveu.
+        try:
+            r_shadow = shadow.rodar(
+                conn, **comum, config=versao.config,
+                config_version_id=versao.id,
+                de_ms=int(r_obs["janela"]["de_ms"]),
+                ate_ms_exclusive=int(r_obs["janela"]["ate_ms_exclusive"]),
+            )
+        except shadow.SemBarras as e:
+            r_shadow = {
+                "estado": "sem_barras_na_janela",
+                "motivo": str(e),
+                "o_que_isto_e": (
+                    "a janela esta selada e o dado ainda nao chegou. Nao e"
+                    " erro: uma janela selada comeca no FUTURO, e o periodo"
+                    " entre o selo e a primeira barra e vazio por construcao"
+                ),
+            }
+    except materializacao.JanelaNaoSelada as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except materializacao.IdentidadeDaCalibracaoAusente as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
     except observacao.ContratoIncompativel as e:
         # 409, e nao 422: o pedido esta perfeito e o MUNDO e que mudou. A
         # semantica de execucao vigente deixou de ser a que o contrato assume.
@@ -126,10 +194,6 @@ def rodar(request: Request, pedido: PedidoDeCalibracao) -> dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         ) from e
-    except shadow.SemBarras as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(e)
-        ) from e
 
     return {
         "config_version_id": versao.id,
@@ -137,6 +201,41 @@ def rodar(request: Request, pedido: PedidoDeCalibracao) -> dict[str, Any]:
         "observacoes": r_obs,
         "limite": LIMITE_DECLARADO,
     }
+
+
+def _perfil_da_versao(conn, config_version_id: int) -> str:
+    """O perfil que a `config_version` referencia, ou o token canonico.
+
+    `SEM_PERFIL` e literal, e nao `None` nem string vazia: a coluna
+    `calibracao_observacao.calibracao_perfil_hash` e `NOT NULL`, e tres
+    representacoes de "nenhum perfil" fariam o gatilho de identidade congelada
+    acusar divergencia entre linhas que descrevem a mesma coisa.
+    """
+    linha = conn.execute(
+        "SELECT calibracao_perfil_hash FROM config_version WHERE id = ?",
+        (int(config_version_id),),
+    ).fetchone()
+    if linha is None or linha["calibracao_perfil_hash"] is None:
+        return SEM_PERFIL
+    return str(linha["calibracao_perfil_hash"])
+
+
+def _alcance_do_dado(conn, pedido) -> int:
+    """Ate onde o dado alcanca, e nao ate onde alguem quer.
+
+    A janela de calibracao NAO tem fim declarado - ela fecha por regime -, e
+    entao o fim da materializacao e o ultimo instante com amostra mais uma
+    grade. Um fim escolhido aqui seria parar por calendario, que a decisao 4 do
+    usuario proibe.
+    """
+    linha = conn.execute(
+        "SELECT MAX(t_grid_ms) AS t, MAX(grade_ms) AS g FROM bbo_amostra"
+        " WHERE contrato = ? AND venue = ? AND symbol = ?",
+        (pedido.contrato, pedido.venue, pedido.symbol),
+    ).fetchone()
+    if linha is None or linha["t"] is None:
+        return 0
+    return int(linha["t"]) + int(linha["g"])
 
 
 # O limite vai no PROPRIO resultado, e nao numa nota de rodape do relatorio
@@ -177,9 +276,13 @@ def estado(
 
     erro: dict[str, Any] = {"estado": "piloto_em_andamento"}
     if janela is not None:
-        e2 = observacao.serie_e2(
+        # `serie_e2_do_piloto`, com a finalidade LITERAL no SQL. E o que este
+        # bloco sempre quis dizer - ele le a janela do PILOTO -, e agora o nome
+        # da funcao afirma isso. O `config_version_id` saiu: a identidade da
+        # janela e congelada pelo gatilho, e filtrar por ela aqui deixaria a
+        # serie depender da config vigente no momento da leitura.
+        e2 = observacao.serie_e2_do_piloto(
             conn, contrato=contrato, venue=venue, symbol=symbol, lado=lado,
-            config_version_id=versao.id,
             de_ms=janela.de_ms, ate_ms_exclusive=janela.ate_ms_exclusive,
         )
         try:
@@ -190,6 +293,14 @@ def estado(
             )
             erro = {
                 "estado": "medido",
+                "o_que_isto_e": (
+                    "DIMENSIONAMENTO E DIAGNOSTICO, e nao calibracao. Do"
+                    " piloto saem `sigma_e`, `tau` e a forma da cauda (ADR"
+                    " 0027 par.5); o `p10` daqui NAO produz override de"
+                    " parametro. Quem calibra le a janela de CALIBRACAO, que e"
+                    " posterior e disjunta"
+                ),
+                "finalidade_da_serie": "piloto",
                 "n": ic.n,
                 "n_efetivo": round(ic.n_efetivo, 1),
                 "p10_mili_bps": round(ic.ponto, 1),
@@ -227,6 +338,26 @@ def estado(
             config_version_id=versao.id,
         ),
         "erro_de_execucao": erro,
+        # OS CINCO ESTADOS, separados. Juntar `calibrado` com `revalidado`
+        # faria um override sem confirmacao parecer confirmado.
+        "regimes": ajuste.estado_por_regime(
+            conn, contrato=contrato, venue=venue, symbol=symbol
+        ),
+        # O REGIME GRAVADO contra o que o detector diria agora. Barra futura
+        # nunca move um instante; dado que chega ATRASADO para dentro da
+        # janela move - e o apagao de 19 a 21/09 foi preenchido por backfill.
+        # O gravado e o que vale; a divergencia e fato a declarar.
+        "regime_gravado_x_recalculado": regimes.divergencias_do_gravado(
+            conn, contrato=contrato, venue=venue, symbol=symbol,
+            timeframe=versao.config.timeframe,
+        ),
+        "observacoes_por_finalidade": {
+            f: observacao.quantas(
+                conn, finalidade=f, contrato=contrato, venue=venue,
+                symbol=symbol,
+            )
+            for f in observacao.FINALIDADES
+        },
         "delta_mili_bps": 500,
         "limite": LIMITE_DECLARADO,
     }
@@ -282,11 +413,9 @@ def selar_calibracao(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]
     if versao is None:
         raise HTTPException(status_code=503, detail="sem config_version")
     try:
-        c = bbo.ler_contrato(conn, pedido.contrato)
         janela = ajuste.selar_calibracao(
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, config=versao.config,
-            agora_ms=_agora_ms(), grade_ms=c.grade_ms,
         )
     except ajuste.PilotoAberto as e:
         raise HTTPException(
@@ -316,19 +445,22 @@ def fechar_regime(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
         config_version_id=versao.id, regime=pedido.regime, lado=pedido.lado,
     )
     try:
-        c = bbo.ler_contrato(conn, pedido.contrato)
         fechamento = ajuste.fechar_regime(
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, regime=pedido.regime,
             n_efetivo=conta["n_efetivo"],
-            ultimo_t_grid_ms=conta["ultimo_t_grid_ms"], grade_ms=c.grade_ms,
+            ultimo_t_grid_ms=conta["ultimo_t_grid_ms"],
         )
     except (ajuste.SemJanelaDeCalibracao, ajuste.RegraNaoCongelada,
             ajuste.AmostraInsuficienteNoRegime) as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e
-    return {"fechamento": fechamento, "medido": conta}
+    return {
+        "fechamento": fechamento,
+        "medido": conta,
+        "alvos_de_amostra": fechamento.get("alvos_de_amostra"),
+    }
 
 
 @router.post("/selar-revalidacao", status_code=status.HTTP_201_CREATED)
@@ -341,16 +473,25 @@ def selar_revalidacao(
     nasce a partir de um `calibracao_regime_fechamento` - a segunda para o
     mesmo fechamento e recusada pelo BANCO, por `UNIQUE`.
 
-    O horario do selo e do sistema. A janela comeca na primeira grade
-    estritamente posterior a ele e posterior ao ultimo instante usado na
-    calibracao, entao dado que ja existia no selamento nao entra.
+    O horario do selo vem do RELOGIO DO BANCO, e o gatilho
+    `janela_revalidacao_selo_do_relogio_do_banco` confere o gravado contra ele.
+    A janela comeca na PRIMEIRA grade estritamente posterior ao selo e
+    posterior ao ultimo instante usado na calibracao daquele regime - e um
+    gatilho recusa selar sobre instante que ja tenha observacao deste regime.
+
+    **O corpo nao carrega nada alem da identidade.** Nem data, nem
+    `n_exigido`, nem delta, nem metodo, nem confianca, nem duracao: todos vem
+    de `janela_calibracao` e `calibracao_regime_regra`, congelados antes do
+    primeiro dado da calibracao.
     """
     conn = _conn(request)
     try:
+        # IDENTIDADE, E NADA MAIS. Sem data, sem `n_exigido`, sem delta, sem
+        # metodo, sem confianca e sem duracao - tudo isso foi congelado no
+        # selamento da CALIBRACAO, antes do primeiro dado dela.
         janela = ajuste.selar_revalidacao(
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, regime=pedido.regime,
-            agora_ms=_agora_ms(),
         )
     except ajuste.CalibracaoDoRegimeNaoFechada as e:
         raise HTTPException(

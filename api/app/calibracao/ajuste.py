@@ -46,9 +46,9 @@ from decimal import Decimal
 
 from ..aovivo import bbo
 from ..config.schema import ExperimentConfig
-from ..regime import deteccao
 from ..store import bloco_atomico
 from . import bootstrap, materializacao, observacao
+from .regimes import regimes_das_barras  # noqa: F401  (reexportado)
 from . import perfil as perfil_mod
 from . import piloto
 
@@ -148,6 +148,53 @@ class NadaACalibrar(Exception):
     """Nenhum regime alcancou a amostra. Nao e falha - e o desfecho honesto."""
 
 
+#: OS DOIS ALVOS DE AMOSTRA SAO IGUAIS, E A IGUALDADE E DECLARADA.
+#:
+#: Elas medem a mesma grandeza - `E2` daquele regime -, com o mesmo `delta` e
+#: o mesmo `sigma_e` do piloto, entao `K(z sigma_e/delta)^2` devolve o mesmo
+#: numero. O que nao se pode e INFERIR isso de uma coluna reusada: o dia em que
+#: a revalidacao passasse a exigir mais, uma coluna so levaria os dois juntos
+#: sem que nada avisasse.
+ALVOS_IGUAIS_POR_DECISAO = True
+POR_QUE_OS_ALVOS = (
+    "os dois saem da MESMA formula `n_efetivo >= K(z sigma_e/delta)^2`, com o"
+    " mesmo delta = 500 mili-bps e o mesmo sigma_e medido no piloto - entao"
+    " valem o mesmo numero. A igualdade e DECISAO declarada aqui, e nao reuso"
+    " silencioso de uma coluna: os dois alvos tem colunas separadas, e um"
+    " CHECK impede que esta declaracao minta sobre eles"
+)
+
+
+#: A PRIMEIRA GRADE ADMISSIVEL, EM SQL. Ela e calculada DENTRO do `INSERT`,
+#: e nao em Python.
+#:
+#: Tres razoes, e a terceira e a que obriga:
+#:
+#: 1. e o relogio do BANCO, que e o mesmo que os gatilhos conferem;
+#: 2. nao ha segunda fonte: o numero que entra na coluna e o numero que o
+#:    gatilho `..._de_ms_calculado_pelo_banco` recalcula;
+#: 3. **nao ha corrida.** SQLite fixa `'now'` para a duracao de um
+#:    `sqlite3_step`, entao todas as ocorrencias dentro do mesmo comando -
+#:    inclusive as dos gatilhos e as dos `DEFAULT` - veem o MESMO instante.
+#:    Com Python lendo o relogio antes e o gatilho lendo depois, uma virada de
+#:    grade entre as duas leituras recusaria um selamento legitimo.
+#:
+#: Os dois `?` sao a grade; o terceiro e o fim da janela anterior.
+PRIMEIRA_GRADE_SQL = (
+    "MAX((CAST(strftime('%s', 'now') AS INTEGER) * 1000 / ? + 1) * ?, ?)"
+)
+
+
+# `_agora_ms_do_banco()` MORREU AQUI, e a morte e a prova.
+#
+# Ela lia o relogio do banco em Python para calcular a fronteira. Melhor que o
+# relogio do processo, e ainda um SEGUNDO lugar calculando o mesmo numero - e
+# com uma corrida: a leitura de Python e a do gatilho sao instantes diferentes.
+#
+# Com `PRIMEIRA_GRADE_SQL` dentro do `INSERT`, **nenhuma linha de Python decide
+# a fronteira**, e nao sobrou para quem esta funcao trabalhar. Mante-la viva
+# seria deixar o caminho antigo de pe esperando alguem chama-lo.
+
 def _agora() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -179,47 +226,6 @@ class Estimativa:
     @property
     def calibrados(self) -> list[EstimativaDeRegime]:
         return [r for r in self.por_regime if r.estado == "calibrado"]
-
-
-def regimes_das_barras(
-    conn: sqlite3.Connection, *, venue: str, symbol: str, timeframe: str,
-) -> dict[int, str | None]:
-    """O regime de cada instante do fluxo, pelo detector congelado do ADR 0026.
-
-    **Classificar exige 672 barras ANTERIORES** (7 dias). Enquanto o fluxo nao
-    tiver esse historico antes do piloto, todo instante sai `INDEFINIDO` - e
-    `indefinido` NAO e um regime: e a declaracao de que ainda nao da para
-    dizer. Trata-lo como quarto regime seria calibrar sobre uma classe que nao
-    existe na taxonomia.
-    """
-    barras = [
-        (int(r["open_time_ms"]), int(r["close"]), int(r["open"]))
-        for r in conn.execute(
-            "SELECT open_time_ms, open, close FROM stream_bar"
-            " WHERE venue = ? AND symbol = ? AND timeframe = ?"
-            " ORDER BY open_time_ms",
-            (venue, symbol, timeframe),
-        )
-    ]
-    if len(barras) < 2:
-        return {}
-
-    # Retorno que TERMINA em cada barra, em mili-bps, e `None` quando os
-    # extremos nao sao temporalmente adjacentes - a subsecao 3b do ADR 0026.
-    passo = barras[1][0] - barras[0][0]
-    retornos: list[tuple[int, int | None]] = [(barras[0][0], None)]
-    for anterior, atual in zip(barras, barras[1:]):
-        if atual[0] - anterior[0] != passo:
-            retornos.append((atual[0], None))
-            continue
-        r = (Decimal(atual[1] - anterior[1]) * 10_000 * 1_000
-             / Decimal(anterior[1]))
-        retornos.append((atual[0], int(r.to_integral_value())))
-
-    return {
-        c.open_time_ms: c.regime
-        for c in deteccao.classificar_serie(retornos)
-    }
 
 
 def _spread_necessario_x1000(p10_mili_bps: float, config: ExperimentConfig) -> int:
@@ -327,16 +333,18 @@ def estimar_por_regime(
     amostra propria permanece nao calibrado nesta fase, e isso vira condicao
     de validade de todo resultado obtido nele.
     """
-    por_regime = regimes_das_barras(
-        conn, venue=venue, symbol=symbol, timeframe=config.timeframe
-    )
-
     series: dict[str, list[float]] = {r: [] for r in REGIMES}
     for linha in conn.execute(
         # `finalidade = 'calibracao'` como LITERAL: o mesmo desenho de
         # `acesso = 'agente'` do incremento 9. Nenhum argumento faz este
         # caminho alcancar observacao do piloto.
-        "SELECT t_grid_ms, e2_mili_bps FROM calibracao_observacao"
+        #
+        # E o REGIME vem da COLUNA, e nao do detector rodado de novo aqui.
+        # Rodar o detector na leitura fazia o regime de um instante depender de
+        # QUANDO se lia: uma barra nova adiante podia mudar a classificacao de
+        # um instante ja medido, e a serie que calibrou deixaria de ser a serie
+        # que se le. Gravado, o instante fica com o regime que tinha.
+        "SELECT regime, e2_mili_bps FROM calibracao_observacao"
         " WHERE finalidade = 'calibracao'"
         "   AND contrato = ? AND venue = ? AND symbol = ? AND lado = ?"
         "   AND dentro_do_l1 = 1"
@@ -344,8 +352,7 @@ def estimar_por_regime(
         " ORDER BY t_grid_ms",
         (contrato, venue, symbol, lado, de_ms, ate_ms_exclusive),
     ):
-        regime = por_regime.get(int(linha["t_grid_ms"]))
-        series[regime or "indefinido"].append(float(linha["e2_mili_bps"]))
+        series[str(linha["regime"])].append(float(linha["e2_mili_bps"]))
 
     saida: list[EstimativaDeRegime] = []
     for regime in REGIMES:
@@ -492,7 +499,7 @@ def derivar(estimativa: Estimativa, config: ExperimentConfig) -> Ajuste:
 
 def selar_calibracao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
-    config: ExperimentConfig, agora_ms: int, grade_ms: int,
+    config: ExperimentConfig,
 ) -> dict:
     """Sela a janela de CALIBRACAO. Ela comeca DEPOIS do proprio selamento.
 
@@ -513,7 +520,11 @@ def selar_calibracao(
 
     Idempotente: chamar de novo devolve a que existe. Uma segunda janela seria
     uma segunda chance de escolher a fronteira.
+
+    **Nao recebe data nem grade.** O instante vem do relogio do banco e a
+    grade vem do contrato - os dois derivados, nenhum escolhido.
     """
+    grade_ms = bbo.ler_contrato(conn, contrato).grade_ms
     serie_bbo = bbo.Serie(venue=venue, symbol=symbol,
                           price_scale_exp=0, volume_scale_exp=0)
     janela_p = piloto.ler(conn, serie_bbo, contrato)
@@ -528,10 +539,10 @@ def selar_calibracao(
     if ja is not None:
         return dict(ja)
 
-    # A PROXIMA fronteira, estritamente depois de agora - e nunca a corrente: a
-    # barra em curso ja comecou, e inclui-la e incluir dado que ja existe.
-    proxima = (agora_ms // grade_ms + 1) * grade_ms
-    de = max(proxima, janela_p.ate_ms_exclusive)
+    # O INICIO NAO E CALCULADO AQUI. Ele e calculado no `INSERT`, pelo
+    # relogio do banco, com `PRIMEIRA_GRADE_SQL` - e o gatilho
+    # `janela_calibracao_de_ms_calculado_pelo_banco` recalcula a mesma conta e
+    # recusa qualquer outro valor. Nao ha numero escolhido por este codigo.
 
     # AS REGRAS, ANTES DO PRIMEIRO DADO. `n_exigido` vem do PILOTO - e a
     # unica coisa que sai dele, junto com `tau` e a forma da cauda -, e por
@@ -546,13 +557,17 @@ def selar_calibracao(
     ]
 
     with bloco_atomico(conn, "selar_calibracao"):
+        # `selada_em_ms` e `selada_em` NAO sao nomeados: o `DEFAULT` das duas
+        # colunas le o relogio do banco, e no mesmo comando ele e o mesmo
+        # instante que `PRIMEIRA_GRADE_SQL` usa.
         conn.execute(
             "INSERT INTO janela_calibracao (contrato, venue, symbol, de_ms,"
-            " selada_em_ms, selada_em, piloto_ate_ms_exclusive, grade_ms,"
+            " piloto_ate_ms_exclusive, grade_ms,"
             " confianca_ppm, metodo_bootstrap, tratamento_dependencia, alvo,"
             " regra_encerramento, duracao_minima_ms, delta_mili_bps)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (contrato, venue, symbol, de, agora_ms, _agora(),
+            f" VALUES (?,?,?,{PRIMEIRA_GRADE_SQL},?,?,?,?,?,?,?,?,?)",
+            (contrato, venue, symbol,
+             grade_ms, grade_ms, janela_p.ate_ms_exclusive,
              janela_p.ate_ms_exclusive, grade_ms,
              REGRAS_DA_REVALIDACAO["confianca_ppm"],
              REGRAS_DA_REVALIDACAO["metodo_bootstrap"],
@@ -566,28 +581,32 @@ def selar_calibracao(
             "   AND symbol = ?", (contrato, venue, symbol),
         ).fetchone()[0])
         for r in regras:
+            # OS DOIS ALVOS, em colunas separadas, com a igualdade declarada.
             conn.execute(
                 "INSERT INTO calibracao_regime_regra (janela_calibracao_id,"
-                " regime, n_exigido, sigma_e_x1000, tau_x1000, piloto_n)"
-                " VALUES (?,?,?,?,?,?)",
-                (janela_id, r.regime, r.n_exigido,
+                " regime, n_exigido_calibracao, n_exigido_revalidacao,"
+                " alvos_iguais_por_decisao, por_que_os_alvos,"
+                " sigma_e_x1000, tau_x1000, piloto_n)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (janela_id, r.regime, r.n_exigido, r.n_exigido,
+                 1 if ALVOS_IGUAIS_POR_DECISAO else 0, POR_QUE_OS_ALVOS,
                  int(round((r.sigma_e_mili_bps or 0) * 1000)),
                  int(round((r.tau or 1.0) * 1000)), r.n),
             )
-    log.info("calibracao.janela_selada", extra={
-        "contrato": contrato, "symbol": symbol, "de_ms": de,
-        "selada_em_ms": agora_ms,
-    })
     linha = materializacao.ler_janela_de_calibracao(
         conn, contrato=contrato, venue=venue, symbol=symbol
     )
     assert linha is not None  # acabou de ser gravada
+    log.info("calibracao.janela_selada", extra={
+        "contrato": contrato, "symbol": symbol,
+        "de_ms": int(linha["de_ms"]), "selada_em_ms": int(linha["selada_em_ms"]),
+    })
     return dict(linha)
 
 
 def fechar_regime(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
-    regime: str, n_efetivo: float, ultimo_t_grid_ms: int, grade_ms: int,
+    regime: str, n_efetivo: float, ultimo_t_grid_ms: int,
 ) -> dict:
     """Fecha a calibracao DE UM regime, quando ele alcanca o proprio `n_exigido`.
 
@@ -616,8 +635,9 @@ def fechar_regime(
     if ja is not None:
         return ja
 
+    grade_ms = bbo.ler_contrato(conn, contrato).grade_ms
     regra = conn.execute(
-        "SELECT n_exigido FROM calibracao_regime_regra"
+        "SELECT n_exigido_calibracao FROM calibracao_regime_regra"
         " WHERE janela_calibracao_id = ? AND regime = ?",
         (janela_id, regime),
     ).fetchone()
@@ -627,7 +647,7 @@ def fechar_regime(
             f" Sem regra anterior ao dado nao ha parada: fixa-la agora seria"
             f" escolher o tamanho olhando o que ja se mediu"
         )
-    n_exigido = int(regra["n_exigido"])
+    n_exigido = int(regra["n_exigido_calibracao"])
     if n_efetivo < n_exigido:
         raise AmostraInsuficienteNoRegime(
             f"n_efetivo {n_efetivo:.1f} < {n_exigido} exigido para o regime"
@@ -638,7 +658,7 @@ def fechar_regime(
     with bloco_atomico(conn, "fechar_regime"):
         conn.execute(
             "INSERT INTO calibracao_regime_fechamento (janela_calibracao_id,"
-            " regime, n_exigido, n_efetivo_x1000, fim_ms_exclusive,"
+            " regime, n_exigido_calibracao, n_efetivo_x1000, fim_ms_exclusive,"
             " delta_mili_bps, fechado_em) VALUES (?,?,?,?,?,?,?)",
             (janela_id, regime, n_exigido, int(round(n_efetivo * 1000)),
              ultimo_t_grid_ms + grade_ms, DELTA_MILI_BPS, _agora()),
@@ -657,28 +677,60 @@ def ler_fechamento(
     regime: str,
 ) -> dict | None:
     linha = conn.execute(
-        "SELECT f.id, f.regime, f.n_exigido, f.n_efetivo_x1000,"
-        "       f.fim_ms_exclusive, f.delta_mili_bps, f.fechado_em"
+        # OS DOIS ALVOS SAEM JUNTOS E NOMEADOS. Publicar so o da calibracao
+        # deixaria quem le inferir que o da revalidacao e o mesmo - e inferir
+        # e exatamente o que a separacao das colunas existe para nao pedir.
+        "SELECT f.id, f.regime, f.n_exigido_calibracao, f.n_efetivo_x1000,"
+        "       f.fim_ms_exclusive, f.delta_mili_bps, f.fechado_em,"
+        "       r.n_exigido_revalidacao, r.alvos_iguais_por_decisao,"
+        "       r.por_que_os_alvos"
         "  FROM calibracao_regime_fechamento f"
         "  JOIN janela_calibracao j ON j.id = f.janela_calibracao_id"
+        "  JOIN calibracao_regime_regra r"
+        "    ON r.janela_calibracao_id = f.janela_calibracao_id"
+        "   AND r.regime = f.regime"
         " WHERE j.contrato = ? AND j.venue = ? AND j.symbol = ? AND f.regime = ?",
         (contrato, venue, symbol, regime),
     ).fetchone()
-    return None if linha is None else dict(linha)
+    if linha is None:
+        return None
+    d = dict(linha)
+    d["alvos_de_amostra"] = {
+        "calibracao": int(linha["n_exigido_calibracao"]),
+        "revalidacao": int(linha["n_exigido_revalidacao"]),
+        "iguais_por_decisao": bool(linha["alvos_iguais_por_decisao"]),
+        "por_que": linha["por_que_os_alvos"],
+    }
+    return d
 
 
 def selar_revalidacao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
-    regime: str, agora_ms: int, dias: int | None = None,
+    regime: str,
 ) -> dict:
-    """Sela o periodo posterior reservado. Garantia 7, primeira metade.
+    """Sela o periodo posterior reservado DAQUELE regime. Garantia 7.
 
-    **Antes do ajuste, e nao depois.** A fronteira entre "dentro" e "fora" do
-    periodo de calibracao e uma data que alguem escolhe, e selar depois de ver
-    `p10` seria escolher o periodo que confirma.
+    **A funcao recebe IDENTIDADE, e nada mais** - serie e regime. Nao recebe
+    data, nem `n_exigido`, nem `delta`, nem metodo, nem confianca, nem
+    duracao. Tudo isso foi congelado em `janela_calibracao` e
+    `calibracao_regime_regra` no selamento da CALIBRACAO, portanto antes do
+    primeiro dado dela, e e de la que sai:
 
-    Comeca onde o piloto termina - disjunta por construcao, e o `CHECK` da
-    tabela impoe.
+    | o que | de onde |
+    |---|---|
+    | instante do selo | relogio do BANCO |
+    | inicio | primeira grade > selo e >= fim da calibracao DELE |
+    | duracao | `janela_calibracao.duracao_minima_ms` |
+    | `n_exigido` da revalidacao | `calibracao_regime_regra` |
+    | confianca, metodo, dependencia, alvo, encerramento | `janela_calibracao` |
+    | `delta` | `DELTA_MILI_BPS`, sem parametro |
+
+    Um parametro `dias` aqui - que existia - permitia encurtar a confirmacao no
+    momento de sela-la, e encurtar a confirmacao e escolher quanta evidencia
+    ela vai exigir. **A janela nasce MECANICA**, e nao ha o que escolher.
+
+    **Antes do ajuste, e nao depois.** Selar depois de ver `p10` seria escolher
+    o periodo que confirma.
     """
     if regime not in REGIMES or regime == "indefinido":
         raise ValueError(
@@ -709,10 +761,9 @@ def selar_revalidacao(
     )
     assert janela_cal is not None  # o fechamento so existe com ela
     grade_ms = int(janela_cal["grade_ms"])
-    duracao = (
-        int(janela_cal["duracao_minima_ms"]) if dias is None
-        else dias * piloto.MS_POR_DIA
-    )
+    # A DURACAO E CONGELADA, e vem da janela de calibracao - selada antes do
+    # primeiro dado. Nao ha argumento que a encurte.
+    duracao = int(janela_cal["duracao_minima_ms"])
 
     # O INICIO E MECANICO, e o relogio e do SISTEMA - nunca do corpo do
     # pedido. Ele e a primeira grade estritamente posterior ao selamento E
@@ -722,26 +773,32 @@ def selar_revalidacao(
     # Dado que ja existia quando a janela foi selada NAO entra: e por isso que
     # a comparacao e com `agora_ms`, e nao com o fim da calibracao apenas.
     fim_cal = int(fechamento["fim_ms_exclusive"])
-    proxima = (agora_ms // grade_ms + 1) * grade_ms
-    de = max(proxima, fim_cal)
-    ate = de + duracao
 
     with bloco_atomico(conn, "selar_revalidacao"):
+        # `de_ms` e `ate_ms_exclusive` saem da MESMA expressao, avaliada duas
+        # vezes no mesmo comando - e `'now'` e fixo dentro dele, entao as duas
+        # veem o mesmo instante. `ate` e `de + duracao congelada`, e o gatilho
+        # `janela_revalidacao_duracao_congelada` recusa qualquer outra.
         conn.execute(
             "INSERT INTO janela_revalidacao (contrato, venue, symbol, regime,"
             " de_ms, ate_ms_exclusive, calibracao_fechamento_id,"
-            " calibracao_ate_ms_exclusive, selada_em_ms, selada_em, grade_ms)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (contrato, venue, symbol, regime, de, ate,
-             int(fechamento["id"]), fim_cal, agora_ms, _agora(), grade_ms),
+            " calibracao_ate_ms_exclusive, grade_ms)"
+            f" VALUES (?,?,?,?,{PRIMEIRA_GRADE_SQL},"
+            f" {PRIMEIRA_GRADE_SQL} + ?,?,?,?)",
+            (contrato, venue, symbol, regime,
+             grade_ms, grade_ms, fim_cal,
+             grade_ms, grade_ms, fim_cal, duracao,
+             int(fechamento["id"]), fim_cal, grade_ms),
         )
-    log.info("calibracao.revalidacao_selada", extra={
-        "contrato": contrato, "symbol": symbol, "regime": regime,
-        "de_ms": de, "ate_ms": ate,
-    })
-    return ler_revalidacao(  # type: ignore[return-value]
+    janela = ler_revalidacao(
         conn, contrato=contrato, venue=venue, symbol=symbol, regime=regime
     )
+    assert janela is not None  # acabou de ser gravada
+    log.info("calibracao.revalidacao_selada", extra={
+        "contrato": contrato, "symbol": symbol, "regime": regime,
+        "de_ms": janela["de_ms"], "ate_ms": janela["ate_ms_exclusive"],
+    })
+    return janela
 
 
 def ler_revalidacao(
@@ -1011,10 +1068,16 @@ def revalidar(
     # `serie_e2_da_revalidacao`, com a finalidade LITERAL. Nenhuma observacao
     # pode pertencer a calibracao E a revalidacao do mesmo regime: um instante
     # tem UMA linha, com UMA finalidade - a chave primaria garante.
+    #
+    # E `regime=regime`: a janela e por regime, mas a OBSERVACAO e por
+    # instante. Sem o filtro, um instante de `vol_alta` caido dentro da janela
+    # de `vol_baixa` confirmaria o override de `vol_baixa` - um regime
+    # confirmando outro, que e o que o ADR 0027 proibe ao vedar heranca.
     e2 = observacao.serie_e2_da_revalidacao(
         conn, contrato=contrato, venue=venue, symbol=symbol, lado=lado,
         de_ms=int(janela["de_ms"]),
         ate_ms_exclusive=int(janela["ate_ms_exclusive"]),
+        regime=regime,
     )
     if len(e2) < 10:
         raise NadaACalibrar(
@@ -1044,6 +1107,7 @@ def revalidar(
     })
     return {
         "janela_id": janela["id"],
+        "regime": regime,
         "de_ms": janela["de_ms"],
         "ate_ms_exclusive": janela["ate_ms_exclusive"],
         "n": ic.n,
@@ -1169,22 +1233,36 @@ def medir_regime(
     if janela is None:
         raise SemJanelaDeCalibracao("nao ha janela de calibracao selada")
 
-    por_instante = regimes_das_barras(
-        conn, venue=venue, symbol=symbol, timeframe=config.timeframe
-    )
     serie: list[float] = []
-    ultimo = int(janela["de_ms"])
-    for t, e2 in conn.execute(
-        "SELECT t_grid_ms, e2_mili_bps FROM calibracao_observacao"
+    # `regime = ?` no SQL, contra a COLUNA gravada. A versao anterior lia a
+    # janela inteira e filtrava em Python pelo detector rodado de novo - duas
+    # derivacoes do mesmo fato, e a que decide a PARADA era a mais nova.
+    for e2 in conn.execute(
+        "SELECT e2_mili_bps FROM calibracao_observacao"
         " WHERE finalidade = 'calibracao' AND contrato = ? AND venue = ?"
         "   AND symbol = ? AND lado = ? AND dentro_do_l1 = 1"
-        "   AND t_grid_ms >= ?"
+        "   AND regime = ? AND t_grid_ms >= ?"
         " ORDER BY t_grid_ms",
-        (contrato, venue, symbol, lado, int(janela["de_ms"])),
+        (contrato, venue, symbol, lado, regime, int(janela["de_ms"])),
     ):
-        if por_instante.get(int(t)) == regime:
-            serie.append(float(e2))
-            ultimo = int(t)
+        serie.append(float(e2["e2_mili_bps"]))
+
+    # O ULTIMO INSTANTE DO REGIME, e nao o ultimo que ENTROU NA ESTATISTICA.
+    #
+    # Sao perguntas diferentes, e cada uma tem o seu SELECT. A serie exclui o
+    # que passa do tamanho cotado no topo (`dentro_do_l1 = 0`); o ALCANCE da
+    # calibracao, nao: aquele instante foi consumido, esta gravado, e a janela
+    # de revalidacao tem de comecar depois dele. Usar o ultimo da estatistica
+    # deixaria uma observacao deste regime cair dentro da janela reservada
+    # para confirma-lo - e o gatilho `janela_revalidacao_sem_dado_preexistente`
+    # recusaria o selo, corretamente, sem que a causa fosse obvia.
+    linha = conn.execute(
+        "SELECT MAX(t_grid_ms) AS t FROM calibracao_observacao"
+        " WHERE finalidade = 'calibracao' AND contrato = ? AND venue = ?"
+        "   AND symbol = ? AND regime = ? AND t_grid_ms >= ?",
+        (contrato, venue, symbol, regime, int(janela["de_ms"])),
+    ).fetchone()
+    ultimo = int(janela["de_ms"]) if linha["t"] is None else int(linha["t"])
 
     if len(serie) < 10:
         return {"regime": regime, "n": len(serie), "n_efetivo": float(len(serie)),

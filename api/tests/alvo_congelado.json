@@ -9,16 +9,26 @@
   "alvo_ainda_selado_em_producao": "1b4d15d82414c81cec6d12c917b44ec821d7b92f62299c18a65f839833bf920e",
   "autorizada_por": "o usuario, em 2026-09-22: 'Se isso exigir migracao e alterar o alvo certificado, aceite a invalidacao: chegamos exatamente a janela de manutencao que seria feita junto da calibracao.'",
   "estado": "INVALIDADA pela migracao 33 (ADR 0041)",
+  "hashes_intermediarios": [
+   {
+    "implementacao_hash": "5546e14a066b3d61",
+    "o_que_era": "a primeira versao da migracao 33, antes das oito garantias exigidas pelo usuario em 2026-09-22"
+   },
+   {
+    "implementacao_hash": "a5ab06f7e96df9d9",
+    "o_que_era": "a segunda versao da migracao 33, antes de o `de_ms` passar a ser CALCULADO pelo relogio do banco (2026-10-07) e de as fronteiras de origem serem conferidas em vez de declaradas"
+   }
+  ],
   "o_que_falta": "RECERTIFICAR os cinco escopos, e a OP-3 entra nesta mesma janela. Ate la nenhum resultado pode ser citado como certificado sob o alvo novo",
   "o_que_mudou": [
    "app.migrations"
   ],
-  "por_que": "a migracao 33 acrescenta `finalidade` a `calibracao_observacao`, cria `janela_calibracao` e `calibracao_regime_fechamento`, e recria `janela_revalidacao`, `revalidacao_uso`, `calibracao_versao` e `calibracao_regime`. `app.migrations` esta entre os 71 modulos do alvo, e `hash_do_schema` le o `sqlite_master` inteiro - entao os dois componentes mudam",
+  "por_que": "a migracao 33 acrescenta `finalidade` e `regime` a `calibracao_observacao`, cria `janela_calibracao`, `calibracao_regime_regra` e `calibracao_regime_fechamento`, e recria `janela_revalidacao`, `revalidacao_uso`, `calibracao_versao` e `calibracao_regime` - OITO tabelas, TRES criadas e CINCO recriadas. `app.migrations` esta entre os 71 modulos do alvo, e `hash_do_schema` le o `sqlite_master` inteiro - entao os dois componentes mudam",
   "producao_nao_tem_esta_migracao": "o selo de producao continua descrevendo o laboratorio que esta la. Ele deixa de descrever no instante do deploy, e e a recertificacao que o refaz",
-  "quando": "2026-09-22"
+  "quando": "2026-09-22, revisado em 2026-10-07"
  },
  "conferido": "o hash canonico da implementacao calculado no Windows e o reportado pelo container Linux sao o MESMO numero - a OP-2 funcionando entre maquinas",
- "implementacao_hash": "5546e14a066b3d61",
+ "implementacao_hash": "3f7c8bf8c513d451",
  "implementacao_hash_anterior": "ed239872e6ae9bdb",
  "implementacao_hash_em_producao": "ed239872e6ae9bdb",
  "modulos": {
@@ -77,7 +87,7 @@
   "app.maos_rapidas.curva": "3e151cd08c596bcb",
   "app.maos_rapidas.executor": "93b993bd8ec75b28",
   "app.maos_rapidas.series": "cb00bb6b7aeb20ae",
-  "app.migrations": "5ace7a5d220c55ea",
+  "app.migrations": "7137eed624ae815e",
   "app.regra": "535d0d7fd77dc5a3",
   "app.regra.registro": "a607bd3fe6b591a2",
   "app.regra.schema": "8129afb3eab83763",

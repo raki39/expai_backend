@@ -208,7 +208,7 @@ def _regime_por_instante(
     # Importado do modulo dono do detector, e nunca reimplementado: o ADR 0026
     # congelou os cortes, e uma segunda classificacao divergiria no dia em que
     # alguem mexesse num lado so.
-    from .ajuste import regimes_das_barras
+    from .regimes import regimes_das_barras
 
     return regimes_das_barras(
         conn, venue=venue, symbol=symbol, timeframe=timeframe
