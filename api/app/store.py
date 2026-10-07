@@ -216,6 +216,71 @@ def dividir_statements(sql: str) -> list[str]:
     return statements
 
 
+class PreflightFalhou(Exception):
+    """Uma migracao destrutiva encontrou dado onde esperava tabela vazia.
+
+    Ela PARA em vez de descartar. O contrario e o modo de falha que nao tem
+    volta: `DROP TABLE` sobre linha que alguem gravou apaga evidencia, e
+    nenhuma conferencia posterior sabe o que havia la.
+    """
+
+
+def _preflight_33(conn: sqlite3.Connection) -> None:
+    """A migracao 33 RECRIA cinco tabelas, e isso so e seguro se elas estiverem
+    vazias.
+
+    Elas estao vazias em producao - conferido por leitura em 2026-09-22 e de
+    novo em 2026-10-07 -, e o ADR 0041 usa exatamente esse fato para justificar
+    recriar em vez de migrar. **Mas "estava vazio quando eu olhei" nao e uma
+    garantia**: entre a leitura e o deploy cabe uma chamada. Esta conferencia
+    roda IMEDIATAMENTE antes do `DROP`, dentro da mesma transacao.
+
+    E `janela_piloto` NAO e tocada pela migracao: a linha de 2026-09-21 tem de
+    atravessar inteira. Ela e conferida antes e depois, pelo conteudo.
+    """
+    recriadas = (
+        "calibracao_observacao", "janela_revalidacao", "revalidacao_uso",
+        "calibracao_versao", "calibracao_regime",
+    )
+    com_linha = []
+    for tabela in recriadas:
+        n = int(conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0])
+        if n:
+            com_linha.append({"tabela": tabela, "linhas": n})
+    if com_linha:
+        raise PreflightFalhou(
+            f"a migracao 33 recria {len(recriadas)} tabelas e encontrou dado em"
+            f" {com_linha}. Ela PARA: o ADR 0041 autoriza recriar porque elas"
+            f" estao vazias, e descartar linha que alguem gravou apagaria"
+            f" evidencia sem volta. Decida o que fazer com esse dado antes"
+        )
+
+
+#: Conferencias que rodam IMEDIATAMENTE antes do SQL de uma migracao, na mesma
+#: transacao. Uma migracao destrutiva que nao confere o que vai destruir e uma
+#: aposta em que ninguem escreveu entre a leitura e o deploy.
+PREFLIGHT = {33: _preflight_33}
+
+
+def _impressao_da_janela_piloto(conn: sqlite3.Connection) -> list[tuple]:
+    """O CONTEUDO da linha do piloto, para comparar antes e depois.
+
+    Contar linhas nao bastaria: a migracao poderia recriar a tabela com uma
+    linha diferente e a contagem fecharia.
+    """
+    try:
+        return [
+            tuple(r) for r in conn.execute(
+                "SELECT contrato, venue, symbol, de_ms, ate_ms_exclusive,"
+                "       observacoes_validas, observacoes_totais,"
+                "       dias_corridos_x1000, fechada_por, criado_em"
+                "  FROM janela_piloto ORDER BY contrato, venue, symbol"
+            )
+        ]
+    except sqlite3.OperationalError:
+        return []
+
+
 def migrar(conn: sqlite3.Connection) -> int:
     """Aplica as migracoes pendentes, cada uma atomicamente. Idempotente."""
     conn.execute(
@@ -235,8 +300,19 @@ def migrar(conn: sqlite3.Connection) -> int:
         statements = dividir_statements(sql)
         conn.execute("BEGIN")
         try:
+            preflight = PREFLIGHT.get(versao)
+            piloto_antes = _impressao_da_janela_piloto(conn)
+            if preflight is not None:
+                preflight(conn)
             for statement in statements:
                 conn.execute(statement)
+            piloto_depois = _impressao_da_janela_piloto(conn)
+            if piloto_antes != piloto_depois:
+                raise PreflightFalhou(
+                    f"a migracao {versao} alterou `janela_piloto`:"
+                    f" {piloto_antes} -> {piloto_depois}. Ela nao deveria"
+                    f" tocar o fechamento do piloto"
+                )
             conn.execute(
                 "INSERT INTO schema_migration (version, description, applied_at)"
                 " VALUES (?, ?, datetime('now'))",

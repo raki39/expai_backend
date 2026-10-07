@@ -201,6 +201,7 @@ class Materializacao:
     lados: tuple[str, ...]
     por_regime: dict[str, int]
     fora_do_regime_da_janela: int
+    adiados: dict[str, int]
 
     def como_dict(self) -> dict:
         return {
@@ -221,6 +222,7 @@ class Materializacao:
             "lados": list(self.lados),
             "por_regime": dict(sorted(self.por_regime.items())),
             "fora_do_regime_da_janela": self.fora_do_regime_da_janela,
+            "adiados": dict(sorted(self.adiados.items())),
             "o_que_cada_um_e": {
                 "instantes_validos_na_janela":
                     "instantes de GRADE com BBO valida dentro da janela",
@@ -246,6 +248,14 @@ class Materializacao:
                     " janela. Só a revalidacao tem janela por regime; na"
                     " calibracao e no piloto este numero e zero por"
                     " construcao, porque a janela nao tem regime",
+                "adiados":
+                    "candidatos ADIADOS por motivo, e adiado NAO e perdido: o"
+                    " instante volta na proxima materializacao. A barra pode"
+                    " nao ter fechado, o watermark do rele pode nao ter"
+                    " chegado, ou a janela causal pode estar incompleta - e"
+                    " gravar `indefinido` sobre ausencia que o backfill ainda"
+                    " pode preencher faria uma falta temporaria valer para"
+                    " sempre",
             },
         }
 
@@ -346,14 +356,36 @@ def registrar(
         conn, venue=venue, symbol=symbol, timeframe=c.timeframe
     )
 
+    # E A COBERTURA DO FLUXO, que decide se o instante PODE ser materializado.
+    #
+    # Classificar e funcao do conteudo da janela causal, e o conteudo pode
+    # ainda crescer por backfill. Gravar antes de a janela estar fechada faria
+    # uma ausencia TEMPORARIA valer para sempre - e o valor gravado e o que
+    # calibra. Quem nao esta pronto e ADIADO, nao gravado como `indefinido`.
+    cobertura = regimes.cobertura_do_fluxo(
+        conn, venue=venue, symbol=symbol, timeframe=c.timeframe
+    )
+
     gravadas = ja_existiam = excluidos = fora_do_regime = 0
     por_regime: dict[str, int] = {}
+    adiados: dict[str, int] = {}
     agora = _agora()
     with bloco_atomico(conn, "calibracao_registrar"):
         for linha in linhas:
-            regime = regimes.regime_do_instante(
-                mapa, int(linha["t_grid_ms"])
-            )
+            t_grid = int(linha["t_grid_ms"])
+            acao, motivo = cobertura.veredito(t_grid_ms=t_grid)
+            if acao == regimes.ADIAR:
+                adiados[motivo] = adiados.get(motivo, 0) + len(lados)
+                continue
+            regime = regimes.regime_do_instante(mapa, t_grid)
+            # A unica porta para `indefinido` e a ausencia DEFINITIVA, e ela e
+            # derivada: a janela alcanca antes da primeira barra que o rele
+            # entregou, e nenhum backfill traz barra de antes dela.
+            if regime == regimes.INDEFINIDO and motivo != "antes_do_inicio_do_fluxo":
+                adiados["janela_causal_incompleta"] = adiados.get(
+                    "janela_causal_incompleta", 0
+                ) + len(lados)
+                continue
             por_regime[regime] = por_regime.get(regime, 0) + len(lados)
             if apenas_regime is not None and regime != apenas_regime:
                 fora_do_regime += len(lados)
@@ -389,9 +421,12 @@ def registrar(
                     ja_existiam += 1
 
     candidatos = instantes_validos * len(lados)
-    # Os que nao pertencem a janela saem do numerador E do denominador: eles
-    # nao sao perda nossa, sao instantes de outro regime.
-    comparaveis = len(linhas) * len(lados) - fora_do_regime
+    # Os que nao pertencem a janela e os ADIADOS saem do numerador E do
+    # denominador. Nenhum dos dois e perda nossa: um e instante de outro
+    # regime, e o outro volta na proxima materializacao.
+    comparaveis = (
+        len(linhas) * len(lados) - fora_do_regime - sum(adiados.values())
+    )
     r = Materializacao(
         finalidade=finalidade, de_ms=de_ms,
         ate_ms_exclusive=ate_ms_exclusive, janela_hash=janela_hash,
@@ -403,6 +438,7 @@ def registrar(
         na_estatistica=comparaveis - excluidos,
         gravadas=gravadas, ja_existiam=ja_existiam, lados=tuple(lados),
         por_regime=por_regime, fora_do_regime_da_janela=fora_do_regime,
+        adiados=adiados,
     )
     log.info("calibracao.observacoes", extra={
         "contrato": contrato, "symbol": symbol, "finalidade": finalidade,

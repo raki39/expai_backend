@@ -17,6 +17,10 @@
    {
     "implementacao_hash": "a5ab06f7e96df9d9",
     "o_que_era": "a segunda versao da migracao 33, antes de o `de_ms` passar a ser CALCULADO pelo relogio do banco (2026-10-07) e de as fronteiras de origem serem conferidas em vez de declaradas"
+   },
+   {
+    "implementacao_hash": "3f7c8bf8c513d451",
+    "o_que_era": "a terceira versao, antes das quatro travas de 2026-10-07: a trava contra materializar antes do backfill, a cobertura limitada a janela selada, a atomicidade de `/rodar` e o preflight da migracao 33"
    }
   ],
   "o_que_falta": "RECERTIFICAR os cinco escopos, e a OP-3 entra nesta mesma janela. Ate la nenhum resultado pode ser citado como certificado sob o alvo novo",
@@ -28,7 +32,7 @@
   "quando": "2026-09-22, revisado em 2026-10-07"
  },
  "conferido": "o hash canonico da implementacao calculado no Windows e o reportado pelo container Linux sao o MESMO numero - a OP-2 funcionando entre maquinas",
- "implementacao_hash": "3f7c8bf8c513d451",
+ "implementacao_hash": "5b8aab9600384c3b",
  "implementacao_hash_anterior": "ed239872e6ae9bdb",
  "implementacao_hash_em_producao": "ed239872e6ae9bdb",
  "modulos": {
@@ -97,7 +101,7 @@
   "app.settings": "9eaeee2d679f1834",
   "app.simulador": "2f947532633d7877",
   "app.simulador.execucao": "9710b8dd2b69300a",
-  "app.store": "ebd161c95161d6bc",
+  "app.store": "6d411511dbe5b0e1",
   "app.validador": "18c8ea673b8f5ef8",
   "app.validador.contador": "da2a3df97046531f",
   "app.validador.estados": "c9af9416fef92544",

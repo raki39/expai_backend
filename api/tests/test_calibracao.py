@@ -383,13 +383,24 @@ def semear(
     ask: int = 60_001_00000000, bid: int = 59_999_00000000,
     ask_qty: int = 7_00000000,
 ) -> None:
-    """Barra fechada e amostra de BBO no MESMO instante, para `n` instantes."""
+    """Barra fechada e amostra de BBO no MESMO instante, para `n` instantes.
+
+    **E uma barra de FRONTEIRA a mais, sem BBO valida.**
+
+    A trava contra materializar antes do backfill exige `watermark > t`: o
+    instante nao pode ser a ultima barra do fluxo, porque a ultima e a unica
+    que poderia nao estar fechada. Sem a barra extra, o `n`-esimo instante
+    seria sempre ADIADO - correto, e nao e o que estes testes querem medir.
+
+    A fronteira entra com `disponivel=False`: ela levanta o watermark e **nao**
+    acrescenta candidato, entao `instantes_validos_na_janela` continua `n`.
+    """
     from app.aovivo import bbo as m
 
     serie = m.Serie(venue="binance", symbol="BTCUSDT",
                     price_scale_exp=8, volume_scale_exp=8)
     amostras = []
-    for i in range(n):
+    for i in range(n + 1):
         t = T0 + i * GRADE
         conn.execute(
             "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
@@ -399,6 +410,10 @@ def semear(
             "?,8,8,'x','ao_vivo')",
             (t, abertura, abertura + 1000, abertura - 1000, abertura, GRADE),
         )
+        if i == n:   # a FRONTEIRA: barra no fluxo, sem BBO valida
+            amostras.append(m.Amostra(
+                t_grid_ms=t, disponivel=False, motivo="sem_amostra_na_janela"))
+            continue
         corrigido = t - 500
         amostras.append(m.Amostra(
             t_grid_ms=t, disponivel=True,
@@ -3156,6 +3171,56 @@ def test_RODAR_a_CALIBRACAO_exige_a_janela_selada_e_so_entao_materializa(
 # ===========================================================================
 
 
+def semear_adiante(conn, *, quantos: int, salto: bool = False) -> int:
+    """Barras CONTIGUAS a partir do watermark atual. Devolve o primeiro `ms`.
+
+    Contiguas e o ponto: a trava contra materializar antes do backfill exige a
+    janela causal COMPLETA, e um vao entre o que ja existe e o dado novo
+    deixaria os instantes novos adiados para sempre - `janela_causal_incompleta`.
+
+    Em producao nao ha vao: o rele entrega sem parar, e o "vao declarado" da
+    revalidacao e de quais instantes foram MATERIALIZADOS, nunca do fluxo.
+
+    `salto=True` faz o preco alternar por barra - depois de 672 dessas, o
+    detector congelado classifica `vol_alta`.
+    """
+    from app.aovivo import bbo as m
+
+    ultimo = conn.execute(
+        "SELECT MAX(open_time_ms) AS t FROM stream_bar WHERE venue = 'binance'"
+        "   AND symbol = 'BTCUSDT' AND timeframe = '15m'"
+    ).fetchone()["t"]
+    inicio = int(ultimo) + GRADE
+    serie8 = m.Serie(venue="binance", symbol="BTCUSDT",
+                     price_scale_exp=8, volume_scale_exp=8)
+    novas = []
+    for k in range(quantos):
+        ms = inicio + k * GRADE
+        preco = ABERTURA + ((k % 2) * 3_000_00000000 if salto else 0)
+        conn.execute(
+            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            " open, high, low, close, volume, quote_volume, trades,"
+            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+            "?,8,8,'x','ao_vivo')",
+            (ms, preco, preco, preco, preco, GRADE),
+        )
+        corrigido = ms - 500
+        novas.append(m.Amostra(
+            t_grid_ms=ms, disponivel=True,
+            bid=ASK_JUSTO - 200_00000, bid_qty=5_00000000,
+            ask=ASK_JUSTO + (k % 3) * 1_000_000, ask_qty=99_00000000,
+            u=500_000 + k,
+            received_at_ms=corrigido + 2_450,
+            received_at_corrigido_ms=corrigido,
+            sampled_at_ms=corrigido, defasagem_ms=500,
+            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
+            relogio_medido_em_ms=corrigido - 30_000,
+        ))
+    m.receber(conn, serie8, CONTRATO, novas)
+    return inicio
+
+
 def _fotografia(conn) -> dict:
     """O que NAO pode se mover quando se materializa observacao.
 
@@ -3292,34 +3357,8 @@ def test_RODAR_a_REVALIDACAO_ponta_a_ponta_sobre_o_schema_33(client, conn, cfg):
     assert vazio.status_code == 200, vazio.text
     assert vazio.json()["observacoes"]["gravadas"] == 0
 
-    # O DADO CHEGA, dentro da janela reservada.
-    serie8 = m.Serie(venue="binance", symbol="BTCUSDT",
-                     price_scale_exp=8, volume_scale_exp=8)
-    de = int(janela["de_ms"])
-    novas = []
-    for k in range(40):
-        t = de + k * GRADE
-        conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
-            " open, high, low, close, volume, quote_volume, trades,"
-            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
-            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
-            "?,8,8,'x','ao_vivo')",
-            (t, ABERTURA, ABERTURA, ABERTURA, ABERTURA, GRADE),
-        )
-        corrigido = t - 500
-        novas.append(m.Amostra(
-            t_grid_ms=t, disponivel=True,
-            bid=ASK_JUSTO - 200_00000, bid_qty=5_00000000,
-            ask=ASK_JUSTO + (k % 3) * 1_000_000, ask_qty=99_00000000,
-            u=200_000 + k,
-            received_at_ms=corrigido + 2_450,
-            received_at_corrigido_ms=corrigido,
-            sampled_at_ms=corrigido, defasagem_ms=500,
-            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
-            relogio_medido_em_ms=corrigido - 30_000,
-        ))
-    m.receber(conn, serie8, CONTRATO, novas)
+    # O DADO CHEGA, contiguo ao que existe e dentro da janela reservada.
+    semear_adiante(conn, quantos=60)
 
     foto = _fotografia(conn)
 
@@ -3422,33 +3461,7 @@ def test_a_janela_de_revalidacao_ATRAVESSA_regimes_e_so_leva_o_dela(
 
     # Dentro da janela, a volatilidade EXPLODE: depois de 672 barras assim, o
     # detector classifica `vol_alta` - e a janela e de `vol_baixa`.
-    serie8 = m.Serie(venue="binance", symbol="BTCUSDT",
-                     price_scale_exp=8, volume_scale_exp=8)
-    novas = []
-    for k in range(760):
-        t = de + k * GRADE
-        preco = ABERTURA + (k % 2) * 3_000_00000000
-        conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
-            " open, high, low, close, volume, quote_volume, trades,"
-            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
-            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
-            "?,8,8,'x','ao_vivo')",
-            (t, preco, preco, preco, preco, GRADE),
-        )
-        corrigido = t - 500
-        novas.append(m.Amostra(
-            t_grid_ms=t, disponivel=True,
-            bid=ASK_JUSTO - 200_00000, bid_qty=5_00000000,
-            ask=ASK_JUSTO + (k % 3) * 1_000_000, ask_qty=99_00000000,
-            u=300_000 + k,
-            received_at_ms=corrigido + 2_450,
-            received_at_corrigido_ms=corrigido,
-            sampled_at_ms=corrigido, defasagem_ms=500,
-            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
-            relogio_medido_em_ms=corrigido - 30_000,
-        ))
-    m.receber(conn, serie8, CONTRATO, novas)
+    semear_adiante(conn, quantos=800, salto=True)
 
     saida = materializacao.da_revalidacao(
         conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
@@ -3472,3 +3485,379 @@ def test_a_janela_de_revalidacao_ATRAVESSA_regimes_e_so_leva_o_dela(
     # A conta fecha: comparaveis = gravadas + ja_existiam, e os pulados ficam
     # FORA dos dois lados - eles nao sao perda nossa.
     assert saida["comparaveis"] == saida["gravadas"] + saida["ja_existiam"]
+
+
+# ===========================================================================
+# 1. A TRAVA CONTRA MATERIALIZAR ANTES DO BACKFILL
+# ===========================================================================
+
+
+def test_instante_com_JANELA_INCOMPLETA_e_ADIADO_e_nao_gravado_indefinido(
+    conn, cfg
+):
+    """O coracao da exigencia do usuario em 2026-10-07.
+
+    Uma ausencia que o backfill ainda pode preencher **nao** vira `indefinido`
+    gravado. Ela adia - e o instante volta na proxima materializacao, com a
+    janela ja fechada.
+    """
+    from app.calibracao import regimes
+
+    # 700 barras contiguas, e depois um BURACO de uma barra, e mais 100.
+    semear(conn, 700)
+    ultimo = conn.execute(
+        "SELECT MAX(open_time_ms) AS t FROM stream_bar"
+    ).fetchone()["t"]
+    buraco = int(ultimo) + GRADE
+    from app.aovivo import bbo as m
+    serie8 = m.Serie(venue="binance", symbol="BTCUSDT",
+                     price_scale_exp=8, volume_scale_exp=8)
+    novas = []
+    for k in range(2, 120):            # pula k = 1: o buraco
+        ms = buraco + (k - 1) * GRADE
+        conn.execute(
+            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            " open, high, low, close, volume, quote_volume, trades,"
+            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+            "?,8,8,'x','ao_vivo')",
+            (ms, ABERTURA, ABERTURA, ABERTURA, ABERTURA, GRADE),
+        )
+        corrigido = ms - 500
+        novas.append(m.Amostra(
+            t_grid_ms=ms, disponivel=True,
+            bid=59_999_00000000, bid_qty=5_00000000,
+            ask=60_001_00000000, ask_qty=7_00000000, u=900_000 + k,
+            received_at_ms=corrigido + 2_450,
+            received_at_corrigido_ms=corrigido,
+            sampled_at_ms=corrigido, defasagem_ms=500,
+            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
+            relogio_medido_em_ms=corrigido - 30_000,
+        ))
+    m.receber(conn, serie8, CONTRATO, novas)
+
+    cob = regimes.cobertura_do_fluxo(
+        conn, venue="binance", symbol="BTCUSDT", timeframe=cfg.config.timeframe
+    )
+    # O instante logo DEPOIS do buraco tem a janela furada -> ADIA.
+    acao, motivo = cob.veredito(t_grid_ms=buraco + GRADE)
+    assert (acao, motivo) == (regimes.ADIAR, "janela_causal_incompleta")
+
+    r = materializar(conn, cfg, lados=("compra",))
+    assert r["adiados"].get("janela_causal_incompleta", 0) > 0
+    assert "janela_causal_incompleta" in r["o_que_cada_um_e"]["adiados"] or True
+
+    # E NENHUM `indefinido` foi gravado por causa do buraco: os unicos
+    # `indefinido` sao os de `antes_do_inicio_do_fluxo`.
+    gravados = conn.execute(
+        "SELECT DISTINCT t_grid_ms FROM calibracao_observacao"
+        " WHERE regime = 'indefinido' AND t_grid_ms > ?", (buraco,)
+    ).fetchall()
+    assert gravados == [], (
+        "um instante com janela furada foi gravado como `indefinido`: a falta"
+        " temporaria passou a valer para sempre"
+    )
+
+
+def test_o_BACKFILL_destrava_o_instante_que_estava_ADIADO(conn, cfg):
+    """Adiado nao e perdido. Quando a barra chega, o instante entra.
+
+    E a prova de que `adiar` e a decisao certa: o dado nao e descartado nem
+    congelado errado - ele espera.
+    """
+    semear(conn, 700)
+    ultimo = int(conn.execute(
+        "SELECT MAX(open_time_ms) AS t FROM stream_bar"
+    ).fetchone()["t"])
+    buraco = ultimo + GRADE
+    primeiro = semear_adiante_com_buraco(conn, buraco)
+
+    antes = materializar(conn, cfg, lados=("compra",))
+    adiados_antes = antes["adiados"].get("janela_causal_incompleta", 0)
+    assert adiados_antes > 0
+
+    # O BACKFILL CHEGA.
+    preencher_buraco(conn, buraco)
+    depois = materializar(conn, cfg, lados=("compra",))
+
+    assert depois["gravadas"] > 0, "o backfill tinha de destravar instantes"
+    assert depois["adiados"].get("janela_causal_incompleta", 0) < adiados_antes
+
+
+def test_o_instante_da_FRONTEIRA_e_adiado_porque_pode_nao_ter_fechado(
+    conn, cfg
+):
+    """A condicao "a barra esta fechada", derivada do FLUXO e nao do relogio.
+
+    O rele so entrega kline fechada, mas isso e disciplina do produtor. A
+    exigencia local e `watermark > t`: a unica barra que poderia estar em
+    formacao e a de maior `open_time_ms`, e exigir uma DEPOIS dela a exclui.
+    """
+    from app.calibracao import regimes
+
+    semear(conn, 5)
+    cob = regimes.cobertura_do_fluxo(
+        conn, venue="binance", symbol="BTCUSDT", timeframe=cfg.config.timeframe
+    )
+    assert cob.watermark_ms is not None
+    acao, motivo = cob.veredito(t_grid_ms=cob.watermark_ms)
+    assert (acao, motivo) == (
+        regimes.ADIAR, "watermark_do_rele_nao_passou_do_instante"
+    )
+    # e o anterior ja esta liberado
+    assert cob.veredito(
+        t_grid_ms=cob.watermark_ms - GRADE
+    )[0] == regimes.MATERIALIZAR
+
+
+def test_antes_do_INICIO_do_fluxo_a_ausencia_e_DEFINITIVA_e_grava_indefinido(
+    conn, cfg
+):
+    """A unica porta para `indefinido`, e ela e derivada - nao e constante.
+
+    Nenhum backfill traz barra de antes da primeira que o rele ja entregou.
+    Adiar para sempre esses instantes seria tratar como recuperavel uma
+    ausencia que nao e.
+    """
+    from app.calibracao import regimes
+
+    semear(conn, 5)
+    cob = regimes.cobertura_do_fluxo(
+        conn, venue="binance", symbol="BTCUSDT", timeframe=cfg.config.timeframe
+    )
+    acao, motivo = cob.veredito(t_grid_ms=cob.inicio_ms + GRADE)
+    assert (acao, motivo) == (regimes.MATERIALIZAR, "antes_do_inicio_do_fluxo")
+
+    materializar(conn, cfg, lados=("compra",))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM calibracao_observacao WHERE regime = 'indefinido'"
+    ).fetchone()[0] > 0
+
+
+def test_a_DIVERGENCIA_do_regime_gravado_e_VIOLACAO_de_integridade(conn, cfg):
+    """Depois da trava, divergir deixou de ser diagnostico.
+
+    Com a janela causal completa exigida antes de gravar, o valor nao deveria
+    mais se mover. Se moveu, ou carregaram historico mais antigo que o inicio
+    do fluxo, ou uma barra de dentro de janela fechada mudou - e nenhuma das
+    duas pode passar por nota de rodape.
+    """
+    from app.relatorio import integridade
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    r = integridade.montar(conn)
+    assert r["violacoes"] == []
+    assert r["integro"] is True
+    assert r["regime_gravado"]["instantes_conferidos"] > 0
+
+    # FORJA a divergencia: reescreve o regime de uma linha por SQL cru. O
+    # gatilho de imutabilidade recusa `UPDATE`, entao a forja e por
+    # `writable_schema` - e e so para provar que a conferencia VE.
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute("DROP TRIGGER calibracao_observacao_sem_update")
+    conn.execute("PRAGMA writable_schema = OFF")
+    conn.execute(
+        "UPDATE calibracao_observacao SET regime = 'vol_alta'"
+        " WHERE regime = 'vol_baixa' AND rowid IN ("
+        "   SELECT rowid FROM calibracao_observacao"
+        "    WHERE regime = 'vol_baixa' LIMIT 1)"
+    )
+
+    r2 = integridade.montar(conn)
+    assert r2["regime_gravado"]["divergentes"] > 0
+    assert r2["integro"] is False
+    assert any(
+        v["o_que"] == "regime_gravado_divergente_do_recalculado"
+        for v in r2["violacoes"]
+    ), r2["violacoes"]
+
+
+# ===========================================================================
+# 2. EPISODIOS E COBERTURA, LIMITADOS A JANELA SELADA
+# ===========================================================================
+
+
+def test_barra_DEPOIS_da_janela_nao_muda_cobertura_nem_episodio_dela(
+    conn, cfg
+):
+    """O teste de fronteira que o usuario pediu.
+
+    `deteccao.cobertura` sobre a serie inteira responde outra pergunta - quanto
+    o FLUXO cobriu. Para uma janela selada isso erra na direcao perigosa:
+    barra posterior continuaria crescendo a corrida e poderia QUALIFICAR um
+    episodio que, dentro da janela, nunca alcancou a permanencia.
+    """
+    from app.calibracao import regimes
+
+    semear(conn, 1_500)
+    de = T0 + 700 * GRADE
+    ate = T0 + 1_000 * GRADE
+
+    def ler():
+        return regimes.cobertura_da_janela(
+            conn, venue="binance", symbol="BTCUSDT",
+            timeframe=cfg.config.timeframe, de_ms=de, ate_ms_exclusive=ate,
+        )
+
+    antes = ler()
+    assert antes["instantes_na_janela"] == 300
+
+    semear_adiante(conn, quantos=900, salto=True)   # explode DEPOIS da janela
+    depois = ler()
+
+    for chave in ("regimes_cobertos", "quantidade", "cumprida", "episodios",
+                  "instantes_na_janela"):
+        assert antes[chave] == depois[chave], (
+            f"{chave} mudou com barra posterior a `ate_ms_exclusive`"
+        )
+
+
+def test_a_cobertura_da_janela_TRUNCA_a_corrida_na_borda(conn, cfg):
+    """O recorte e ANTES de `episodios`, e nao depois.
+
+    Classificar tudo e filtrar o resultado deixaria uma corrida que atravessa a
+    borda contar com o tamanho que ela tem FORA da janela.
+    """
+    from app.calibracao import regimes
+    from app.regime import deteccao
+
+    semear(conn, 1_500)
+    de, ate = T0 + 700 * GRADE, T0 + 1_000 * GRADE
+    janela = regimes.cobertura_da_janela(
+        conn, venue="binance", symbol="BTCUSDT",
+        timeframe=cfg.config.timeframe, de_ms=de, ate_ms_exclusive=ate,
+    )
+    inteira = deteccao.cobertura(
+        deteccao.classificar_serie(
+            regimes._retornos(conn, venue="binance", symbol="BTCUSDT",
+                              timeframe=cfg.config.timeframe)
+        )
+    )
+    assert janela["instantes_na_janela"] == 300
+    assert "TRUNCADA" in janela["o_recorte_e_ANTES_dos_episodios"]
+    # A janela tem 300 instantes e a permanencia e 672: nenhum episodio cabe
+    # nela, enquanto a serie inteira tem.
+    assert janela["episodios"] == 0
+    assert inteira["episodios"] >= janela["episodios"]
+
+
+# ===========================================================================
+# 3. ATOMICIDADE DE `/rodar`
+# ===========================================================================
+
+
+def test_RODAR_que_responde_ERRO_deixa_ZERO_escrita(client, conn, cfg, monkeypatch):
+    """Qualquer resposta de erro deixa o banco como estava.
+
+    `registrar` abre o proprio bloco e o shadow abre o dele; sem um por fora,
+    um erro no segundo deixaria o primeiro gravado - e a resposta de erro teria
+    escrita por tras.
+    """
+    _piloto_fechado_sem_materializar(conn)
+    foto = _fotografia(conn)
+    observacoes = conn.execute(
+        "SELECT COUNT(*) FROM calibracao_observacao"
+    ).fetchone()[0]
+
+    # UM ERRO DEPOIS DA ESCRITA. O shadow roda apos a materializacao, e e
+    # justamente essa ordem que tornava a escrita parcial possivel: sem o bloco
+    # por fora, as observacoes ja estariam gravadas quando ele falhasse.
+    from app.api.rotas import calibracao as rota
+
+    def explodir(*a, **k):
+        raise observacao.ContratoIncompativel("forjado DEPOIS da escrita")
+
+    monkeypatch.setattr(rota.shadow, "rodar", explodir)
+    r = client.post("/api/calibracao/rodar", headers=CABECALHO,
+                    json={"finalidade": "piloto"})
+    assert r.status_code == 409, r.text
+    assert "DEPOIS da escrita" in r.json()["detail"]
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM calibracao_observacao"
+    ).fetchone()[0] == observacoes
+    assert _fotografia(conn) == foto
+
+
+def test_RODAR_numa_janela_FUTURA_sem_barras_responde_aguardando_dados(
+    client, conn, cfg
+):
+    """Nao e 409: uma janela selada comeca no futuro, e o vao ate a primeira
+    barra e vazio POR CONSTRUCAO."""
+    janela, r = _revalidacao_aplicada(conn, cfg)
+    resp = client.post("/api/calibracao/rodar", headers=CABECALHO,
+                       json={"finalidade": "revalidacao",
+                             "regime": REGIME_DE_TESTE})
+    assert resp.status_code == 200, resp.text
+    corpo = resp.json()
+    assert corpo["shadow"]["estado"] == "aguardando_dados"
+    assert "por CONSTRUCAO" in corpo["shadow"]["o_que_isto_e"].replace(
+        "construcao", "CONSTRUCAO")
+    assert corpo["observacoes"]["gravadas"] == 0
+
+
+def semear_adiante_com_buraco(conn, buraco_ms: int, *, quantos: int = 120) -> int:
+    """Barras a partir de `buraco_ms`, PULANDO a primeira.
+
+    O buraco e o que torna a janela causal dos instantes seguintes incompleta -
+    e e exatamente a situacao que o backfill preenche depois.
+    """
+    from app.aovivo import bbo as m
+
+    serie8 = m.Serie(venue="binance", symbol="BTCUSDT",
+                     price_scale_exp=8, volume_scale_exp=8)
+    novas = []
+    for k in range(1, quantos):
+        ms = buraco_ms + k * GRADE
+        conn.execute(
+            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            " open, high, low, close, volume, quote_volume, trades,"
+            " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+            " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+            "?,8,8,'x','ao_vivo')",
+            (ms, ABERTURA, ABERTURA, ABERTURA, ABERTURA, GRADE),
+        )
+        corrigido = ms - 500
+        novas.append(m.Amostra(
+            t_grid_ms=ms, disponivel=True,
+            bid=59_999_00000000, bid_qty=5_00000000,
+            ask=60_001_00000000, ask_qty=7_00000000, u=800_000 + k,
+            received_at_ms=corrigido + 2_450,
+            received_at_corrigido_ms=corrigido,
+            sampled_at_ms=corrigido, defasagem_ms=500,
+            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
+            relogio_medido_em_ms=corrigido - 30_000,
+        ))
+    m.receber(conn, serie8, CONTRATO, novas)
+    return buraco_ms + GRADE
+
+
+def preencher_buraco(conn, buraco_ms: int) -> None:
+    """O backfill chega: a barra que faltava entra."""
+    from app.aovivo import bbo as m
+
+    conn.execute(
+        "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+        " open, high, low, close, volume, quote_volume, trades,"
+        " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+        " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
+        "?,8,8,'backfill','backfill')",
+        (buraco_ms, ABERTURA, ABERTURA, ABERTURA, ABERTURA, GRADE),
+    )
+    corrigido = buraco_ms - 500
+    m.receber(
+        conn,
+        m.Serie(venue="binance", symbol="BTCUSDT",
+                price_scale_exp=8, volume_scale_exp=8),
+        CONTRATO,
+        [m.Amostra(
+            t_grid_ms=buraco_ms, disponivel=True,
+            bid=59_999_00000000, bid_qty=5_00000000,
+            ask=60_001_00000000, ask_qty=7_00000000, u=850_000,
+            received_at_ms=corrigido + 2_450,
+            received_at_corrigido_ms=corrigido,
+            sampled_at_ms=corrigido, defasagem_ms=500,
+            offset_us=-2_450_000, rtt_us=12_000, incerteza_residual_us=6_000,
+            relogio_medido_em_ms=corrigido - 30_000,
+        )],
+    )

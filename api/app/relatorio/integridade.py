@@ -248,6 +248,38 @@ def contrato_do_agente(conn: sqlite3.Connection) -> dict:
     }
 
 
+def _regime_divergente(conn: sqlite3.Connection) -> dict:
+    """A conferencia do regime gravado, por serie observada."""
+    from ..calibracao import regimes
+    from ..config import service as config_service
+
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        return {"instantes_conferidos": 0, "divergentes": 0, "amostra": [],
+                "por_que_nao_conferido": "nao ha config vigente"}
+
+    total = 0
+    fora: list[dict] = []
+    for s in conn.execute(
+        "SELECT DISTINCT contrato, venue, symbol FROM calibracao_observacao"
+    ):
+        d = regimes.divergencias_do_gravado(
+            conn, contrato=s["contrato"], venue=s["venue"],
+            symbol=s["symbol"], timeframe=versao.config.timeframe,
+        )
+        total += d["instantes_conferidos"]
+        fora.extend(d["amostra"])
+    return {
+        "instantes_conferidos": total,
+        "divergentes": len(fora),
+        "amostra": fora[:20],
+        "qual_vale": (
+            "o GRAVADO. Ele e a classificacao no instante da materializacao, e"
+            " e sobre ela que a calibracao daquele regime parou e fechou"
+        ),
+    }
+
+
 def montar(conn: sqlite3.Connection) -> dict[str, Any]:
     from ..calibracao import identidade
     from ..config import service as config_service
@@ -367,8 +399,40 @@ def montar(conn: sqlite3.Connection) -> dict[str, Any]:
         )
     ]
 
+    # ----------------------------------------------------------------
+    # O REGIME GRAVADO contra o recalculado: VIOLACAO, e nao diagnostico.
+    #
+    # Com a trava contra materializar antes do backfill, um instante so e
+    # gravado quando a janela causal dele esta COMPLETA - ou quando ela alcanca
+    # antes do inicio do fluxo, que e definitivo. Nos dois casos o valor nao
+    # deveria mais se mover.
+    #
+    # Se ele se moveu, uma das duas aconteceu: historico mais antigo que a
+    # primeira barra do rele foi carregado, ou uma barra de dentro de uma
+    # janela ja completa mudou. A primeira e legitima e exige decisao; a
+    # segunda nao deveria ser possivel. **Nenhuma das duas pode passar por
+    # diagnostico:** o regime gravado e o que calibrou.
+    divergencias = _regime_divergente(conn)
+    violacoes = []
+    if divergencias["divergentes"]:
+        violacoes.append({
+            "o_que": "regime_gravado_divergente_do_recalculado",
+            "quantos": divergencias["divergentes"],
+            "por_que_e_violacao": (
+                "o regime gravado e o que calibrou. Ele so e escrito com a"
+                " janela causal COMPLETA, ou antes do inicio do fluxo - nos"
+                " dois casos ele nao deveria mais se mover"
+            ),
+            "amostra": divergencias["amostra"],
+        })
+
     return {
         "schema_version": schema,
+        "violacoes": violacoes,
+        "integro": not violacoes and not (
+            faltando_tabelas or faltando_colunas or faltando_gatilhos
+        ),
+        "regime_gravado": divergencias,
         "migracoes": {
             "tabelas_esperadas": len(esperadas),
             "tabelas_faltando": faltando_tabelas,

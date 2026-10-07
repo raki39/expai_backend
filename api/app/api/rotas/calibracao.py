@@ -26,6 +26,7 @@ from ...calibracao import (
 from ...dataset import loader as dataset_loader
 from ...maos_rapidas import baselines
 from ...config import service as config_service
+from ...store import bloco_atomico
 from ...calibracao.identidade import SEM_PERFIL
 from ..comum import _conn
 
@@ -124,58 +125,64 @@ def rodar(request: Request, pedido: PedidoDeCalibracao) -> dict[str, Any]:
     comum = dict(contrato=pedido.contrato, venue=pedido.venue,
                  symbol=pedido.symbol)
     orcamento = _capital_por_ordem_cents(conn, versao.config)
+    # TUDO OU NADA. `registrar` abre o proprio bloco e o shadow abre o dele;
+    # sem um por fora, um erro no segundo deixaria o primeiro GRAVADO - e a
+    # resposta de erro teria escrita por tras. `bloco_atomico` e aninhavel
+    # (SAVEPOINT), entao os de dentro continuam valendo, e o `ROLLBACK TO`
+    # desfaz tudo que este pedido escreveu.
     try:
-        if pedido.finalidade == "piloto":
-            r_obs = materializacao.do_piloto(
-                conn, **comum, config=versao.config,
-                config_version_id=versao.id,
-                calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
-                orcamento_cents=orcamento,
-            )
-        elif pedido.finalidade == "calibracao":
-            janela = materializacao.ler_janela_de_calibracao(conn, **comum)
-            if janela is None:
-                raise materializacao.JanelaNaoSelada(
-                    "nao ha janela de calibracao selada: sele antes, e ela"
-                    " comeca numa fronteira de grade posterior ao selamento"
+        with bloco_atomico(conn, "calibracao_rodar"):
+            if pedido.finalidade == "piloto":
+                r_obs = materializacao.do_piloto(
+                    conn, **comum, config=versao.config,
+                    config_version_id=versao.id,
+                    calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
+                    orcamento_cents=orcamento,
                 )
-            r_obs = materializacao.da_calibracao(
-                conn, **comum, config=versao.config,
-                config_version_id=versao.id,
-                calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
-                orcamento_cents=orcamento,
-                ate_ms_exclusive=_alcance_do_dado(conn, pedido),
-            )
-        else:
-            r_obs = materializacao.da_revalidacao(
-                conn, **comum, regime=str(pedido.regime),
-                orcamento_cents=orcamento,
-            )
-        # O shadow roda no MESMO intervalo que a observacao acabou de
-        # materializar - o da janela selada, e nao um pedido a parte.
-        #
-        # **"Sem barras" e FATO DA JANELA, e nao erro do pedido.** Uma janela
-        # selada comeca no futuro: entre o selo e a chegada do dado ela esta
-        # legitimamente vazia. Devolver 409 ali seria pior que inutil - a
-        # observacao JA foi gravada quando o shadow roda, entao um 409
-        # relataria como falha uma chamada que escreveu.
-        try:
-            r_shadow = shadow.rodar(
-                conn, **comum, config=versao.config,
-                config_version_id=versao.id,
-                de_ms=int(r_obs["janela"]["de_ms"]),
-                ate_ms_exclusive=int(r_obs["janela"]["ate_ms_exclusive"]),
-            )
-        except shadow.SemBarras as e:
-            r_shadow = {
-                "estado": "sem_barras_na_janela",
-                "motivo": str(e),
-                "o_que_isto_e": (
-                    "a janela esta selada e o dado ainda nao chegou. Nao e"
-                    " erro: uma janela selada comeca no FUTURO, e o periodo"
-                    " entre o selo e a primeira barra e vazio por construcao"
-                ),
-            }
+            elif pedido.finalidade == "calibracao":
+                janela = materializacao.ler_janela_de_calibracao(conn, **comum)
+                if janela is None:
+                    raise materializacao.JanelaNaoSelada(
+                        "nao ha janela de calibracao selada: sele antes, e ela"
+                        " comeca numa fronteira de grade posterior ao selamento"
+                    )
+                r_obs = materializacao.da_calibracao(
+                    conn, **comum, config=versao.config,
+                    config_version_id=versao.id,
+                    calibracao_perfil_hash=_perfil_da_versao(conn, versao.id),
+                    orcamento_cents=orcamento,
+                    ate_ms_exclusive=_alcance_do_dado(conn, pedido),
+                )
+            else:
+                r_obs = materializacao.da_revalidacao(
+                    conn, **comum, regime=str(pedido.regime),
+                    orcamento_cents=orcamento,
+                )
+            # O shadow roda no MESMO intervalo que a observacao acabou de
+            # materializar - o da janela selada, e nao um pedido a parte.
+            #
+            # **"Sem barras" e FATO DA JANELA, e nao erro do pedido.** Uma janela
+            # selada comeca no futuro: entre o selo e a chegada do dado ela esta
+            # legitimamente vazia. Devolver 409 ali seria pior que inutil - a
+            # observacao JA foi gravada quando o shadow roda, entao um 409
+            # relataria como falha uma chamada que escreveu.
+            try:
+                r_shadow = shadow.rodar(
+                    conn, **comum, config=versao.config,
+                    config_version_id=versao.id,
+                    de_ms=int(r_obs["janela"]["de_ms"]),
+                    ate_ms_exclusive=int(r_obs["janela"]["ate_ms_exclusive"]),
+                )
+            except shadow.SemBarras as e:
+                r_shadow = {
+                    "estado": "aguardando_dados",
+                    "motivo": str(e),
+                    "o_que_isto_e": (
+                        "a janela esta selada e o dado ainda nao chegou. Nao e"
+                        " erro: uma janela selada comeca no FUTURO, e o periodo"
+                        " entre o selo e a primeira barra e vazio por construcao"
+                    ),
+                }
     except materializacao.JanelaNaoSelada as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
