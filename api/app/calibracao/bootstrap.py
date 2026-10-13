@@ -50,6 +50,14 @@ REPETICOES = 2_000
 SEMENTE = 42
 
 
+#: O piso do bootstrap de quantil. Abaixo dele ele NAO RODA - entao uma janela
+#: dimensionada para menos que isto e uma janela dimensionada para uma medicao
+#: que nao acontece. O horizonte da calibracao usa este numero como chao, e isso
+#: NAO e relaxar delta: delta decide quantas observacoes sao precisas, e este
+#: decide a partir de quantas o estimador existe.
+MINIMO_PARA_O_QUANTIL = 10
+
+
 class SerieCurtaDemais(Exception):
     """Nao ha observacao suficiente para o procedimento pedido."""
 
@@ -302,9 +310,10 @@ def limite_inferior_do_quantil(
     dependencia daria um intervalo estreito demais, na direcao de aprovar.
     """
     n = len(x)
-    if n < 10:
+    if n < MINIMO_PARA_O_QUANTIL:
         raise SerieCurtaDemais(
-            f"bootstrap de quantil precisa de ao menos 10 observacoes, veio {n}"
+            f"bootstrap de quantil precisa de ao menos"
+            f" {MINIMO_PARA_O_QUANTIL} observacoes, veio {n}"
         )
 
     serie = [float(v) for v in x]

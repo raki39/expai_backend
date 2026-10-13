@@ -75,7 +75,10 @@ def test_com_as_cinco_VAZIAS_a_migracao_33_aplica(em_32):
     antes = store._impressao_da_janela_piloto(em_32)
     assert len(antes) == 1
 
-    assert store.migrar(em_32) == 33
+    # `migrar` aplica TODAS as pendentes, e a 34 veio depois (OP-3). O que
+    # este teste mede e a 33 ter passado pelo preflight sem parar.
+    assert store.migrar(em_32) == migrations.MIGRACOES[-1][0]
+    assert store.versao_schema(em_32) >= 33
 
     # A LINHA DO PILOTO ATRAVESSOU INTEIRA — conferida pelo CONTEÚDO, e não
     # pela contagem: recriar a tabela com outra linha faria a contagem fechar.

@@ -133,12 +133,17 @@ def da_calibracao(
         "calibracao", contrato, venue, symbol,
         janela["de_ms"], janela["selada_em_ms"], janela["grade_ms"],
     )
+    # LIMITA PELO FIM DECLARADO. A janela ganhou fim (ADR 0041 par.9i), e
+    # `ate_ms_exclusive` aqui e o alcance do DADO - que pode passar dele.
+    # Sem o `min`, o gatilho `..._dentro_da_janela` abortaria a materializacao
+    # inteira no primeiro instante posterior ao periodo.
+    fim = min(int(ate_ms_exclusive), int(janela["ate_ms_exclusive"]))
     r = observacao.registrar(
         conn, finalidade="calibracao", contrato=contrato, venue=venue,
         symbol=symbol, config=config, config_version_id=config_version_id,
         calibracao_perfil_hash=calibracao_perfil_hash,
         janela_hash=janela_hash, de_ms=int(janela["de_ms"]),
-        ate_ms_exclusive=ate_ms_exclusive, orcamento_cents=orcamento_cents,
+        ate_ms_exclusive=fim, orcamento_cents=orcamento_cents,
     )
     return {
         **r.como_dict(),

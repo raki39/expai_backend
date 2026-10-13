@@ -93,9 +93,31 @@ PLANO_A1A: tuple[str, ...] = ("preparo.baselines", "preparo.b4") + tuple(
     f"a1a.{familia.chave}" for familia in catalogo_a1a.FAMILIAS
 )
 
+#: O PLANO DO A2 — OP-3, paga em 2026-10-07.
+#:
+#: Medido em produção na recertificação de 2026-09-10: o a2 roda num pedido
+#: único de **88,7 s**, acima dos 60 s do proxy do painel. É a mesma aposta no
+#: timeout que a OP-1 tirou do a1a, num escopo que a OP-1 não cobria.
+#:
+#: As quatro unidades são as INDIVISÍVEIS do `por_escopo.rodar_a2`, na mesma
+#: ordem e pelas mesmas funções: preparar o laboratório (baselines e B4), o
+#: segundo giro de B1 — que é o que dá ao a2 o SEGUNDO ponto, sem o qual não há
+#: inclinação a medir — e a avaliação.
+#:
+#: **Nada é reduzido.** Os dois giros, o preparo e o B4 ficam inteiros; o que
+#: muda é só onde a requisição é partida.
+PLANO_A2: tuple[str, ...] = (
+    "preparo.baselines", "preparo.b4", "a2.segundo_giro", "a2.avaliacao",
+)
+
+#: O plano de cada escopo parcelado por ETAPAS, num lugar só. `parcelado` lê
+#: daqui pelo `escopo` gravado na execução, e não por um literal — era
+#: `esc.A1A` cravado em dez pontos, e um escopo novo exigiria achar os dez.
+PLANOS: dict[str, tuple[str, ...]] = {A1A: PLANO_A1A, A2: PLANO_A2}
+
 #: Os escopos parcelados, e em quantos pedaços. A1b: 8 blocos de 50 = 400, que
-#: é o que a D29 fixou. A1a: uma etapa por unidade do plano acima.
-BLOCOS = {A1A: len(PLANO_A1A), A1B: 8}
+#: é o que a D29 fixou. A1a e A2: uma etapa por unidade do plano acima.
+BLOCOS = {A1A: len(PLANO_A1A), A1B: 8, A2: len(PLANO_A2)}
 POR_BLOCO = 50
 
 PERGUNTA = {

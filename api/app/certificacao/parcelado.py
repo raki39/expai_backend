@@ -98,8 +98,9 @@ def _execucao(oficial: sqlite3.Connection, execucao_id: int) -> sqlite3.Row:
         "  FROM certificacao_execucao WHERE id = ?",
         (execucao_id,),
     ).fetchone()
-    if linha is None or linha["escopo"] != esc.A1A or not linha["blocos_esperados"]:
-        raise ValueError(f"execucao a1a parcelada {execucao_id} nao existe")
+    if linha is None or linha["escopo"] not in esc.PLANOS \
+            or not linha["blocos_esperados"]:
+        raise ValueError(f"execucao parcelada {execucao_id} nao existe")
     return linha
 
 
@@ -127,13 +128,22 @@ def _concluidas(blocos: dict[int, sqlite3.Row]) -> int:
     return k
 
 
-def ultima_do_alvo(oficial: sqlite3.Connection, alvo_hash: str) -> int | None:
-    """A execução a1a parcelada mais recente deste alvo, se houver."""
+def ultima_do_alvo(
+    oficial: sqlite3.Connection, alvo_hash: str, *, escopo: str = esc.A1A,
+) -> int | None:
+    """A execução parcelada mais recente deste alvo NAQUELE escopo.
+
+    O `escopo` tem default por compatibilidade com quem ja chamava para o a1a,
+    e o SQL o recebe como parametro em vez do literal `'a1a'` - era ele que
+    tornava esta funcao invisivelmente especifica.
+    """
+    if escopo not in esc.PLANOS:
+        raise ValueError(f"{escopo!r} nao e escopo parcelado por etapas")
     linha = oficial.execute(
         "SELECT id FROM certificacao_execucao"
-        " WHERE escopo = 'a1a' AND alvo_hash = ? AND blocos_esperados > 0"
+        " WHERE escopo = ? AND alvo_hash = ? AND blocos_esperados > 0"
         " ORDER BY id DESC LIMIT 1",
-        (alvo_hash,),
+        (escopo, alvo_hash),
     ).fetchone()
     return int(linha["id"]) if linha else None
 
@@ -191,7 +201,7 @@ def estado(oficial: sqlite3.Connection, execucao_id: int) -> dict:
     fim = aborto is not None or selado is not None
     return {
         "execucao_id": execucao_id,
-        "escopo": esc.A1A,
+        "escopo": linha["escopo"],
         "alvo_de_certificacao_hash": linha["alvo_hash"],
         "iniciada_em": linha["iniciada_em"],
         "plano": plano,
@@ -250,6 +260,7 @@ def iniciar(
     snapshot_hash: str | None = None,
     build_do_backend: str | None = None,
     nova_execucao: bool = False,
+    escopo: str = esc.A1A,
 ) -> dict:
     """Congela alvo e plano, sela a cópia. **Antes da primeira etapa.**
 
@@ -260,12 +271,16 @@ def iniciar(
     """
     from ..store import bloco_atomico
 
+    plano = esc.PLANOS.get(escopo)
+    if plano is None:
+        raise ValueError(f"{escopo!r} nao e escopo parcelado por etapas")
+
     with _TRAVA_DO_INICIO:
         o_alvo = alvo_mod.montar(
             oficial, dataset_hash=dataset_hash, snapshot_hash=snapshot_hash
         )
         alvo_hash = o_alvo["alvo_de_certificacao_hash"]
-        ultima = ultima_do_alvo(oficial, alvo_hash)
+        ultima = ultima_do_alvo(oficial, alvo_hash, escopo=escopo)
         if ultima is not None:
             aborto = _um(oficial, "certificacao_aborto", ultima)
             if aborto is None:
@@ -280,7 +295,7 @@ def iniciar(
                 )
 
         congelado = {
-            "plano": list(esc.PLANO_A1A),
+            "plano": list(plano),
             "dataset_id": dataset_id,
             "config_version_id": config_version_id,
             "congelado_em": _agora(),
@@ -291,7 +306,7 @@ def iniciar(
                 " certificado de um laboratorio que nunca existiu"
             ),
         }
-        with bloco_atomico(oficial, "a1a_iniciar"):
+        with bloco_atomico(oficial, "parcelado_iniciar"):
             cur = oficial.execute(
                 "INSERT INTO certificacao_execucao (alvo_hash, componentes_json,"
                 " build_do_backend, iniciada_em, casos_esperados, intocado_json,"
@@ -302,11 +317,11 @@ def iniciar(
                     json.dumps(o_alvo["componentes"], ensure_ascii=False),
                     build_do_backend,
                     _agora(),
-                    esc.CASOS_ESPERADOS[esc.A1A],
+                    esc.CASOS_ESPERADOS[escopo],
                     json.dumps(laboratorio.fotografia(oficial), ensure_ascii=False),
-                    esc.A1A,
+                    escopo,
                     json.dumps(congelado, ensure_ascii=False),
-                    len(esc.PLANO_A1A),
+                    len(plano),
                 ),
             )
         execucao_id = int(cur.lastrowid)
@@ -374,6 +389,20 @@ def _executar(conn: sqlite3.Connection, nome: str, congelado: dict, config) -> d
             conn, dataset_id=dataset_id, config=config,
             config_version_id=config_version_id,
         )}
+    if nome == "a2.segundo_giro":
+        # O SEGUNDO PONTO. Sem ele o a2 tem um giro so, e um ponto nao tem
+        # inclinacao - o criterio sai `None`, e `None` SOBE como `None`.
+        from .por_escopo import _segundo_giro_de_b1
+
+        return {"casos": [], "preparo": _segundo_giro_de_b1(
+            conn, dataset_id=dataset_id, config=config,
+            config_version_id=config_version_id,
+        )}
+    if nome == "a2.avaliacao":
+        from .por_escopo import _casos_do_a2
+
+        return {"casos": _casos_do_a2(conn, config_version_id, config),
+                "preparo": {}}
     if nome.startswith("a1a."):
         from ..a1a import braco, catalogo
 
@@ -490,7 +519,7 @@ def _rodar_etapa(oficial, *, execucao_id: int, config) -> dict:
                 " indice_bloco, estado, quantas, conteudo_json, micros,"
                 " criado_em) VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    execucao_id, esc.A1A, k, "falhou", 0,
+                    execucao_id, linha["escopo"], k, "falhou", 0,
                     json.dumps(
                         {"etapa": nome, "tentativa": tentativa,
                          "impressao_antes": esperada,
@@ -517,7 +546,8 @@ def _rodar_etapa(oficial, *, execucao_id: int, config) -> dict:
             " estado, quantas, conteudo_json, micros, criado_em)"
             " VALUES (?,?,?,?,?,?,?,?)",
             (
-                execucao_id, esc.A1A, k, "concluido", len(feito["casos"]),
+                execucao_id, linha["escopo"], k, "concluido",
+                len(feito["casos"]),
                 json.dumps(
                     {
                         "etapa": nome,
@@ -623,7 +653,8 @@ def _selar(oficial, *, execucao_id: int) -> suite.Certificado:
     )
     try:
         certificado = suite._selar(
-            oficial, escopo=esc.A1A, resultado=resultado, o_alvo=agora,
+            oficial, escopo=linha["escopo"], resultado=resultado,
+            o_alvo=agora,
             build_do_backend=linha["build_do_backend"], congelado=congelado,
             execucao_id=execucao_id,
         )

@@ -105,7 +105,10 @@ GATILHOS_ESPERADOS = [
     "certificacao_etapa_tentativa_sem_delete",
     "etapa_em_ordem", "etapa_dentro_do_plano", "etapa_exige_copia_selada",
     "etapa_recusada_se_abortada", "tentativa_parte_da_impressao_certa",
-    "bloco_a1a_exige_tentativa", "bloco_a1a_carrega_impressoes",
+    # `bloco_a1a_*` foram SUBSTITUIDOS pela migracao 34 (OP-3): o parcelado
+    # deixou de ser do a1a, e os dois viraram `bloco_parcelado_*`, declarados
+    # mais abaixo. Deixar os nomes antigos aqui faria a conferencia procurar
+    # gatilho que nao existe - e ela acusa, corretamente.
     "bloco_recusado_se_abortada", "manifesto_recusado_se_abortada",
     "certificacao_copia_descarte_sem_update",
     "certificacao_copia_descarte_sem_delete",
@@ -153,6 +156,16 @@ GATILHOS_ESPERADOS = [
     "janela_revalidacao_de_ms_calculado_pelo_banco",
     "janela_revalidacao_fronteiras_conferidas",
     "janela_revalidacao_duracao_congelada",
+    # 2026-10-07, segunda leva: a janela ganhou fim DECLARADO, o perfil passou
+    # a ser finalizado UMA vez, e a revalidacao so nasce depois dele.
+    "calibracao_regime_fechamento_dentro_da_janela",
+    "calibracao_versao_so_depois_do_fim_da_janela",
+    "janela_revalidacao_exige_a_finalizacao",
+    # Migracao 34 - OP-3: os gatilhos do parcelado deixaram de ser do a1a.
+    # `copia_so_em_execucao_parcelada` nao entra: ele ja existia na 32 e so
+    # mudou de corpo, entao a lista anterior ja o declara.
+    "bloco_parcelado_exige_tentativa",
+    "bloco_parcelado_carrega_impressoes",
     "monitor_reteste_e_posterior", "monitor_reteste_sem_update",
     "hypothesis_dimensionamento_coerente",
 ]

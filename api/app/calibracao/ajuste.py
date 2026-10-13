@@ -136,6 +136,15 @@ class SemJanelaDeCalibracao(Exception):
     """
 
 
+class JanelaDeCalibracaoNaoTerminou(Exception):
+    """A finalizacao so acontece depois do fim DECLARADO da janela.
+
+    Consolidar antes seria consolidar sobre serie que ainda cresce - e a
+    proxima leitura daria outra lista de overrides, outra `config_version` e
+    outra recertificacao.
+    """
+
+
 class RevalidacaoNaoSelada(Exception):
     """A janela de revalidacao tem de ser selada ANTES do ajuste. Garantia 7."""
 
@@ -265,9 +274,10 @@ def estimar(
             "mais (ADR 0027 par.5, ADR 0041)"
         )
     de_ms = int(janela_cal["de_ms"])
-    ate_ms_exclusive = _alcance_da_calibracao(
-        conn, contrato=contrato, venue=venue, symbol=symbol, de_ms=de_ms
-    )
+    # O FIM DECLARADO, e nao o alcance do dado. A janela passou a ter fim
+    # (ADR 0041 par.9i): ler ate onde o dado chegou faria a serie crescer entre
+    # duas leituras, e era isso que tornava o perfil progressivo.
+    ate_ms_exclusive = int(janela_cal["ate_ms_exclusive"])
 
     # `serie_e2_da_calibracao`, com a finalidade LITERAL no SQL. Nao existe
     # argumento que faca este caminho devolver observacao do piloto, e ha
@@ -385,14 +395,32 @@ def estimar_por_regime(
             continue
 
         ic = bootstrap.limite_inferior_do_quantil(s, 0.10)
-        if ic.n_efetivo < n_necessario:
+
+        # A REGUA E O FECHAMENTO, E NAO UM NUMERO RECOMPUTADO AQUI.
+        #
+        # Esta linha era `if ic.n_efetivo < n_necessario`, com `n_necessario`
+        # recalculado do `sigma_e` GLOBAL da janela a cada chamada. Eram DUAS
+        # reguas para o mesmo fato: esta, e o `n_exigido` congelado em
+        # `calibracao_regime_regra` que `fechar_regime` usa. Duas fontes do
+        # mesmo fato divergem, e as consequencias eram as piores possiveis -
+        # um regime podia receber override SEM ter fechado, um regime fechado
+        # podia NAO receber, e a lista mudava a cada leitura porque
+        # `n_necessario` andava com a janela.
+        #
+        # `n_necessario` continua publicado, como o DIAGNOSTICO que ele e.
+        fechou = ler_fechamento(
+            conn, contrato=contrato, venue=venue, symbol=symbol, regime=regime
+        )
+        if fechou is None:
             saida.append(EstimativaDeRegime(
                 regime=regime, n=ic.n, n_efetivo=ic.n_efetivo,
                 p10_mili_bps=ic.ponto, n_necessario=n_necessario,
                 estado="nao_calibrado",
-                motivo=f"n_efetivo {ic.n_efetivo:.1f} < {n_necessario} "
-                       f"necessario para δ = 0,5 bps. **δ NAO e relaxado** - "
-                       f"o regime permanece nao calibrado",
+                motivo=f"o regime nao FECHOU: sem linha em"
+                       f" `calibracao_regime_fechamento` ele nao alcancou o"
+                       f" proprio `n_exigido` congelado. **δ NAO e relaxado**,"
+                       f" e o diagnostico desta leitura e"
+                       f" n_efetivo {ic.n_efetivo:.1f} contra {n_necessario}",
                 spread_bps_x1000=None,
             ))
             continue
@@ -555,6 +583,12 @@ def selar_calibracao(
         r for r in d.por_regime
         if r.n_exigido is not None and r.sigma_e_mili_bps is not None
     ]
+    # O FIM PRE-DECLARADO, derivado do piloto. `SemHorizonteDerivavel` sobe:
+    # sem fracao medida nao ha como transformar `n_bruto` em calendario, e
+    # escolher uma duracao seria escolher o numero.
+    duracao_cal, conta_do_horizonte = dim.duracao_da_calibracao_ms(
+        d, grade_ms=grade_ms
+    )
 
     with bloco_atomico(conn, "selar_calibracao"):
         # `selada_em_ms` e `selada_em` NAO sao nomeados: o `DEFAULT` das duas
@@ -564,8 +598,10 @@ def selar_calibracao(
             "INSERT INTO janela_calibracao (contrato, venue, symbol, de_ms,"
             " piloto_ate_ms_exclusive, grade_ms,"
             " confianca_ppm, metodo_bootstrap, tratamento_dependencia, alvo,"
-            " regra_encerramento, duracao_minima_ms, delta_mili_bps)"
-            f" VALUES (?,?,?,{PRIMEIRA_GRADE_SQL},?,?,?,?,?,?,?,?,?)",
+            " regra_encerramento, duracao_minima_ms, delta_mili_bps,"
+            " duracao_calibracao_ms, ate_ms_exclusive)"
+            f" VALUES (?,?,?,{PRIMEIRA_GRADE_SQL},?,?,?,?,?,?,?,?,?,?,"
+            f" {PRIMEIRA_GRADE_SQL} + ?)",
             (contrato, venue, symbol,
              grade_ms, grade_ms, janela_p.ate_ms_exclusive,
              janela_p.ate_ms_exclusive, grade_ms,
@@ -574,7 +610,9 @@ def selar_calibracao(
              REGRAS_DA_REVALIDACAO["tratamento_dependencia"],
              REGRAS_DA_REVALIDACAO["alvo"],
              REGRAS_DA_REVALIDACAO["regra_encerramento"],
-             DIAS_REVALIDACAO * piloto.MS_POR_DIA, DELTA_MILI_BPS),
+             DIAS_REVALIDACAO * piloto.MS_POR_DIA, DELTA_MILI_BPS,
+             duracao_cal,
+             grade_ms, grade_ms, janela_p.ate_ms_exclusive, duracao_cal),
         )
         janela_id = int(conn.execute(
             "SELECT id FROM janela_calibracao WHERE contrato = ? AND venue = ?"
@@ -600,8 +638,9 @@ def selar_calibracao(
     log.info("calibracao.janela_selada", extra={
         "contrato": contrato, "symbol": symbol,
         "de_ms": int(linha["de_ms"]), "selada_em_ms": int(linha["selada_em_ms"]),
+        "ate_ms_exclusive": int(linha["ate_ms_exclusive"]),
     })
-    return dict(linha)
+    return {**dict(linha), "horizonte_derivado": conta_do_horizonte}
 
 
 def fechar_regime(
@@ -772,7 +811,13 @@ def selar_revalidacao(
     #
     # Dado que ja existia quando a janela foi selada NAO entra: e por isso que
     # a comparacao e com `agora_ms`, e nao com o fim da calibracao apenas.
-    fim_cal = int(fechamento["fim_ms_exclusive"])
+    # A FRONTEIRA E O FIM DA JANELA, e nao o do regime.
+    #
+    # O perfil e CONSOLIDADO no fim da janela de calibracao, entao e dali que a
+    # confirmacao tem de comecar. Usar o fim do regime deixaria a revalidacao
+    # comecar antes de o perfil que ela confirma existir - e o gatilho
+    # `janela_revalidacao_fronteiras_conferidas` recusa.
+    fim_cal = int(janela_cal["ate_ms_exclusive"])
 
     with bloco_atomico(conn, "selar_revalidacao"):
         # `de_ms` e `ate_ms_exclusive` saem da MESMA expressao, avaliada duas
@@ -864,9 +909,29 @@ def aplicar(
     nova, e cada run anterior continua apontando para a config sob a qual foi
     aberto. Nenhum resultado ja publicado muda de valor.
 
-    **A revalidacao tem de estar selada** (garantia 7): sem ela, `aplicar`
-    recusa. Ajustar sem periodo reservado deixaria a confirmacao para depois,
-    e "depois" e quando ja se sabe o que se quer confirmar.
+    ## A ORDEM INVERTEU, e a garantia 7 nao foi perdida - foi substituida
+
+    Ate 2026-10-07 esta funcao EXIGIA a revalidacao selada antes, e o motivo
+    era bom: a fronteira da janela de revalidacao era escolhivel, e reserva-la
+    depois de ver `p10` seria escolher o periodo que confirma.
+
+    **A fronteira deixou de ser escolhivel.** Ela e calculada pelo banco -
+    `MAX(primeira grade > agora, fim da janela de calibracao)` -, a duracao vem
+    congelada de `janela_calibracao`, e o regime vem do fechamento. Nao sobrou
+    nada para escolher, e um gatilho recalcula cada uma das tres.
+
+    Com isso a ordem pode ser a correta: **finalizar o perfil, certificar a
+    identidade nova, e so entao reservar o periodo que vai confirma-la.** A
+    ordem antiga produzia observacao de revalidacao sob identidade nao
+    certificada - era o que o usuario apontou em 2026-10-07.
+
+    ## E ela e A FINALIZACAO, no singular
+
+    `UNIQUE (janela_calibracao_id)` em `calibracao_versao`: **uma** por janela
+    de calibracao. Chamar de novo devolve a que existe, sem escrever. Antes,
+    cada chamada criava um perfil novo com a lista de overrides daquele
+    momento - e o numero de identidades calibradas, logo de recertificacoes,
+    era escolhido por quem chamava.
     """
     from ..config import service as config_service
 
@@ -879,32 +944,36 @@ def aplicar(
             "dela (ADR 0041)"
         )
 
+    # IDEMPOTENTE. O `UNIQUE (janela_calibracao_id)` ja recusaria a segunda;
+    # devolver a que existe e o que faz a rota poder ser chamada de novo sem
+    # que alguem precise saber se ela ja rodou.
+    ja = ler_finalizacao(conn, contrato=contrato, venue=venue, symbol=symbol)
+    if ja is not None:
+        return ja
+
+    # O FIM E FATO DO DADO: o watermark do rele tem de ter passado dele.
+    # Passar da HORA nao significa que o dado chegou - o backfill pode estar
+    # pendente -, e consolidar ali seria consolidar sobre serie incompleta.
+    fim = int(janela_cal["ate_ms_exclusive"])
+    watermark = conn.execute(
+        "SELECT MAX(b.open_time_ms) AS t FROM stream_bar b"
+        "  JOIN bbo_contrato c ON c.contrato = ?"
+        " WHERE b.venue = ? AND b.symbol = ? AND b.timeframe = c.timeframe",
+        (contrato, venue, symbol),
+    ).fetchone()["t"]
+    if watermark is None or int(watermark) <= fim:
+        raise JanelaDeCalibracaoNaoTerminou(
+            f"a janela de calibracao termina em {fim} e o rele alcancou"
+            f" {watermark}. Consolidar antes de o dado da janela ter chegado"
+            f" inteiro seria consolidar sobre serie que ainda cresce, e a"
+            f" proxima leitura daria outra lista de overrides"
+        )
+
     estimativa = estimar(
         conn, contrato=contrato, venue=venue, symbol=symbol, config=config,
         config_version_id=config_version_id, lado=lado,
     )
     ajuste = derivar(estimativa, config)
-
-    # GARANTIA 7, agora POR REGIME. A revalidacao de cada regime tem de estar
-    # selada ANTES de o override dele ser aplicado - e ela so pode ser selada
-    # depois de aquele regime fechar a propria calibracao. A ordem inteira fica
-    # imposta: fecha o regime -> sela a revalidacao dele -> aplica o override.
-    #
-    # Exigir uma revalidacao GLOBAL, como antes, era mais fraco e mais frouxo
-    # ao mesmo tempo: uma janela so nao confirma tres regimes que fecharam em
-    # instantes diferentes.
-    faltando = [
-        o.regime for o in (ajuste.overrides or [])
-        if ler_revalidacao(conn, contrato=contrato, venue=venue,
-                           symbol=symbol, regime=o.regime) is None
-    ]
-    if faltando:
-        raise RevalidacaoNaoSelada(
-            f"sele a janela de revalidacao ANTES de ajustar, e ela e POR "
-            f"REGIME: faltam {faltando}. §8.4.1.2 exige periodo posterior "
-            f"reservado, e reserva-lo depois de ver o resultado e escolher o "
-            f"periodo que confirma"
-        )
 
     nova_versao_id: int | None = None
     perfil_hash: str | None = None
@@ -972,6 +1041,7 @@ def aplicar(
     })
     return {
         "calibracao_id": calibracao_id,
+        "finalizacao": "UNICA por janela de calibracao, e consolidada",
         "aplicado": ajuste.aplicavel,
         "config_version_origem": config_version_id,
         "config_version_nova": nova_versao_id,
@@ -1019,6 +1089,51 @@ def aplicar(
 # ===========================================================================
 # Revalidar: o INTERVALO, e nao o ponto
 # ===========================================================================
+
+
+def ler_finalizacao(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+) -> dict | None:
+    """A finalizacao consolidada daquela janela de calibracao, se existir.
+
+    `UNIQUE (janela_calibracao_id)` garante que ha no maximo uma - e e por isso
+    que esta funcao pode devolver UM dicionario em vez de uma lista.
+    """
+    linha = conn.execute(
+        "SELECT cv.* FROM calibracao_versao cv"
+        "  JOIN janela_calibracao j ON j.id = cv.janela_calibracao_id"
+        " WHERE j.contrato = ? AND j.venue = ? AND j.symbol = ?",
+        (contrato, venue, symbol),
+    ).fetchone()
+    if linha is None:
+        return None
+    d = dict(linha)
+    perfil = None
+    if d.get("config_version_nova") is not None:
+        perfil = conn.execute(
+            "SELECT calibracao_perfil_hash FROM config_version WHERE id = ?",
+            (int(d["config_version_nova"]),),
+        ).fetchone()
+    return {
+        "calibracao_id": int(d["id"]),
+        "finalizacao": "UNICA por janela de calibracao, e consolidada",
+        "aplicado": bool(d["aplicado"]),
+        "config_version_origem": int(d["config_version_origem"]),
+        "config_version_nova": d["config_version_nova"],
+        "calibracao_perfil_hash": (
+            None if perfil is None else perfil["calibracao_perfil_hash"]
+        ),
+        "motivo": d["motivo"],
+        "ja_existia": True,
+        "regimes": [
+            dict(r) for r in conn.execute(
+                "SELECT regime, estado, n, n_efetivo_x1000, p10_mili_bps,"
+                "       spread_bps_x1000, motivo FROM calibracao_regime"
+                " WHERE calibracao_versao_id = ? ORDER BY regime",
+                (int(d["id"]),),
+            )
+        ],
+    }
 
 
 def revalidar(

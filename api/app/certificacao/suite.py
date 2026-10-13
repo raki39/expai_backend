@@ -369,7 +369,13 @@ def _selar(
                     ),
                     escopo,
                     json.dumps(congelado, ensure_ascii=False) if congelado else None,
-                    esc.BLOCOS.get(escopo, 0),
+                    # ZERO: este ramo cria a execucao AQUI, de uma vez so, e
+                    # ela nao tem bloco nenhum. Declarar os blocos do escopo
+                    # faria o gatilho recusar o selo por "manifesto parcial" -
+                    # e ele estaria certo, porque a linha afirmaria blocos que
+                    # nao existem. Quem roda parcelado passa `execucao_id`, e a
+                    # linha dele ja nasceu com o numero certo em `iniciar`.
+                    0,
                 ),
             )
             execucao_id = int(cur.lastrowid)

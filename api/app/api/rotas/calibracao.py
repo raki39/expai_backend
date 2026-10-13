@@ -509,7 +509,16 @@ def selar_revalidacao(
 
 @router.post("/ajustar", status_code=status.HTTP_201_CREATED)
 def ajustar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
-    """Estima sobre o piloto, deriva o ajuste e reexecuta o B1 negativo.
+    """FINALIZA a calibracao: consolida os fechamentos num perfil so.
+
+    **Uma por janela de calibracao.** `UNIQUE (janela_calibracao_id)` em
+    `calibracao_versao` garante, e chamar de novo devolve a que existe sem
+    escrever. Antes de 2026-10-07 cada chamada criava um perfil novo com a
+    lista de overrides daquele momento - e o numero de identidades calibradas,
+    logo de recertificacoes, era escolhido por quem chamava.
+
+    Ela so roda depois de o rele ter passado do fim DECLARADO da janela, e vem
+    ANTES de selar qualquer revalidacao: a confirmacao confirma este perfil.
 
     **O B1 negativo vem junto, e nao numa rota a parte** (criterio 7 do
     incremento 18): §14.4 o torna portao, e o que ele responde e "operar ao
@@ -530,6 +539,10 @@ def ajustar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
             settings=request.app.state.settings, lado=pedido.lado,
         )
     except ajuste.PilotoAberto as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except ajuste.JanelaDeCalibracaoNaoTerminou as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e

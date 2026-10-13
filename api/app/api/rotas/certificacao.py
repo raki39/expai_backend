@@ -284,6 +284,15 @@ def a1a_estado_certificacao(request: Request) -> dict[str, Any]:
     `em_andamento` diz se uma está rodando agora, e `abortada` diz por quê,
     quando for o caso.
     """
+    return _estado_parcelado(request, escopo=escopos_mod.A1A)
+
+
+def _estado_parcelado(request: Request, *, escopo: str) -> dict[str, Any]:
+    """O progresso de um escopo parcelado por ETAPAS, qualquer um.
+
+    Era o corpo do `GET /a1a`, com `PLANO_A1A` cravado. Com a OP-3 o a2 tambem
+    e parcelado, e duas copias desta funcao divergiriam no primeiro ajuste.
+    """
     conn = _conn(request)
     atual = config_service.versao_atual(conn)
     if atual is None:
@@ -291,27 +300,108 @@ def a1a_estado_certificacao(request: Request) -> dict[str, Any]:
     meta, fonte_hash = _fonte(conn)
     o_alvo = alvo_mod.montar(conn, dataset_hash=fonte_hash)
     execucao_id = parcelado.ultima_do_alvo(
-        conn, o_alvo["alvo_de_certificacao_hash"]
+        conn, o_alvo["alvo_de_certificacao_hash"], escopo=escopo
     )
     if execucao_id is None:
         return {
             "existe": True,
             "iniciada": False,
+            "escopo": escopo,
             "alvo_de_certificacao_hash": o_alvo["alvo_de_certificacao_hash"],
-            "plano": list(escopos_mod.PLANO_A1A),
+            "plano": list(escopos_mod.PLANOS[escopo]),
             "motivo": (
-                "nenhuma execucao a1a parcelada para este alvo. Um POST congela"
-                " o alvo e o plano, sela a copia e roda a primeira etapa"
+                f"nenhuma execucao {escopo} parcelada para este alvo. Um POST"
+                " congela o alvo e o plano, sela a copia e roda a primeira"
+                " etapa"
             ),
         }
     return {"existe": True, "iniciada": True, **parcelado.estado(conn, execucao_id)}
+
+
+def _conferir_o_que_a_tela_viu(conn, pedido, *, fonte_hash: str) -> None:
+    """OP-6: o pedido carrega o alvo e a execucao que a tela viu, ou nao segue.
+
+    **A conferencia roda ANTES de `parcelado.iniciar`**, e e isso que a torna
+    util: divergencia nao abre execucao nova nem continua outra, porque nada
+    chegou a ser chamado.
+
+    O modo de falha que ela fecha: entre carregar a pagina e clicar em
+    "Continuar a partir da etapa N", um deploy muda o alvo. Nao ha execucao
+    aberta para o alvo novo, e o clique - apresentado como CONTINUAR - abria
+    uma execucao nova, em silencio. Montar a pagina nao posta, recarregar nao
+    posta, duas abas nao postam, e repetir a etapa da 409: a corrida exige um
+    deploy no meio e um clique depois dele.
+
+    **Os dois campos sao opcionais**, porque a primeira chamada nao tem o que
+    comparar - e exigi-los quebraria o cliente sem fechar nada que a ausencia
+    ja nao deixe aberto. O que nao pode e vir um valor e ele divergir.
+    """
+    agora = alvo_mod.montar(conn, dataset_hash=fonte_hash)
+    atual_hash = agora["alvo_de_certificacao_hash"]
+    if pedido.alvo_esperado and not atual_hash.startswith(pedido.alvo_esperado):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "o_que": "alvo_divergente",
+                "esperado_pela_tela": pedido.alvo_esperado,
+                "agora": atual_hash[:16],
+                "por_que": (
+                    "o alvo mudou entre a tela ser montada e este clique - um"
+                    " deploy, provavelmente. Continuar aqui abriria uma"
+                    " execucao NOVA sob a aparencia de continuar a anterior"
+                ),
+            },
+        )
+    if pedido.execucao_esperada is not None:
+        ultima = parcelado.ultima_do_alvo(conn, atual_hash)
+        if ultima != pedido.execucao_esperada:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "o_que": "execucao_divergente",
+                    "esperada_pela_tela": pedido.execucao_esperada,
+                    "agora": ultima,
+                    "por_que": (
+                        "a execucao que a tela estava acompanhando nao e a que"
+                        " o backend continuaria. Nada foi aberto nem"
+                        " continuado"
+                    ),
+                },
+            )
 
 
 @router.post("/a1a", status_code=status.HTTP_200_OK)
 def a1a_rodar_etapa(
     request: Request, pedido: PedidoEtapaA1a = Body(...)
 ) -> dict[str, Any]:
-    """Roda a PRÓXIMA etapa, ou sela quando as oito estiverem concluídas.
+    """Roda a PRÓXIMA etapa do **a1a**, ou sela quando as oito terminarem."""
+    return _rodar_etapa_parcelada(request, pedido, escopo=escopos_mod.A1A)
+
+
+@router.get("/a2")
+def a2_estado_certificacao(request: Request) -> dict[str, Any]:
+    """O progresso das quatro etapas do **a2** para o alvo de hoje. OP-3."""
+    return _estado_parcelado(request, escopo=escopos_mod.A2)
+
+
+@router.post("/a2", status_code=status.HTTP_200_OK)
+def a2_rodar_etapa(
+    request: Request, pedido: PedidoEtapaA1a = Body(...)
+) -> dict[str, Any]:
+    """Roda a PRÓXIMA etapa do **a2**, ou sela quando as quatro terminarem.
+
+    **OP-3.** O a2 rodava num pedido único de 88,7 s em produção — acima dos
+    60 s do proxy do painel. As quatro etapas são as unidades indivisíveis do
+    caminho de uma vez, na mesma ordem e pelas mesmas funções: nada é reduzido,
+    e o que muda é só onde a requisição é partida.
+    """
+    return _rodar_etapa_parcelada(request, pedido, escopo=escopos_mod.A2)
+
+
+def _rodar_etapa_parcelada(
+    request: Request, pedido: PedidoEtapaA1a, *, escopo: str
+) -> dict[str, Any]:
+    """Roda a PRÓXIMA etapa de um escopo parcelado, ou sela quando acabarem.
 
     **Idempotente**: repetir o pedido devolve o que já foi feito. Uma etapa em
     andamento responde 409 e não roda de novo — o painel lê o estado e chama
@@ -329,7 +419,10 @@ def a1a_rodar_etapa(
         raise HTTPException(status_code=503, detail="configuracao nao inicializada")
     meta, fonte_hash = _fonte(conn)
 
-    log.info("certificacao.a1a", extra={"author": pedido.author})
+    _conferir_o_que_a_tela_viu(conn, pedido, fonte_hash=fonte_hash)
+
+    log.info("certificacao.parcelada",
+             extra={"author": pedido.author, "escopo": escopo})
     try:
         estado = parcelado.iniciar(
             conn,
@@ -339,15 +432,16 @@ def a1a_rodar_etapa(
             dataset_hash=fonte_hash,
             build_do_backend=_build(),
             nova_execucao=pedido.nova_execucao,
+            escopo=escopo,
         )
         if estado["selado"]:
-            return {"escopo": "a1a", **estado}
+            return {"escopo": escopo, **estado}
         if pedido.selar:
             certificado = parcelado.selar(
                 conn, execucao_id=estado["execucao_id"], config=atual.config
             )
             return {
-                "escopo": "a1a",
+                "escopo": escopo,
                 "execucao_id": certificado.execucao_id,
                 "alvo_de_certificacao_hash": certificado.alvo_hash,
                 "passa": certificado.passa,

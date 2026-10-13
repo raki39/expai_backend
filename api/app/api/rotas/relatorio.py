@@ -49,6 +49,7 @@ from ..comum import _conn
 from .a1a import a1a_estado
 from .certificacao import (
     a1a_estado_certificacao,
+    a2_estado_certificacao,
     a1b_estado_certificacao,
     certificacao_estado,
 )
@@ -532,6 +533,11 @@ def exportar(request: Request, run_id: int | None = None) -> Response:
         # veredito. O veredito continua em `/certificacao`.
         ("certificacao_a1a", "/api/certificacao/a1a",
          lambda: a1a_estado_certificacao(request)),
+        # E o a2 parcelado (OP-3), pelo mesmo motivo: quatro etapas sobre a
+        # mesma copia selada. Ele nasceu em 2026-10-07 e a guarda do export o
+        # acusou no mesmo commit - que e para isso que ela existe.
+        ("certificacao_a2", "/api/certificacao/a2",
+         lambda: a2_estado_certificacao(request)),
         # O checkpoint NAO entra no export, e o motivo esta em
         # FORA_DO_EXPORT: ele CONTEM o export inteiro mais o resto, entao
         # aninha-lo faria o documento carregar duas copias de si mesmo.

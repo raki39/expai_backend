@@ -612,3 +612,103 @@ def test_um_uso_de_HOLDOUT_no_banco_oficial_RECUSA_o_selo(conn, cenario):
     assert st["selado"] is None
     assert "holdout_access" in st["abortada"]["motivo"]
 
+
+
+# ===========================================================================
+# OP-6 — o pedido do cartão carrega o alvo e a execução que a tela viu
+#
+# Entre carregar a página e clicar em "Continuar a partir da etapa N", um
+# deploy muda o alvo. Não há execução aberta para o alvo novo, e o clique —
+# que a tela apresenta como *continuar* — abria uma execução NOVA, em silêncio.
+#
+# A conferência roda **antes** de `parcelado.iniciar`, e é isso que a torna
+# útil: divergência não abre nem continua nada, porque nada foi chamado.
+# ===========================================================================
+
+CABECALHO_OP6 = {"Authorization": "Bearer token-de-teste-0a"}
+
+
+def _alvo_agora(conn):
+    from app.certificacao import alvo as alvo_mod
+    from app.dataset import loader as dataset_loader
+
+    meta = dataset_loader.dataset_vigente(conn)
+    return alvo_mod.montar(
+        conn, dataset_hash=None if meta is None else meta.sha256
+    )["alvo_de_certificacao_hash"]
+
+
+def test_OP6_alvo_divergente_responde_409_e_NAO_abre_execucao(
+    client, conn, cenario
+):
+    """O caso exato: a tela viu um alvo, e ele mudou."""
+    antes = conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao"
+    ).fetchone()[0]
+
+    r = client.post(
+        "/api/certificacao/a1a", headers=CABECALHO_OP6,
+        json={"author": "teste", "alvo_esperado": "0" * 16},
+    )
+    assert r.status_code == 409, r.text
+    detalhe = r.json()["detail"]
+    assert detalhe["o_que"] == "alvo_divergente"
+    assert detalhe["esperado_pela_tela"] == "0" * 16
+    assert "deploy" in detalhe["por_que"]
+
+    # NADA foi aberto.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao"
+    ).fetchone()[0] == antes
+
+
+def test_OP6_execucao_divergente_responde_409_e_NAO_continua_outra(
+    client, conn, cenario
+):
+    """A tela acompanhava a execução N, e o backend continuaria outra."""
+    antes = conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao"
+    ).fetchone()[0]
+
+    r = client.post(
+        "/api/certificacao/a1a", headers=CABECALHO_OP6,
+        json={"author": "teste", "alvo_esperado": _alvo_agora(conn)[:16],
+              "execucao_esperada": 999_999},
+    )
+    assert r.status_code == 409, r.text
+    detalhe = r.json()["detail"]
+    assert detalhe["o_que"] == "execucao_divergente"
+    assert detalhe["esperada_pela_tela"] == 999_999
+    assert "Nada foi aberto nem continuado" in detalhe["por_que"]
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao"
+    ).fetchone()[0] == antes
+
+
+def test_OP6_o_alvo_CERTO_passa_pela_conferencia(client, conn, cenario):
+    """A conferência não pode recusar o caso bom - senão ela não é guarda, é
+    bloqueio."""
+    r = client.post(
+        "/api/certificacao/a1a", headers=CABECALHO_OP6,
+        json={"author": "teste", "alvo_esperado": _alvo_agora(conn)[:16]},
+    )
+    # 200 ou 409 por outro motivo (run ativo, dataset) - o que NAO pode e ser
+    # recusa por divergencia de alvo.
+    if r.status_code == 409:
+        detalhe = r.json()["detail"]
+        assert not isinstance(detalhe, dict) or detalhe.get("o_que") not in (
+            "alvo_divergente", "execucao_divergente"
+        ), detalhe
+
+
+def test_OP6_os_campos_sao_OPCIONAIS_e_a_ausencia_e_declarada():
+    """Exigi-los quebraria o cliente sem fechar nada que a ausência já não
+    deixe aberto - a primeira chamada não tem o que comparar."""
+    from app.api.modelos import PedidoEtapaA1a
+
+    campos = PedidoEtapaA1a.model_fields
+    assert {"alvo_esperado", "execucao_esperada"} <= set(campos)
+    assert campos["alvo_esperado"].default is None
+    assert campos["execucao_esperada"].default is None
+    assert PedidoEtapaA1a(author="x").alvo_esperado is None

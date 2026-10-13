@@ -79,11 +79,33 @@ def rodar_a2(oficial, *, dataset_id, config, config_version_id) -> Resultado:
                 config_version_id=config_version_id,
             )
         )
-        bloco = portao._a2(copia.conn, config_version_id, config)
+        casos = _casos_do_a2(copia.conn, config_version_id, config)
         micros_copia = copia.micros_para_copiar
         bytes_copia = copia.bytes_em_disco()
 
-    casos = [
+    return Resultado(
+        casos=casos,
+        micros_para_copiar=micros_copia,
+        micros_da_suite=(time.perf_counter_ns() - inicio) // 1_000 - micros_copia,
+        bytes_da_copia=bytes_copia,
+        intocado_antes=antes,
+        intocado_depois=laboratorio.fotografia(oficial),
+        preparo=preparo,
+    )
+
+
+def _casos_do_a2(conn, config_version_id: int, config) -> list[dict]:
+    """Os dois casos do a2, a partir do bloco do Portao A.
+
+    **Extraida para que o caminho de uma vez e o PARCELADO usem a mesma
+    funcao** (OP-3). Duas montagens dos mesmos dois casos divergiriam no
+    primeiro ajuste - e a equivalencia entre os dois caminhos e justamente o
+    que a OP-3 tem de provar.
+    """
+    from ..relatorio import portao_a as portao
+
+    bloco = portao._a2(conn, config_version_id, config)
+    return [
         {
             "chave": "b1_negativo",
             "familia_de_defeito": "simulador que da lucro ao acaso",
@@ -109,15 +131,6 @@ def rodar_a2(oficial, *, dataset_id, config, config_version_id) -> Resultado:
             "barrado": bloco.get("proporcional_ao_giro") is True,
         },
     ]
-    return Resultado(
-        casos=casos,
-        micros_para_copiar=micros_copia,
-        micros_da_suite=(time.perf_counter_ns() - inicio) // 1_000 - micros_copia,
-        bytes_da_copia=bytes_copia,
-        intocado_antes=antes,
-        intocado_depois=laboratorio.fotografia(oficial),
-        preparo=preparo,
-    )
 
 
 def _segundo_giro_de_b1(

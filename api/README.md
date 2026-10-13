@@ -169,6 +169,8 @@ Mesma pergunta de `dataset` — de onde vem a barra — com a natureza invertida
 | POST | `/api/certificacao/a1b` | roda **um** bloco (idempotente pelo `UNIQUE`), ou sela quando os oito estiverem concluídos. Sem worker (regra 1) |
 | GET | `/api/certificacao/a1a` | o progresso das **oito etapas** do A1a parcelado — o plano congelado, a próxima, a em andamento, a cópia selada e o motivo do aborto, se houver (OP-1) |
 | POST | `/api/certificacao/a1a` | roda a **próxima** etapa sobre a cópia selada, ou sela quando as oito estiverem concluídas. Idempotente; etapa em andamento responde 409; cópia perdida ou fora da impressão **aborta**. `nova_execucao: true` recomeça depois de um aborto |
+| GET | `/api/certificacao/a2` | o progresso das **quatro etapas** do A2 parcelado (OP-3) — mesmo mecanismo do A1a, sobre a mesma cópia selada |
+| POST | `/api/certificacao/a2` | roda a **próxima** etapa do A2, ou sela quando as quatro terminarem. **OP-3**: ele rodava num pedido único de 88,7 s, acima dos 60 s do proxy do painel. Nada é reduzido — os dois giros de B1, o preparo e o B4 ficam inteiros |
 | GET | `/api/a1b` | o calibre acumulado das nulas estocásticas, nos dois desenhos |
 | POST | `/api/a1b` | **roda um pedaço das 200 execuções por desenho (D29); idempotente por índice** |
 

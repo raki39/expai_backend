@@ -172,3 +172,16 @@ class PedidoEtapaA1a(BaseModel):
     # Comecar outra execucao depois de um ABORTO e decisao explicita: um
     # clique automatico do painel nao pode transformar aborto em recomeco.
     nova_execucao: bool = False
+
+    # OP-6: O PEDIDO CARREGA O QUE A TELA VIU.
+    #
+    # Sem estes dois, quem escolhia qual execucao continuar era o backend, por
+    # `ultima_do_alvo`. Entre carregar a pagina e clicar em "Continuar a partir
+    # da etapa N", um deploy muda o alvo: nao ha execucao aberta para o alvo
+    # novo, e o clique - que a tela apresenta como CONTINUAR - abre uma
+    # execucao nova, em silencio.
+    #
+    # Opcionais porque a primeira chamada nao tem o que comparar. Quando vem,
+    # divergencia e **409**, e nada e aberto nem continuado.
+    alvo_esperado: str | None = Field(default=None, min_length=16, max_length=64)
+    execucao_esperada: int | None = Field(default=None, ge=1)

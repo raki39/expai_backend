@@ -75,6 +75,16 @@ class PorRegime:
     n_bruto_exigido: int | None
     motivo: str | None
 
+    #: A FRACAO DO PILOTO que este regime ocupou, em ppm. E ela que transforma
+    #: `n_bruto_exigido` (observacoes) em CALENDARIO: um regime que ocupou
+    #: metade do piloto precisa do dobro de calendario para acumular o mesmo
+    #: numero de observacoes.
+    fracao_do_piloto_ppm: int
+    #: Barras de calendario para acumular `n_bruto_exigido` nesta fracao.
+    #: `None` quando a fracao e ZERO - o regime nao apareceu no piloto, e nao
+    #: ha horizonte derivavel. Inventar um seria escolher o numero.
+    barras_de_calendario: int | None
+
 
 @dataclass(frozen=True)
 class Dimensionamento:
@@ -312,9 +322,28 @@ def _por_regime(
         if regime in series:
             series[regime].append(float(e2))
 
+    # O DENOMINADOR DA FRACAO e o total de observacoes do piloto NAQUELE
+    # lado, e nao o total de instantes: a fracao tem de estar na mesma unidade
+    # que `n_bruto_exigido`, que conta observacoes.
+    total = sum(len(s) for s in series.values())
+    indefinidos = int(conn.execute(
+        "SELECT COUNT(*) FROM calibracao_observacao"
+        " WHERE finalidade = 'piloto' AND contrato = ? AND venue = ?"
+        "   AND symbol = ? AND lado = ? AND dentro_do_l1 = 1"
+        "   AND regime = 'indefinido'"
+        "   AND t_grid_ms >= ? AND t_grid_ms < ?",
+        (contrato, venue, symbol, lado, janela.de_ms,
+         janela.ate_ms_exclusive),
+    ).fetchone()[0])
+    # `indefinido` CONTA no denominador: ele ocupa calendario. Deixa-lo fora
+    # faria a fracao de cada regime parecer maior do que e, e o horizonte
+    # derivado sairia curto - na direcao de parar antes.
+    total += indefinidos
+
     saida = []
     for regime in REGIMES_QUE_CONTAM:
         s = series[regime]
+        fracao_ppm = (len(s) * 1_000_000 // total) if total else 0
         if len(s) < 10:
             saida.append(PorRegime(
                 regime=regime, n=len(s), n_efetivo=float(len(s)),
@@ -323,6 +352,8 @@ def _por_regime(
                 motivo=f"{len(s)} observacoes no piloto: nem o bootstrap roda."
                        f" Sem `sigma_e` proprio nao ha `n_exigido`, e sem"
                        f" `n_exigido` o regime nao tem criterio de parada",
+                fracao_do_piloto_ppm=fracao_ppm,
+                barras_de_calendario=None,
             ))
             continue
         ic = bootstrap.limite_inferior_do_quantil(s, 0.10)
@@ -330,10 +361,82 @@ def _por_regime(
         preciso = bootstrap.tamanho_necessario(
             sigma_e=sigma, delta=float(DELTA_MILI_BPS), tau=ic.tau.tau
         )
+        # O CALENDARIO: `n_bruto` observacoes a uma taxa de `fracao` por barra.
+        # Teto, e nao arredondamento: faltar uma observacao e nao alcancar.
+        # O CHAO E O PISO DO ESTIMADOR, e nao um numero escolhido: abaixo de
+        # `MINIMO_PARA_O_QUANTIL` o bootstrap NAO RODA, e uma janela
+        # dimensionada para menos que isso e dimensionada para uma medicao que
+        # nao acontece. Nao e relaxar delta - delta diz quantas observacoes sao
+        # precisas, e este diz a partir de quantas o estimador existe.
+        bruto = max(preciso.n_bruto, bootstrap.MINIMO_PARA_O_QUANTIL)
+        calendario = (
+            None if fracao_ppm <= 0
+            else -(-bruto * 1_000_000 // fracao_ppm)
+        )
         saida.append(PorRegime(
             regime=regime, n=ic.n, n_efetivo=ic.n_efetivo,
             sigma_e_mili_bps=sigma, tau=ic.tau.tau,
             n_exigido=preciso.n_efetivo, n_bruto_exigido=preciso.n_bruto,
-            motivo=None,
+            motivo=None, fracao_do_piloto_ppm=fracao_ppm,
+            barras_de_calendario=calendario,
         ))
     return tuple(saida)
+
+
+class SemHorizonteDerivavel(Exception):
+    """Nenhum regime calibravel apareceu no piloto o bastante.
+
+    Sem fracao medida nao ha como transformar `n_bruto` em calendario, e
+    escolher uma duracao seria escolher o numero - o mesmo que a D45 recusou ao
+    nao fixar `sigma_e`.
+    """
+
+
+def duracao_da_calibracao_ms(
+    d: Dimensionamento, *, grade_ms: int,
+) -> tuple[int, dict]:
+    """O FIM PRE-DECLARADO da janela de calibracao, DERIVADO do piloto.
+
+    E o calendario que o regime **mais lento** precisa para acumular o proprio
+    `n_bruto_exigido`, dada a fracao do piloto que ele ocupou. Regime que nao
+    apareceu fica de fora da conta - e, por consequencia, sem override.
+
+    Devolve `(duracao_ms, a conta publicada)`. A conta sai junto porque este e
+    o numero que fixa quando a calibracao termina, e um numero assim nao pode
+    ser so um inteiro no banco.
+    """
+    com_horizonte = [
+        r for r in d.por_regime if r.barras_de_calendario is not None
+    ]
+    if not com_horizonte:
+        raise SemHorizonteDerivavel(
+            "nenhum regime calibravel acumulou observacao suficiente no piloto"
+            " para ter `sigma_e` proprio, entao nao ha horizonte derivavel."
+            " Escolher uma duracao seria escolher o numero"
+        )
+    mais_lento = max(com_horizonte, key=lambda r: r.barras_de_calendario or 0)
+    barras = int(mais_lento.barras_de_calendario or 0)
+    return barras * grade_ms, {
+        "barras": barras,
+        "grade_ms": grade_ms,
+        "regime_mais_lento": mais_lento.regime,
+        "como": (
+            "`n_bruto_exigido` / fracao do piloto, pelo regime que precisa de"
+            " mais calendario. DERIVADO do piloto, e nao escolhido"
+        ),
+        "por_regime": [
+            {
+                "regime": r.regime,
+                "n_bruto_exigido": r.n_bruto_exigido,
+                "fracao_do_piloto_ppm": r.fracao_do_piloto_ppm,
+                "barras_de_calendario": r.barras_de_calendario,
+                "sem_horizonte_por_que": (
+                    None if r.barras_de_calendario is not None
+                    else "nao apareceu no piloto o bastante: sem fracao medida"
+                         " nao ha calendario derivavel, e o regime fica SEM"
+                         " OVERRIDE"
+                ),
+            }
+            for r in d.por_regime
+        ],
+    }

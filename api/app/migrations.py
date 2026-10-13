@@ -4450,6 +4450,32 @@ MIGRACOES: list[tuple[int, str, str]] = [
             duracao_minima_ms INTEGER NOT NULL CHECK (duracao_minima_ms > 0),
             delta_mili_bps INTEGER NOT NULL CHECK (delta_mili_bps = 500),
 
+            -- O FIM PRE-DECLARADO DA CALIBRACAO, e a duracao de onde ele sai.
+            --
+            -- A primeira versao desta tabela NAO tinha fim, e o comentario
+            -- dizia por que: "ela fecha POR REGIME, e um fim de calendario
+            -- seria parar porque o calendario acabou, que a decisao 4 proibe".
+            --
+            -- **A decisao 4 proibe outra coisa.** Ela proibe declarar um regime
+            -- calibrado sem ele ter alcancado `n_exigido`. Um fim declarado nao
+            -- faz isso: quem nao alcancou dentro da janela fica SEM OVERRIDE, e
+            -- e §8.3 ao pe da letra - o que nao cabe no horizonte e arquivado,
+            -- nao testado mal. A divergencia foi levantada e esta no ADR.
+            --
+            -- E sem fim, o perfil nascia PROGRESSIVO: cada chamada de `ajustar`
+            -- lia a janela maior, derivava outra lista de overrides e criava
+            -- uma `config_version` nova. O numero de identidades calibradas -
+            -- e portanto de recertificacoes - era escolhido por quem chamava.
+            --
+            -- `duracao_calibracao_ms` e DERIVADA do piloto: o calendario que o
+            -- regime mais lento precisa para acumular o proprio `n_bruto`, dada
+            -- a fracao do piloto que ele ocupou. Regime que nao apareceu no
+            -- piloto nao tem horizonte derivavel, e fica de fora da conta - e
+            -- sem override.
+            duracao_calibracao_ms INTEGER NOT NULL
+                                  CHECK (duracao_calibracao_ms > 0),
+            ate_ms_exclusive INTEGER NOT NULL,
+
             UNIQUE (contrato, venue, symbol),
 
             -- DISJUNTA DO PILOTO, por construcao.
@@ -4458,6 +4484,8 @@ MIGRACOES: list[tuple[int, str, str]] = [
             CHECK (de_ms > selada_em_ms),
             -- E numa FRONTEIRA DE GRADE.
             CHECK (de_ms % grade_ms = 0),
+            -- O FIM E O INICIO MAIS A DURACAO DECLARADA, e nada mais.
+            CHECK (ate_ms_exclusive = de_ms + duracao_calibracao_ms),
             -- E A PRIMEIRA FRONTEIRA ADMISSIVEL, e nao uma qualquer adiante.
             --
             -- Sem isto, "posterior ao selamento" deixaria escolher QUAO
@@ -4850,11 +4878,15 @@ MIGRACOES: list[tuple[int, str, str]] = [
                    AND NEW.t_grid_ms >= j.de_ms
                    AND NEW.t_grid_ms < j.ate_ms_exclusive))
             OR
+            -- A janela de calibracao passou a ter FIM declarado, e o teto
+            -- entra aqui: sem ele, dado posterior ao periodo entraria na serie
+            -- que o perfil consolidado mede.
             (NEW.finalidade = 'calibracao' AND EXISTS (
                 SELECT 1 FROM janela_calibracao j
                  WHERE j.contrato = NEW.contrato AND j.venue = NEW.venue
                    AND j.symbol = NEW.symbol
-                   AND NEW.t_grid_ms >= j.de_ms))
+                   AND NEW.t_grid_ms >= j.de_ms
+                   AND NEW.t_grid_ms < j.ate_ms_exclusive))
             OR
             -- A janela de revalidacao e POR REGIME: sem `j.regime =
             -- NEW.regime`, um instante de `vol_alta` entraria na janela de
@@ -4939,6 +4971,19 @@ MIGRACOES: list[tuple[int, str, str]] = [
             aplicado  INTEGER NOT NULL CHECK (aplicado IN (0, 1)),
             motivo    TEXT    NOT NULL,
             criado_em TEXT    NOT NULL,
+
+            -- **UMA FINALIZACAO POR JANELA DE CALIBRACAO.**
+            --
+            -- Esta linha E a finalizacao consolidada: ela reune TODOS os
+            -- fechamentos de regime da janela num perfil so, e e por isso que
+            -- nasce no maximo uma identidade calibrada.
+            --
+            -- Sem este `UNIQUE`, cada chamada de `ajustar` criava uma
+            -- `config_version` nova com a lista de overrides daquele momento -
+            -- e um perfil ja usado na revalidacao podia receber outro regime
+            -- depois, com a revalidacao anterior passando a confirmar um
+            -- simulador que deixou de existir.
+            UNIQUE (janela_calibracao_id),
 
             CHECK (calibracao_ate_ms_exclusive > calibracao_de_ms),
             CHECK ((aplicado = 1 AND config_version_nova IS NOT NULL)
@@ -5210,13 +5255,17 @@ MIGRACOES: list[tuple[int, str, str]] = [
                 'de_ms nao e a primeira grade admissivel pelo relogio do BANCO: a fronteira da revalidacao e CALCULADA, e nao conferida contra o selo');
         END;
 
+        -- `calibracao_ate_ms_exclusive` e o fim da JANELA, e nao o do
+        -- regime: o perfil e consolidado no fim da janela, entao e dali que a
+        -- confirmacao tem de comecar. Usar o fim do regime deixaria a
+        -- revalidacao comecar antes de o perfil que ela confirma existir.
         CREATE TRIGGER janela_revalidacao_fronteiras_conferidas
         BEFORE INSERT ON janela_revalidacao
         WHEN NOT EXISTS (
             SELECT 1 FROM calibracao_regime_fechamento f
               JOIN janela_calibracao j ON j.id = f.janela_calibracao_id
              WHERE f.id = NEW.calibracao_fechamento_id
-               AND f.fim_ms_exclusive = NEW.calibracao_ate_ms_exclusive
+               AND j.ate_ms_exclusive = NEW.calibracao_ate_ms_exclusive
                AND j.grade_ms = NEW.grade_ms
         )
         BEGIN
@@ -5242,6 +5291,146 @@ MIGRACOES: list[tuple[int, str, str]] = [
         BEGIN
             SELECT RAISE(ABORT,
                 'a duracao da revalidacao nao e a congelada em janela_calibracao.duracao_minima_ms: encurtar a confirmacao e escolher quanta evidencia ela exige');
+        END;
+
+        -- ------------------------------------------------------------------
+        -- 8. O PERFIL E FINALIZADO UMA VEZ, E SO DEPOIS VEM A REVALIDACAO
+        --
+        -- Exigencia do usuario em 2026-10-07. A pergunta que ele fez - quantas
+        -- identidades calibradas realmente nascem - tinha uma resposta ruim:
+        -- **tantas quantas chamadas de `ajustar`**, porque a janela nao tinha
+        -- fim e cada chamada derivava a propria lista de overrides.
+        --
+        -- Com o `UNIQUE (janela_calibracao_id)` de `calibracao_versao`, nasce
+        -- no maximo UMA. Os tres gatilhos abaixo fecham o resto da ordem.
+        -- ------------------------------------------------------------------
+
+        -- (a) O fechamento de um regime cabe DENTRO da janela declarada.
+        CREATE TRIGGER calibracao_regime_fechamento_dentro_da_janela
+        BEFORE INSERT ON calibracao_regime_fechamento
+        WHEN NOT EXISTS (
+            SELECT 1 FROM janela_calibracao j
+             WHERE j.id = NEW.janela_calibracao_id
+               AND NEW.fim_ms_exclusive > j.de_ms
+               AND NEW.fim_ms_exclusive <= j.ate_ms_exclusive
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o fechamento de um regime tem de cair DENTRO da janela de calibracao declarada: fora dela ele mediria periodo que nao pertence a calibracao');
+        END;
+
+        -- (b) A FINALIZACAO so acontece depois de a janela TERMINAR.
+        --
+        -- Consolidar antes do fim seria consolidar sobre serie que ainda
+        -- cresce - e a proxima leitura daria outra lista de overrides.
+        -- O FIM DA JANELA E FATO DO DADO, E NAO DO RELOGIO.
+        --
+        -- A primeira versao comparava `ate_ms_exclusive` com `strftime('now')`.
+        -- Passar da hora NAO significa que o dado chegou: o backfill pode
+        -- estar pendente, e consolidar ali seria consolidar sobre serie
+        -- incompleta - exatamente o que o fim declarado existe para impedir.
+        --
+        -- A condicao e o WATERMARK do rele estritamente alem do fim, pela
+        -- mesma razao da trava de materializacao: a unica barra que poderia
+        -- nao estar fechada e a fronteira, e exigir uma depois dela a exclui.
+        CREATE TRIGGER calibracao_versao_so_depois_do_fim_da_janela
+        BEFORE INSERT ON calibracao_versao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM janela_calibracao j
+              JOIN bbo_contrato c ON c.contrato = j.contrato
+             WHERE j.id = NEW.janela_calibracao_id
+               AND NEW.calibracao_de_ms = j.de_ms
+               AND NEW.calibracao_ate_ms_exclusive = j.ate_ms_exclusive
+               AND (SELECT MAX(b.open_time_ms) FROM stream_bar b
+                     WHERE b.venue = j.venue AND b.symbol = j.symbol
+                       AND b.timeframe = c.timeframe)
+                   > j.ate_ms_exclusive
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a finalizacao da calibracao so acontece quando o rele ja passou do fim DECLARADO da janela: consolidar antes seria consolidar sobre serie que ainda cresce');
+        END;
+
+        -- (c) A REVALIDACAO so e selada depois da FINALIZACAO.
+        --
+        -- Ela confirma a identidade que a calibracao produziu (gatilho da
+        -- secao 6e). Selar antes de o perfil existir reservaria periodo para
+        -- confirmar algo que ainda nao foi decidido - e era por isso que a
+        -- ordem antiga punha a segunda certificacao no fim.
+        CREATE TRIGGER janela_revalidacao_exige_a_finalizacao
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NOT EXISTS (
+            SELECT 1 FROM calibracao_regime_fechamento f
+              JOIN calibracao_versao cv
+                ON cv.janela_calibracao_id = f.janela_calibracao_id
+             WHERE f.id = NEW.calibracao_fechamento_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'nao ha finalizacao da calibracao para esta janela: a revalidacao confirma o perfil CONSOLIDADO, e selar antes dele reservaria periodo para confirmar o que ainda nao foi decidido');
+        END;
+        """,
+    ),
+    (
+        34,
+        "OP-3: os gatilhos do parcelado valem para a1a E a2",
+        """
+        -- ==================================================================
+        -- OP-3 - o A2 roda em ETAPAS, sobre a mesma copia selada do A1a.
+        --
+        -- Medido em producao na recertificacao de 2026-09-10: o a2 roda num
+        -- pedido unico de 88,7 s, acima dos 60 s do proxy do painel. E a mesma
+        -- aposta no timeout que a OP-1 tirou do a1a, num escopo que a OP-1 nao
+        -- cobria.
+        --
+        -- O mecanismo ja existia inteiro na migracao 32; o que faltava era ele
+        -- nao ser do a1a. **Tres gatilhos tinham `'a1a'` cravado**, e como a 32
+        -- ja esta em producao eles sao recriados aqui em vez de editados la -
+        -- editar migracao aplicada quebra a idempotencia de quem ja migrou.
+        --
+        -- A lista `('a1a','a2')` NAO e arbitraria: sao os escopos parcelados
+        -- por ETAPAS sobre copia selada. O a1b tambem e parcelado, mas em
+        -- BLOCOS de execucoes sinteticas - ele nao tem copia nem impressao, e
+        -- incluir ele aqui exigiria dele o que ele nao produz.
+        --
+        -- E ha teste conferindo que esta lista e `escopos.PLANOS` nao divergem:
+        -- duas listas fechadas iguais em arquivos diferentes divergem, e aqui a
+        -- divergencia so apareceria na primeira etapa de um escopo novo.
+        -- ==================================================================
+
+        DROP TRIGGER copia_so_em_execucao_parcelada;
+        CREATE TRIGGER copia_so_em_execucao_parcelada
+        BEFORE INSERT ON certificacao_copia
+        WHEN (SELECT escopo FROM certificacao_execucao
+               WHERE id = NEW.execucao_id) NOT IN ('a1a', 'a2')
+          OR (SELECT blocos_esperados FROM certificacao_execucao
+               WHERE id = NEW.execucao_id) = 0
+        BEGIN
+            SELECT RAISE(ABORT,
+                'copia selada so existe em execucao parcelada por etapas (a1a ou a2)');
+        END;
+
+        DROP TRIGGER bloco_a1a_exige_tentativa;
+        CREATE TRIGGER bloco_parcelado_exige_tentativa
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.escopo IN ('a1a', 'a2')
+         AND NOT EXISTS (SELECT 1 FROM certificacao_etapa_tentativa
+                          WHERE execucao_id = NEW.execucao_id
+                            AND indice_etapa = NEW.indice_bloco)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'resultado de etapa sem tentativa registrada no mesmo indice');
+        END;
+
+        DROP TRIGGER bloco_a1a_carrega_impressoes;
+        CREATE TRIGGER bloco_parcelado_carrega_impressoes
+        BEFORE INSERT ON certificacao_bloco
+        WHEN NEW.escopo IN ('a1a', 'a2') AND NEW.estado = 'concluido'
+         AND (COALESCE(length(json_extract(NEW.conteudo_json, '$.impressao_antes')), 0) <> 64
+           OR COALESCE(length(json_extract(NEW.conteudo_json, '$.impressao_depois')), 0) <> 64)
+        BEGIN
+            SELECT RAISE(ABORT,
+                'etapa concluida sem as impressoes da copia antes e depois');
         END;
         """,
     ),
