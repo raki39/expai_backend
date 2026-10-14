@@ -490,6 +490,22 @@ def selar_revalidacao(
     `n_exigido`, nem delta, nem metodo, nem confianca, nem duracao: todos vem
     de `janela_calibracao` e `calibracao_regime_regra`, congelados antes do
     primeiro dado da calibracao.
+
+    **E nem `target_hash` nem `execution_id`.** `PedidoPorRegime` herda
+    `extra="forbid"`, entao um corpo que os traga responde **422** - nao ha
+    como o chamador escolher qual certificacao autoriza a janela. Os dois sao
+    DERIVADOS: a identidade sai da finalizacao, o alvo sai de `alvo.montar`
+    recalculado agora, e tres gatilhos da migracao 33 recusam a combinacao que
+    nao corresponda.
+
+    ## A recusa por certificacao, e por que sao DUAS
+
+    | HTTP | quando | o que fazer |
+    |---|---|---|
+    | 409 `o_que_falta: certificacao` | os cinco escopos nao tem manifesto que passa para o alvo da identidade calibrada | rodar o passo 9 do runbook |
+    | 409 `o_que_falta: identidade_vigente` | alguem criou `config_version` depois da certificacao | a vigente tem de voltar a ser a calibrada |
+
+    Um 409 so, com uma frase generica, mandaria procurar em vez de dizer.
     """
     conn = _conn(request)
     try:
@@ -501,6 +517,37 @@ def selar_revalidacao(
             symbol=pedido.symbol, regime=pedido.regime,
         )
     except ajuste.CalibracaoDoRegimeNaoFechada as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(e)
+        ) from e
+    except ajuste.IdentidadeCalibradaNaoCertificada as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "o_que_falta": "certificacao",
+                "motivo": str(e),
+                "composicao": e.composicao,
+                "passo_do_runbook": (
+                    "9 - segunda certificacao: laboratorio novo + identidade"
+                    " CALIBRADA. Ela vem ANTES de selar qualquer janela de"
+                    " revalidacao"
+                ),
+            },
+        ) from e
+    except ajuste.IdentidadeVigenteNaoEADaFinalizacao as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "o_que_falta": "identidade_vigente",
+                "motivo": str(e),
+                "passo_do_runbook": (
+                    "a config vigente precisa voltar a ser a que a finalizacao"
+                    " criou; qualquer versao posterior muda o alvo, e os"
+                    " certificados passam a descrever outro laboratorio"
+                ),
+            },
+        ) from e
+    except (ajuste.SemJanelaDeCalibracao, ajuste.NadaACalibrar) as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(e)
         ) from e

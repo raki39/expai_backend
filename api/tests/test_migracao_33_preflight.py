@@ -12,6 +12,7 @@ da migração, e a linha de `janela_piloto` atravessa inteira.
 
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 
 import pytest
@@ -194,3 +195,276 @@ def test_o_PREFLIGHT_esta_ligado_a_migracao_33_e_nao_a_outra(em_32):
     nele — porque só ela é destrutiva."""
     assert sorted(store.PREFLIGHT) == [33]
     assert set(RECRIADAS) <= set(store._preflight_33.__doc__ and RECRIADAS)
+
+
+# ===========================================================================
+# O ENSAIO `32 -> preflight 33 -> 33 -> 34` COMO TESTE
+#
+# Ele foi feito primeiro como script, em 2026-10-13, sobre uma copia
+# CONSTRUIDA do schema 32 - nao ha rota que exporte producao nem acesso ao
+# volume da Railway, e o banco local esta em schema 12 e vazio.
+#
+# Mas uma conferencia que so existe num script de scratchpad some com a
+# sessao, e "eu rodei e passou" nao se repete. O que o script mediu e o que
+# estes testes medem; o que eles NAO reproduzem sao as 1.995 amostras de BBO e
+# as 1.834 barras do fluxo, porque migracao nenhuma as toca.
+# ===========================================================================
+
+# O estado que producao publica, lido em 2026-09-21 e 2026-10-07.
+HIPOTESES_POR_ORIGEM = {"a1a@0b": 6, "b4@0b": 32, "transacao@0b": 3}
+CREDITOS = {"linhas": 33, "consumidos": 65, "orcamentos": 5}
+GATILHOS_GENERALIZADOS = (
+    "copia_so_em_execucao_parcelada",
+    "bloco_parcelado_exige_tentativa",
+    "bloco_parcelado_carrega_impressoes",
+)
+ALVO_SEMEADO = "1" * 64
+
+
+def _semear_o_que_atravessa(conn) -> None:
+    """Certificados, hipoteses, creditos e holdout - nas contagens de producao.
+
+    Nenhum valor e suposto: as contagens sao as que o checkpoint publica, e os
+    nomes das colunas sao os do schema. Um helper que inventasse colunas
+    passaria a medir o helper.
+    """
+    from app.certificacao import escopos as esc
+
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, payload_json,"
+        " config_hash, material, note) VALUES ('x','ensaio','{}','h',1,'x')"
+    )
+    conn.execute(
+        "INSERT INTO run (agent_id, state, config_version_id, created_at,"
+        " updated_at) VALUES ('agent-0001','concluido',1,'x','x')"
+    )
+    i = 0
+    for origem, quantas in HIPOTESES_POR_ORIGEM.items():
+        for _ in range(quantas):
+            i += 1
+            conn.execute(
+                "INSERT INTO agent_event (run_id, occurred_at, node, kind,"
+                " cost_usd_minor, cost_usd_micro)"
+                " VALUES (1,'t','propor_regra','proposta',0,0)"
+            )
+            ev = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.execute(
+                "INSERT INTO hypothesis (run_id, agent_event_id, enunciado,"
+                " agente_origem, timestamp_registro, metrica_primaria,"
+                " efeito_minimo, n_minimo, sharpe_esperado_milesimos,"
+                " criterio_parada, condicoes_validade_json,"
+                " condicoes_falseamento_json, testavel, horizonte_barras,"
+                " content_hash)"
+                " VALUES (1,?,?,?,'t','idas_e_voltas',0,10,3000,"
+                "'fim_da_janela','{}',"
+                "'[{\"metrica\":\"idas_e_voltas\",\"comparador\":\"maior_que\",\"valor\":9}]',"
+                "1,10000,?)",
+                (ev, f"hipotese {i}", origem, f"{i:064x}"),
+            )
+
+    # CREDITOS: o braco vem da ORIGEM, como `creditos.braco_da_hipotese`
+    # deriva. `a2` nao e braco de credito - ele nao gera hipotese -, e os cinco
+    # orcamentos de producao sao "um por (braco, config)".
+    for braco in ("agente", "b4", "a1a", "a1b"):
+        conn.execute(
+            "INSERT INTO test_credit_budget (braco, config_version_id,"
+            " creditos, created_at) VALUES (?,1,60,'x')", (braco,)
+        )
+    conn.execute(
+        "INSERT INTO config_version (created_at, author, payload_json,"
+        " config_hash, material, note)"
+        " VALUES ('x','ensaio','{}','h2',1,'a segunda config, para o 5o"
+        " orcamento')"
+    )
+    conn.execute(
+        "INSERT INTO test_credit_budget (braco, config_version_id, creditos,"
+        " created_at) VALUES ('agente',2,60,'x')"
+    )
+    por_origem = {"a1a@0b": "a1a", "b4@0b": "b4", "transacao@0b": "agente"}
+    linhas = [(int(r["id"]), str(r["agente_origem"])) for r in conn.execute(
+        "SELECT id, agente_origem FROM hypothesis ORDER BY id LIMIT 33")]
+    for k, (hid, origem) in enumerate(linhas):
+        tipo, custo = ("in_sample", 1) if k < 17 else ("reteste_parametro", 3)
+        conn.execute(
+            "INSERT INTO test_credit_entry (braco, config_version_id,"
+            " hypothesis_id, tipo, creditos, occurred_at, impacto_fdr_bps,"
+            " cpu_micros, barras_reservadas) VALUES (?,1,?,?,?,'x',0,0,0)",
+            (por_origem[origem], hid, tipo, custo),
+        )
+
+    for escopo in esc.TODOS:
+        cur = conn.execute(
+            "INSERT INTO certificacao_execucao (alvo_hash, componentes_json,"
+            " build_do_backend, iniciada_em, casos_esperados,"
+            " micros_para_copiar, micros_da_suite, bytes_da_copia,"
+            " intocado_json, escopo, blocos_esperados)"
+            " VALUES (?,'{\"identidade_executavel\":\"base+sem-perfil\"}',"
+            " 'ensaio','x',?,0,0,0,'{}',?,0)",
+            (ALVO_SEMEADO, esc.CASOS_ESPERADOS[escopo], escopo),
+        )
+        eid = int(cur.lastrowid)
+        for n in range(esc.CASOS_ESPERADOS[escopo]):
+            conn.execute(
+                "INSERT INTO certificacao_caso (execucao_id, chave, familia,"
+                " tipo, barrado, promovido, resultado_json)"
+                " VALUES (?,?,'x','estrutural',1,0,'{}')",
+                (eid, f"{escopo}-{n}"),
+            )
+        conn.execute(
+            "INSERT INTO certificacao_manifesto (execucao_id, alvo_hash,"
+            " manifesto_json, selado_em, passa)"
+            " VALUES (?,?,'{}','2026-09-10T19:52:37Z',1)",
+            (eid, ALVO_SEMEADO),
+        )
+
+
+def _fotografia(conn) -> dict:
+    def um(sql):
+        return conn.execute(sql).fetchone()[0]
+
+    return {
+        "piloto": store._impressao_da_janela_piloto(conn),
+        "hipoteses_por_origem": sorted(
+            (str(r[0]), int(r[1])) for r in conn.execute(
+                "SELECT agente_origem, COUNT(*) FROM hypothesis"
+                " GROUP BY agente_origem")),
+        "credit_entry_rows": um("SELECT COUNT(*) FROM test_credit_entry"),
+        "creditos_consumidos_total": um(
+            "SELECT COALESCE(SUM(creditos),0) FROM test_credit_entry"),
+        "orcamentos_de_credito": um("SELECT COUNT(*) FROM test_credit_budget"),
+        "holdout_access": um("SELECT COUNT(*) FROM holdout_access"),
+        "certificacao": sorted(
+            (str(r["escopo"]), str(r["selado_em"]), int(r["passa"]))
+            for r in conn.execute(
+                "SELECT e.escopo, m.selado_em, m.passa"
+                "  FROM certificacao_manifesto m"
+                "  JOIN certificacao_execucao e ON e.id = m.execucao_id")),
+    }
+
+
+def test_ENSAIO_o_caminho_32_ate_34_nao_move_NADA_do_experimento(em_32):
+    """As conferencias 1, 2, 3, 6 e 7 do ensaio, num teste so.
+
+    Elas sao UM teste porque sao a MESMA pergunta - "a migracao mexeu no
+    experimento?" - e separa-las faria cinco testes repetirem a mesma
+    semeadura, que e cara e identica.
+    """
+    _contrato_e_piloto(em_32)
+    _semear_o_que_atravessa(em_32)
+    antes = _fotografia(em_32)
+
+    assert antes["hipoteses_por_origem"] == sorted(
+        HIPOTESES_POR_ORIGEM.items())
+    assert antes["credit_entry_rows"] == CREDITOS["linhas"]
+    assert antes["creditos_consumidos_total"] == CREDITOS["consumidos"]
+    assert antes["orcamentos_de_credito"] == CREDITOS["orcamentos"]
+    assert len(antes["certificacao"]) == 5
+
+    assert store.migrar(em_32) == migrations.MIGRACOES[-1][0]
+
+    # 1, 2, 3 - a fotografia inteira, identica.
+    assert _fotografia(em_32) == antes
+
+    # 6 - nada de calibracao foi CRIADO pela migracao.
+    for tabela in ("calibracao_versao", "calibracao_perfil",
+                   "calibracao_observacao", "janela_revalidacao",
+                   "revalidacao_uso", "janela_calibracao",
+                   "calibracao_regime_fechamento"):
+        assert int(em_32.execute(
+            f"SELECT COUNT(*) FROM {tabela}").fetchone()[0]) == 0, tabela
+
+    # 7 - o alvo ANTIGO continua legivel. Ele deixa de ser o VIGENTE porque o
+    #     schema mudou, e nao porque alguem o apagou.
+    from app.certificacao import escopos as esc
+
+    comp = esc.composicao(em_32, ALVO_SEMEADO)
+    assert comp["passa"] is True
+    assert sorted(comp["certificados"]) == sorted(esc.TODOS)
+
+
+def test_ENSAIO_as_OITO_tabelas_da_calibracao_existem_depois_da_34(em_32):
+    """A conferencia 4: tres criadas, cinco recriadas, e os gatilhos delas."""
+    _contrato_e_piloto(em_32)
+    antes_t = {r[0] for r in em_32.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    antes_g = {r[0] for r in em_32.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger'")}
+
+    store.migrar(em_32)
+
+    depois_t = {r[0] for r in em_32.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    depois_g = {r[0] for r in em_32.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger'")}
+
+    assert sorted(depois_t - antes_t) == [
+        "calibracao_regime_fechamento", "calibracao_regime_regra",
+        "janela_calibracao",
+    ]
+    for tabela in RECRIADAS:
+        assert tabela in depois_t
+
+    novos = sorted(g for g in depois_g - antes_g if g.startswith(
+        ("janela_calibracao", "janela_revalidacao", "calibracao_")))
+    # Nao e um numero magico: e a lista, e ela esta no relatorio de
+    # integridade. O que o teste fixa e que os TRES da certificacao do adendo
+    # 9i estao entre eles.
+    for g in ("janela_revalidacao_exige_os_cinco_certificados",
+              "janela_revalidacao_identidade_e_a_da_finalizacao",
+              "janela_revalidacao_alvo_descreve_a_identidade"):
+        assert g in novos, g
+    assert len(novos) >= 12, novos
+
+
+def test_ENSAIO_os_TRES_gatilhos_do_parcelado_deixaram_de_ser_do_a1a(em_32):
+    """A conferencia 5, e ela e a migracao 34 inteira.
+
+    Os nomes ANTIGOS tem de sumir: dois gatilhos com a mesma funcao, um
+    chamado `a1a` e outro `parcelado`, e a forma do defeito que este projeto
+    conta.
+    """
+    from app.certificacao import escopos as esc
+
+    _contrato_e_piloto(em_32)
+    store.migrar(em_32)
+
+    sql = {r["name"]: r["sql"] for r in em_32.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='trigger'")}
+    for g in GATILHOS_GENERALIZADOS:
+        assert g in sql, g
+        assert "'a1a', 'a2'" in sql[g], (g, sql[g])
+    for antigo in ("bloco_a1a_exige_tentativa", "bloco_a1a_carrega_impressoes"):
+        assert antigo not in sql, antigo
+
+    # E a lista do SQL e `escopos.PLANOS` nao divergem - duas listas fechadas
+    # iguais em arquivos diferentes divergem, e aqui a divergencia so
+    # apareceria na primeira etapa de um escopo novo.
+    assert sorted(esc.PLANOS) == ["a1a", "a2"]
+
+
+def test_ENSAIO_a_implementacao_nova_aparece_INVALIDADA(em_32):
+    """A conferencia 8, e ela nao depende do banco.
+
+    O arquivo congelado tem de dizer que a certificacao esta invalidada, e o
+    hash de hoje tem de ser diferente do que esta selado em producao. Um
+    arquivo que dissesse "certificado" com a implementacao mudada e a forma
+    exata do defeito que este projeto registra.
+    """
+    import json
+
+    from app.certificacao import alvo as alvo_mod
+
+    congelado = json.loads(
+        (pathlib.Path(__file__).parent / "alvo_congelado.json")
+        .read_text(encoding="utf-8"))
+    cert = congelado["certificacao"]
+    assert cert["estado"].startswith("INVALIDAD"), cert["estado"]
+    assert cert["o_que_falta"]
+
+    h, modulos = alvo_mod.hash_da_implementacao()
+    assert len(modulos) == len(congelado["modulos"])
+    assert h[:16] == congelado["implementacao_hash"]
+    assert h[:16] != congelado["implementacao_hash_em_producao"], (
+        "a implementacao de hoje e a de producao sao a MESMA - entao nao ha"
+        " nada a recertificar, e o estado INVALIDADO estaria mentindo"
+    )

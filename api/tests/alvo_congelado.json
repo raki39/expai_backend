@@ -29,6 +29,10 @@
    {
     "implementacao_hash": "f9f530698ca22a58",
     "o_que_era": "a quinta versao, antes da OP-3 (o a2 parcelado em quatro etapas, migracao 34) e da OP-6 (o pedido do cartao carrega alvo e execucao)"
+   },
+   {
+    "implementacao_hash": "77656fd3f80fedb4",
+    "o_que_era": "a sexta versao, antes de a janela de revalidacao exigir que a identidade calibrada esteja CERTIFICADA (2026-10-13): a migracao 33 ganhou `alvo_hash` e `identidade_executavel` em `janela_revalidacao`, e os tres gatilhos (d), (e) e (f)"
    }
   ],
   "o_que_falta": "RECERTIFICAR os cinco escopos, e a OP-3 entra nesta mesma janela. Ate la nenhum resultado pode ser citado como certificado sob o alvo novo",
@@ -45,7 +49,7 @@
   "quando": "2026-09-22, revisado em 2026-10-07"
  },
  "conferido": "o hash canonico da implementacao calculado no Windows e o reportado pelo container Linux sao o MESMO numero - a OP-2 funcionando entre maquinas",
- "implementacao_hash": "77656fd3f80fedb4",
+ "implementacao_hash": "d0c9b3a0c878ca09",
  "implementacao_hash_anterior": "ed239872e6ae9bdb",
  "implementacao_hash_em_producao": "ed239872e6ae9bdb",
  "modulos": {
@@ -104,7 +108,7 @@
   "app.maos_rapidas.curva": "3e151cd08c596bcb",
   "app.maos_rapidas.executor": "93b993bd8ec75b28",
   "app.maos_rapidas.series": "cb00bb6b7aeb20ae",
-  "app.migrations": "16951b57864f8b4c",
+  "app.migrations": "062380aa664a4a26",
   "app.regra": "535d0d7fd77dc5a3",
   "app.regra.registro": "a607bd3fe6b591a2",
   "app.regra.schema": "8129afb3eab83763",

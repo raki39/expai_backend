@@ -318,7 +318,9 @@ def _estado_parcelado(request: Request, *, escopo: str) -> dict[str, Any]:
     return {"existe": True, "iniciada": True, **parcelado.estado(conn, execucao_id)}
 
 
-def _conferir_o_que_a_tela_viu(conn, pedido, *, fonte_hash: str) -> None:
+def _conferir_o_que_a_tela_viu(
+    conn, pedido, *, fonte_hash: str, escopo: str,
+) -> None:
     """OP-6: o pedido carrega o alvo e a execucao que a tela viu, ou nao segue.
 
     **A conferencia roda ANTES de `parcelado.iniciar`**, e e isso que a torna
@@ -335,7 +337,16 @@ def _conferir_o_que_a_tela_viu(conn, pedido, *, fonte_hash: str) -> None:
     **Os dois campos sao opcionais**, porque a primeira chamada nao tem o que
     comparar - e exigi-los quebraria o cliente sem fechar nada que a ausencia
     ja nao deixe aberto. O que nao pode e vir um valor e ele divergir.
+
+    **E o `escopo` e OBRIGATORIO e sem default.** A primeira versao desta
+    funcao chamava `ultima_do_alvo` sem ele, e o default e `a1a`: um pedido do
+    a2 era conferido contra a execucao do a1a, e a conferencia que existe para
+    impedir uma troca silenciosa fazia uma. Com a OP-3 passaram a existir dois
+    escopos parcelados, e o default deixou de descrever - o padrao que este
+    projeto conta.
     """
+    if escopo not in escopos_mod.PLANOS:
+        raise ValueError(f"{escopo!r} nao e escopo parcelado por etapas")
     agora = alvo_mod.montar(conn, dataset_hash=fonte_hash)
     atual_hash = agora["alvo_de_certificacao_hash"]
     if pedido.alvo_esperado and not atual_hash.startswith(pedido.alvo_esperado):
@@ -353,12 +364,13 @@ def _conferir_o_que_a_tela_viu(conn, pedido, *, fonte_hash: str) -> None:
             },
         )
     if pedido.execucao_esperada is not None:
-        ultima = parcelado.ultima_do_alvo(conn, atual_hash)
+        ultima = parcelado.ultima_do_alvo(conn, atual_hash, escopo=escopo)
         if ultima != pedido.execucao_esperada:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "o_que": "execucao_divergente",
+                    "escopo": escopo,
                     "esperada_pela_tela": pedido.execucao_esperada,
                     "agora": ultima,
                     "por_que": (
@@ -419,7 +431,9 @@ def _rodar_etapa_parcelada(
         raise HTTPException(status_code=503, detail="configuracao nao inicializada")
     meta, fonte_hash = _fonte(conn)
 
-    _conferir_o_que_a_tela_viu(conn, pedido, fonte_hash=fonte_hash)
+    _conferir_o_que_a_tela_viu(
+        conn, pedido, fonte_hash=fonte_hash, escopo=escopo
+    )
 
     log.info("certificacao.parcelada",
              extra={"author": pedido.author, "escopo": escopo})

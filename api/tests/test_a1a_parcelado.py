@@ -712,3 +712,140 @@ def test_OP6_os_campos_sao_OPCIONAIS_e_a_ausencia_e_declarada():
     assert campos["alvo_esperado"].default is None
     assert campos["execucao_esperada"].default is None
     assert PedidoEtapaA1a(author="x").alvo_esperado is None
+
+
+def test_OP6_retry_IDEMPOTENTE_continua_a_MESMA_execucao(client, conn, cenario):
+    """Repetir o pedido com o alvo e a execucao certos nao abre outra.
+
+    E o caso normal do painel: a resposta se perde no proxy de 60 s, o fluxo
+    le o estado e posta de novo. Com os dois campos preenchidos, a conferencia
+    passa e `parcelado.iniciar` segue idempotente - a mesma execucao, a etapa
+    seguinte, uma tentativa por etapa.
+    """
+    alvo = _alvo_agora(conn)[:16]
+
+    # Primeira etapa: abre a execucao.
+    r1 = client.post("/api/certificacao/a1a", headers=CABECALHO_OP6,
+                     json={"author": "teste", "alvo_esperado": alvo})
+    assert r1.status_code == 200, r1.text
+    eid = r1.json()["execucao_id"]
+
+    def concluidas(corpo):
+        return [e["etapa"] for e in corpo["etapas"]
+                if e["estado"] == "concluida"]
+
+    feitas = concluidas(r1.json())
+    assert len(feitas) == 1
+
+    # Agora o painel sabe qual execucao e: ele manda as duas coisas.
+    r2 = client.post("/api/certificacao/a1a", headers=CABECALHO_OP6,
+                     json={"author": "teste", "alvo_esperado": alvo,
+                           "execucao_esperada": eid})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["execucao_id"] == eid, "abriu execucao NOVA num retry"
+    depois = concluidas(r2.json())
+    assert depois[:len(feitas)] == feitas, "uma etapa ja feita foi refeita"
+    assert len(depois) == len(feitas) + 1
+
+    # UMA execucao, e uma tentativa por etapa.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao WHERE escopo = 'a1a'"
+    ).fetchone()[0] == 1
+    por_etapa = conn.execute(
+        "SELECT indice_etapa, COUNT(*) AS n FROM certificacao_etapa_tentativa"
+        " WHERE execucao_id = ? GROUP BY indice_etapa", (eid,),
+    ).fetchall()
+    assert por_etapa and all(int(l["n"]) == 1 for l in por_etapa)
+
+
+def test_OP6_o_409_nao_cria_execucao_etapa_tentativa_nem_manifesto(
+    client, conn, cenario
+):
+    """A conferencia roda ANTES de `parcelado.iniciar`, e e isso que a torna util.
+
+    O teste conta as QUATRO tabelas que um pedido aceito tocaria. Contar so
+    `certificacao_execucao` deixaria passar uma versao que abrisse a execucao
+    antes de conferir e desfizesse depois - e "desfez" e diferente de "nao
+    aconteceu" quando o id ja foi consumido pelo AUTOINCREMENT.
+    """
+    TABELAS = ("certificacao_execucao", "certificacao_etapa_tentativa",
+               "certificacao_bloco", "certificacao_manifesto")
+
+    def foto():
+        return {
+            tabela: conn.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0]
+            for tabela in TABELAS
+        }
+
+    antes = foto()
+    for corpo in (
+        {"author": "t", "alvo_esperado": "0" * 16},
+        {"author": "t", "execucao_esperada": 999_999},
+        {"author": "t", "alvo_esperado": "0" * 16,
+         "execucao_esperada": 999_999},
+    ):
+        r = client.post("/api/certificacao/a1a", headers=CABECALHO_OP6,
+                        json=corpo)
+        assert r.status_code == 409, f"{corpo} -> {r.status_code}: {r.text}"
+    assert foto() == antes, "um 409 escreveu em alguma das quatro tabelas"
+
+    # E o proximo id do AUTOINCREMENT tambem nao andou: nada foi consumido.
+    seq = conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'certificacao_execucao'"
+    ).fetchone()
+    assert seq is None or int(seq["seq"]) == antes["certificacao_execucao"]
+
+
+def test_OP6_NAO_HA_troca_silenciosa_para_o_alvo_vigente(client, conn, cenario):
+    """A resposta do 409 nomeia os DOIS, e nao segue com o de hoje.
+
+    O defeito que a OP-6 fecha nao e o pedido falhar: e ele ter sucesso
+    descrevendo outra coisa. Entao a prova tem duas metades - nenhuma execucao
+    nasce (acima), e a resposta diz o que a tela viu E o que vale agora, lado a
+    lado, para quem leu a tela conseguir ver que mudou.
+    """
+    agora = _alvo_agora(conn)[:16]
+    r = client.post("/api/certificacao/a1a", headers=CABECALHO_OP6,
+                    json={"author": "t", "alvo_esperado": "0" * 16})
+    assert r.status_code == 409
+    d = r.json()["detail"]
+    assert d["esperado_pela_tela"] == "0" * 16
+    assert d["agora"] == agora
+    assert d["agora"] != d["esperado_pela_tela"]
+    # O corpo NAO traz um "prosseguindo com o alvo vigente" de nenhuma forma.
+    assert "execucao_id" not in d and "etapas" not in d
+
+
+def test_OP6_a_execucao_conferida_e_a_do_ESCOPO_do_pedido(client, conn, cenario):
+    """O default de `ultima_do_alvo` e `a1a`, e isso ja foi um defeito meu.
+
+    A primeira versao de `_conferir_o_que_a_tela_viu` chamava
+    `ultima_do_alvo(conn, alvo)` sem escopo. Com a OP-3 passaram a existir
+    DOIS escopos parcelados, e um pedido do a2 era conferido contra a execucao
+    do **a1a** - a conferencia que existe para impedir uma troca silenciosa
+    fazia uma.
+
+    O cenario: abre o a1a, e entao pede o a2 declarando a execucao do a1a.
+    Antes da correcao isso PASSAVA. Hoje da 409, porque o a2 nao tem execucao
+    nenhuma.
+    """
+    alvo = _alvo_agora(conn)[:16]
+    r = client.post("/api/certificacao/a1a", headers=CABECALHO_OP6,
+                    json={"author": "teste", "alvo_esperado": alvo})
+    assert r.status_code == 200, r.text
+    eid_a1a = r.json()["execucao_id"]
+
+    r2 = client.post("/api/certificacao/a2", headers=CABECALHO_OP6,
+                     json={"author": "teste", "alvo_esperado": alvo,
+                           "execucao_esperada": eid_a1a})
+    assert r2.status_code == 409, r2.text
+    d = r2.json()["detail"]
+    assert d["o_que"] == "execucao_divergente"
+    assert d["escopo"] == "a2", "a resposta tem de dizer de QUAL escopo fala"
+    assert d["esperada_pela_tela"] == eid_a1a
+    assert d["agora"] is None, "o a2 nao tem execucao para este alvo"
+
+    # E nenhuma execucao de a2 nasceu.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM certificacao_execucao WHERE escopo = 'a2'"
+    ).fetchone()[0] == 0

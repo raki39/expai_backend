@@ -161,6 +161,12 @@ GATILHOS_ESPERADOS = [
     "calibracao_regime_fechamento_dentro_da_janela",
     "calibracao_versao_so_depois_do_fim_da_janela",
     "janela_revalidacao_exige_a_finalizacao",
+    # 2026-10-13: a identidade calibrada tem de estar CERTIFICADA antes de
+    # qualquer janela de revalidacao ser selada. A finalizacao prova que o
+    # perfil existe; estes tres provam que ele foi conferido.
+    "janela_revalidacao_exige_os_cinco_certificados",
+    "janela_revalidacao_identidade_e_a_da_finalizacao",
+    "janela_revalidacao_alvo_descreve_a_identidade",
     # Migracao 34 - OP-3: os gatilhos do parcelado deixaram de ser do a1a.
     # `copia_so_em_execucao_parcelada` nao entra: ele ja existia na 32 e so
     # mudou de corpo, entao a lista anterior ja o declara.

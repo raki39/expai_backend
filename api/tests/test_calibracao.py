@@ -277,9 +277,102 @@ DURACAO_DE_TESTE = 14 * 86_400_000
 DURACAO_DA_CALIBRACAO_DE_TESTE = 20_000 * GRADE
 
 
+# ===========================================================================
+# A IDENTIDADE CALIBRADA TEM DE ESTAR CERTIFICADA — 2026-10-13
+#
+# `janela_revalidacao_exige_a_finalizacao` prova que o perfil EXISTE.
+# Estes helpers servem aos testes que provam a outra metade: que ele foi
+# **conferido**, pelos cinco escopos, para o alvo DESTA identidade.
+#
+# O helper CERTIFICA de verdade — grava `certificacao_execucao` e
+# `certificacao_manifesto` com os componentes reais de `alvo.montar`. Fingir
+# a certificação com um alvo inventado faria o gatilho (f) recusar, e ele
+# estaria certo: os componentes gravados precisam descrever a identidade.
+# ===========================================================================
+
+
+def semear_dataset(conn) -> None:
+    """Um `dataset` minimo, so para que haja FONTE DE DADOS no alvo.
+
+    `alvo.montar` recusa sem ela, e a recusa e correta: a fonte e componente
+    do alvo, e um alvo sem fonte descreveria um laboratorio que nao le nada.
+    Os testes de calibracao nunca precisaram de dataset porque a calibracao le
+    `stream_bar`, que e o fluxo AO VIVO - e nao o dataset historico.
+    """
+    if conn.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]:
+        return
+    conn.execute(
+        "INSERT INTO dataset (venue, symbol, timeframe, interval_ms,"
+        " start_ms, end_ms, reserved_from_ms, bars, sha256, source,"
+        " source_files_json, fetched_at, fidelity_level, price_scale_exp,"
+        " volume_scale_exp)"
+        " VALUES ('binance','BTCUSDT','15m',?,1,1000,900,10,?,'teste','[]',"
+        " 'x',1,8,8)",
+        (GRADE, "d" * 64),
+    )
+
+
+def _alvo_de_agora(conn) -> dict:
+    """O alvo da identidade VIGENTE, pelo mesmo caminho que a rota usa."""
+    from app.certificacao import alvo as alvo_mod
+    from app.dataset import loader as dataset_loader
+
+    semear_dataset(conn)
+    meta = dataset_loader.dataset_vigente(conn)
+    assert meta is not None
+    return alvo_mod.montar(conn, dataset_hash=meta.sha256)
+
+
+def certificar(conn, *, escopos=None, alvo: dict | None = None,
+               passa: bool = True) -> str:
+    """Sela manifesto para os escopos pedidos. Devolve o `alvo_hash`.
+
+    Por `INSERT` cru, e nao rodando a suite: rodar os cinco escopos de verdade
+    dentro de um teste de calibracao levaria minutos e mediria outra coisa. O
+    que estes testes exercitam e a TRAVA, e ela le manifesto.
+
+    `componentes_json` leva os componentes REAIS, porque o gatilho (f) confere
+    `identidade_executavel` contra a janela - e e justamente essa conferencia
+    que impede um alvo antigo de autorizar uma identidade nova.
+    """
+    import json
+
+    from app.certificacao import escopos as escopos_mod
+
+    o_alvo = alvo if alvo is not None else _alvo_de_agora(conn)
+    alvo_hash = str(o_alvo["alvo_de_certificacao_hash"])
+    for escopo in (escopos if escopos is not None else escopos_mod.TODOS):
+        cur = conn.execute(
+            "INSERT INTO certificacao_execucao (alvo_hash, componentes_json,"
+            " build_do_backend, iniciada_em, casos_esperados,"
+            " micros_para_copiar, micros_da_suite, bytes_da_copia,"
+            " intocado_json, escopo, blocos_esperados)"
+            " VALUES (?,?,'teste','x',?,0,0,0,'{}',?,0)",
+            (alvo_hash,
+             json.dumps(o_alvo["componentes"], ensure_ascii=False),
+             escopos_mod.CASOS_ESPERADOS[escopo], escopo),
+        )
+        eid = int(cur.lastrowid)
+        for i in range(escopos_mod.CASOS_ESPERADOS[escopo]):
+            conn.execute(
+                "INSERT INTO certificacao_caso (execucao_id, chave, familia,"
+                " tipo, barrado, promovido, resultado_json)"
+                " VALUES (?,?,'x','estrutural',1,0,'{}')",
+                (eid, f"{escopo}-{i}"),
+            )
+        conn.execute(
+            "INSERT INTO certificacao_manifesto (execucao_id, alvo_hash,"
+            " manifesto_json, selado_em, passa) VALUES (?,?,'{}','x',?)",
+            (eid, alvo_hash, 1 if passa else 0),
+        )
+    return alvo_hash
+
+
 def revalidacao_crua(conn, *, fech: int, regime: str, calibracao_ate: int,
                      symbol: str = "BTCUSDT",
-                     duracao: int = DURACAO_DE_TESTE):
+                     duracao: int = DURACAO_DE_TESTE,
+                     alvo_hash: str | None = None,
+                     identidade: str | None = None):
     """Uma `janela_revalidacao` por `INSERT` cru, VALIDA por construcao.
 
     `de_ms` e `ate_ms_exclusive` saem da MESMA expressao SQL que o caminho
@@ -289,16 +382,51 @@ def revalidacao_crua(conn, *, fech: int, regime: str, calibracao_ate: int,
     e isso que os testes abaixo exploram: cada um perturba UM campo e exige que
     a trava daquele campo seja a que fala.
     """
+    if alvo_hash is None or identidade is None:
+        # A CERTIFICACAO DA IDENTIDADE VIGENTE, porque o cru nasce VALIDO.
+        # Sem ela, todo teste abaixo falharia pelo gatilho (d) em vez de pelo
+        # que ele perturba - e um teste que falha pelo motivo errado nao
+        # prova o que afirma.
+        certificar(conn)
+        derivados = _identidade_e_alvo_do_fechamento(conn, fech)
+        identidade = identidade if identidade is not None else derivados[0]
+        alvo_hash = alvo_hash if alvo_hash is not None else derivados[1]
     return conn.execute(
         "INSERT INTO janela_revalidacao (contrato, venue, symbol, regime,"
         " de_ms, ate_ms_exclusive, calibracao_fechamento_id,"
-        " calibracao_ate_ms_exclusive, grade_ms)"
+        " calibracao_ate_ms_exclusive, grade_ms, alvo_hash,"
+        " identidade_executavel)"
         f" VALUES (?,?,?,?,{ajuste.PRIMEIRA_GRADE_SQL},"
-        f" {ajuste.PRIMEIRA_GRADE_SQL} + ?,?,?,?)",
+        f" {ajuste.PRIMEIRA_GRADE_SQL} + ?,?,?,?,?,?)",
         (CONTRATO, "binance", symbol, regime,
          GRADE, GRADE, calibracao_ate,
          GRADE, GRADE, calibracao_ate, duracao,
-         fech, calibracao_ate, GRADE),
+         fech, calibracao_ate, GRADE, alvo_hash, identidade),
+    )
+
+
+def _identidade_e_alvo_do_fechamento(conn, fech: int) -> tuple[str, str]:
+    """A identidade da finalizacao daquele fechamento, e o alvo dela.
+
+    O `INSERT` cru precisa dos dois VALIDOS para que cada teste perturbe UM
+    campo - um cru que ja nascesse invalido faria todos eles falharem pelo
+    gatilho errado.
+    """
+    linha = conn.execute(
+        "SELECT c.config_hash AS h, c.calibracao_perfil_hash AS p"
+        "  FROM calibracao_regime_fechamento f"
+        "  JOIN calibracao_versao v"
+        "    ON v.janela_calibracao_id = f.janela_calibracao_id"
+        "  JOIN config_version c ON c.id = v.config_version_nova"
+        " WHERE f.id = ?", (fech,),
+    ).fetchone()
+    if linha is None:
+        return "sem-finalizacao", "0" * 64
+    from app.calibracao import identidade as ident_mod
+
+    return (
+        ident_mod.identidade_executavel(str(linha["h"]), linha["p"]),
+        str(_alvo_de_agora(conn)["alvo_de_certificacao_hash"]),
     )
 
 
@@ -326,15 +454,27 @@ def _finalizacao_crua(conn) -> None:
         "SELECT id, de_ms, ate_ms_exclusive FROM janela_calibracao"
         " WHERE contrato = ?", (CONTRATO,)
     ).fetchone()
+    # APLICADA, e apontando para a config VIGENTE.
+    #
+    # Nao e detalhe: desde 2026-10-13 a janela de revalidacao carrega a
+    # identidade que a finalizacao produziu, e uma finalizacao com
+    # `aplicado = 0` nao produz identidade nenhuma - `config_version_nova` e
+    # NULL, e o gatilho (e) recusa, corretamente. Apontar `nova` para a
+    # vigente e o que o caminho real produz: `aplicar` cria a versao nova, e
+    # ela PASSA a ser a vigente.
+    vigente = conn.execute(
+        "SELECT MAX(id) FROM config_version"
+    ).fetchone()[0]
     conn.execute(
         "INSERT INTO calibracao_versao (contrato, venue, symbol,"
-        " config_version_origem, janela_calibracao_id, calibracao_de_ms,"
+        " config_version_origem, config_version_nova, janela_calibracao_id,"
+        " calibracao_de_ms,"
         " calibracao_ate_ms_exclusive, delta_mili_bps, n, n_efetivo_x1000,"
         " tau_x1000, sigma_e_x1000, p10_mili_bps, n_necessario, aplicado,"
         " motivo, criado_em)"
-        " VALUES (?, 'binance', 'BTCUSDT', 1, ?, ?, ?, 500, 10, 10000,"
-        " 1000, 100, 600, 5, 0, 'finalizacao crua do teste', 'x')",
-        (CONTRATO, jc["id"], jc["de_ms"], jc["ate_ms_exclusive"]),
+        " VALUES (?, 'binance', 'BTCUSDT', 1, ?, ?, ?, ?, 500, 10, 10000,"
+        " 1000, 100, 600, 5, 1, 'finalizacao crua do teste', 'x')",
+        (CONTRATO, vigente, jc["id"], jc["de_ms"], jc["ate_ms_exclusive"]),
     )
 
 
@@ -1067,6 +1207,10 @@ def fechar_e_selar(conn, cfg, *, regime: str = REGIME_DE_TESTE) -> dict:
         config=cfg.config, config_version_id=cfg.id, autor="teste",
         settings=get_settings(),
     )
+    # A SEGUNDA CERTIFICACAO, que no runbook e o passo 9. Ela vem DEPOIS de
+    # `aplicar` porque e a identidade CALIBRADA que ela certifica - certificar
+    # antes certificaria a base, e o alvo seria outro.
+    certificar(conn)
     # Nem `agora_ms`, nem `dias`, nem grade: so a identidade. O resto sai das
     # regras congeladas no selamento da calibracao.
     return ajuste.selar_revalidacao(
@@ -1334,6 +1478,416 @@ def test_GARANTIA_5_o_deficit_entra_DOBRADO_no_campo(conn, cfg):
 # ------------------------------------ garantia 7: revalidação selada e única
 
 
+# ===========================================================================
+# A IDENTIDADE CALIBRADA TEM DE ESTAR CERTIFICADA - exigencia de 2026-10-13
+#
+# > "`janela_revalidacao_exige_a_finalizacao` prova que o perfil existe, mas
+# > nao prova que ele foi certificado."
+#
+# A sequencia obrigatoria, e ela e a fronteira dupla do runbook:
+#
+#   terminar a calibracao -> fechar os regimes -> UMA finalizacao consolidada
+#   -> montar o alvo dessa identidade -> certificar os CINCO escopos ->
+#   so entao selar qualquer janela de revalidacao
+#
+# ## Onde cada metade mora, e o que o banco NAO alcanca
+#
+# | afirmacao | onde | por que |
+# |---|---|---|
+# | cinco escopos com manifesto que passa para `alvo_hash` | gatilho (d) | manifesto e tabela |
+# | a identidade e a da finalizacao daquela janela | gatilho (e) | os dois hashes sao colunas |
+# | o alvo certificado DESCREVE essa identidade | gatilho (f) | `componentes_json` guarda o componente |
+# | o `alvo_hash` corresponde ao CODIGO que roda agora | **codigo** | exige AST dos 71 modulos e leitura de arquivo |
+#
+# A ultima e a unica que o SQL nao consegue, e e declarada em vez de fingida.
+# O que a fecha e `test_INSERT_em_janela_revalidacao_existe_num_lugar_SO`.
+# ===========================================================================
+
+
+def _cenario_pronto_para_selar(conn, cfg):
+    """Piloto, calibracao, fechamento e finalizacao - sem certificar.
+
+    O ponto exato em que o perfil consolidado EXISTE e ainda nao foi
+    conferido. E daqui que as recusas abaixo partem.
+    """
+    from app.settings import get_settings
+
+    # A fonte de dados e componente do ALVO, e sem ela nao ha alvo a conferir.
+    # Em producao ela sempre existe; os testes de calibracao nunca precisaram
+    # dela porque a calibracao le `stream_bar`, o fluxo AO VIVO.
+    semear_dataset(conn)
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    fechar_regime_medido(conn, cfg)
+    ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="teste",
+        settings=get_settings(),
+    )
+
+
+def _selar(conn, regime: str = REGIME_DE_TESTE):
+    return ajuste.selar_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        regime=regime,
+    )
+
+
+def test_PERFIL_FINALIZADO_e_NAO_certificado_e_RECUSADO(conn, cfg):
+    """O caso 1: o perfil existe, e ninguem conferiu o laboratorio dele.
+
+    Este e o passo 9 do runbook visto do lado do codigo. A observacao de
+    revalidacao e PRODUZIDA pelo laboratorio - confirmar sob laboratorio nao
+    certificado e confirmar um simulador que ninguem conferiu, e a janela e de
+    uso unico e comeca no FUTURO: nao ha como refazer.
+    """
+    _cenario_pronto_para_selar(conn, cfg)
+    assert ajuste.ler_finalizacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT"
+    ) is not None, "o perfil consolidado EXISTE - e isso que o caso isola"
+
+    with pytest.raises(ajuste.IdentidadeCalibradaNaoCertificada) as e:
+        _selar(conn)
+    assert e.value.composicao["pendentes"] == ["a1a", "a1b", "a2", "a3", "a4"]
+    assert "passo 9" in str(e.value)
+    assert ajuste.ler_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        regime=REGIME_DE_TESTE,
+    ) is None, "nenhuma janela foi criada pela tentativa recusada"
+
+
+def test_QUATRO_escopos_certificados_e_RECUSADO__o_quinto_nao_e_detalhe(
+    conn, cfg
+):
+    """O caso 2, e `escopos.py` diz por que quatro nao bastam.
+
+    > "A1a certifica apenas que defeitos conhecidos nao sao promovidos. Sem
+    > A1b, uma implementacao que rejeita tudo poderia passar."
+
+    Entao o teste tira justamente o A1b: o escopo cuja ausencia e a mais facil
+    de nao notar, porque os outros quatro passariam de graca num protocolo
+    surdo.
+    """
+    _cenario_pronto_para_selar(conn, cfg)
+    certificar(conn, escopos=["a1a", "a2", "a3", "a4"])
+
+    with pytest.raises(ajuste.IdentidadeCalibradaNaoCertificada) as e:
+        _selar(conn)
+    assert e.value.composicao["pendentes"] == ["a1b"]
+    assert e.value.composicao["certificados"] == ["a1a", "a2", "a3", "a4"]
+
+    # E o quinto completa: a recusa era pelo que faltava, e nao por outra coisa.
+    certificar(conn, escopos=["a1b"])
+    assert _selar(conn)["regime"] == REGIME_DE_TESTE
+
+
+def test_um_escopo_que_FALHOU_nao_conta_como_certificado(conn, cfg):
+    """`passa = 0` nao e certificado, e o gatilho usa a MESMA regra do relatorio.
+
+    Um manifesto selado com `passa = 0` e um certificado que diz "nao passou".
+    Conta-lo seria ler o fato de haver manifesto como se fosse o veredito dele.
+    """
+    _cenario_pronto_para_selar(conn, cfg)
+    certificar(conn, escopos=["a1a", "a1b", "a2", "a3"])
+    certificar(conn, escopos=["a4"], passa=False)
+
+    with pytest.raises(ajuste.IdentidadeCalibradaNaoCertificada) as e:
+        _selar(conn)
+    assert e.value.composicao["falhou"] == ["a4"]
+
+
+def test_CINCO_escopos_de_OUTRO_alvo_sao_RECUSADOS(conn, cfg):
+    """O caso 3, e e o que o gatilho (f) existe para fechar.
+
+    Certificados completos, cinco de cinco - de um alvo que descreve OUTRA
+    identidade executavel. Sem (f), bastaria apontar a janela para um alvo
+    antigo ja certificado: a contagem de (d) daria cinco, e os certificados
+    descreveriam um laboratorio que nao e o que a calibracao produziu.
+    """
+    _cenario_pronto_para_selar(conn, cfg)
+
+    # Um alvo FORJADO, com cinco certificados e identidade diferente.
+    outro = _alvo_de_agora(conn)
+    componentes = dict(outro["componentes"])
+    componentes["identidade_executavel"] = "outra-config+outro-perfil"
+    alvo_alheio = {
+        "alvo_de_certificacao_hash": "a" * 64,
+        "componentes": componentes,
+    }
+    certificar(conn, alvo=alvo_alheio)
+
+    # Pelo CAMINHO: o alvo de hoje nao tem certificado nenhum.
+    with pytest.raises(ajuste.IdentidadeCalibradaNaoCertificada):
+        _selar(conn)
+
+    # E pelo BANCO: nem citando o alvo alheio a mao a linha entra.
+    fech = conn.execute(
+        "SELECT id, fim_ms_exclusive FROM calibracao_regime_fechamento"
+    ).fetchone()
+    ident_certa, _ = _identidade_e_alvo_do_fechamento(conn, int(fech["id"]))
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        revalidacao_crua(
+            conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
+            calibracao_ate=int(fech["fim_ms_exclusive"]),
+            alvo_hash="a" * 64, identidade=ident_certa,
+        )
+    assert "OUTRA identidade" in str(e.value)
+
+
+def test_CINCO_escopos_do_alvo_EXATO_permitem(conn, cfg):
+    """O caso 4: a porta abre, e abre so aqui.
+
+    Sem este teste os quatro de cima provariam apenas que nada passa - e um
+    portao que nunca deixa passar e indistinguivel de um portao quebrado. E o
+    mesmo argumento do controle positivo sintetico da quarentena.
+    """
+    _cenario_pronto_para_selar(conn, cfg)
+    alvo_hash = certificar(conn)
+
+    janela = _selar(conn)
+    assert janela["alvo_hash"] == alvo_hash
+    # E a identidade GRAVADA e a da finalizacao, nao a "vigente de hoje".
+    final = ajuste.ler_finalizacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT"
+    )
+    nova = conn.execute(
+        "SELECT config_hash, calibracao_perfil_hash FROM config_version"
+        " WHERE id = ?", (final["config_version_nova"],),
+    ).fetchone()
+    from app.calibracao import identidade as ident_mod
+
+    assert janela["identidade_executavel"] == ident_mod.identidade_executavel(
+        str(nova["config_hash"]), nova["calibracao_perfil_hash"]
+    )
+
+
+def test_mudar_a_CONFIG_depois_de_certificar_volta_a_RECUSAR(conn, cfg):
+    """O caso 5, e ele e o que torna a garantia reversivel no sentido certo.
+
+    `alvo.montar` monta a identidade a partir da config VIGENTE: o alvo
+    descreve o que executa, e nao o que um dia foi decidido. Uma versao nova
+    criada depois da certificacao faz o alvo mudar, e os cinco certificados
+    passam a descrever um laboratorio que deixou de ser o que roda.
+
+    A recusa volta sozinha - ninguem precisa lembrar de revogar nada. E o
+    `o_que_falta` e OUTRO, porque o problema e outro: nao falta certificar,
+    falta a vigente voltar a ser a calibrada.
+    """
+    from app.config import service as config_service
+
+    from app.settings import get_settings
+
+    _cenario_pronto_para_selar(conn, cfg)
+    certificar(conn)
+
+    # A certificacao esta completa: `composicao` passa.
+    from app.certificacao import escopos as escopos_mod
+
+    antes = escopos_mod.composicao(
+        conn, str(_alvo_de_agora(conn)["alvo_de_certificacao_hash"])
+    )
+    assert antes["passa"] is True
+
+    # Agora uma config_version NOVA, posterior a certificacao. Qualquer campo
+    # material serve: o que importa e que a VIGENTE deixe de ser a calibrada.
+    atual = config_service.versao_atual(conn)
+    config_service.criar_versao(
+        conn, get_settings(),
+        {"b1_repetitions": atual.config.b1_repetitions + 1},
+        author="teste", note="qualquer mudanca material depois do selo",
+    )
+
+    with pytest.raises(ajuste.IdentidadeVigenteNaoEADaFinalizacao) as e:
+        _selar(conn)
+    assert "deixou de ser" in str(e.value)
+    assert ajuste.ler_revalidacao(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        regime=REGIME_DE_TESTE,
+    ) is None
+
+    # E o ALVO tambem mudou: os cinco certificados descrevem outro laboratorio.
+    depois = escopos_mod.composicao(
+        conn, str(_alvo_de_agora(conn)["alvo_de_certificacao_hash"])
+    )
+    assert depois["passa"] is False
+    assert depois["alvo_de_certificacao_hash"] != antes["alvo_de_certificacao_hash"]
+
+
+def test_o_CORPO_nao_aceita_alvo_execucao_nem_qualquer_outro_campo(client):
+    """O caso 6: nao ha como o chamador ESCOLHER qual certificacao autoriza.
+
+    `extra="forbid"` no modelo base, e o 422 vem do pydantic antes de a rota
+    rodar. Os cinco nomes testados sao exatamente os que alguem tentaria.
+    """
+    for extra in ("target_hash", "alvo_hash", "execution_id",
+                  "execucao_id", "alvo_esperado"):
+        r = client.post(
+            "/api/calibracao/selar-revalidacao", headers=CABECALHO,
+            json={"author": "t", "regime": "vol_baixa", extra: "x"},
+        )
+        assert r.status_code == 422, f"{extra} passou: {r.text}"
+
+    # E o caminho normal continua recusando por MOTIVO, e nao por schema.
+    r = client.post(
+        "/api/calibracao/selar-revalidacao", headers=CABECALHO,
+        json={"author": "t", "regime": "vol_baixa"},
+    )
+    assert r.status_code == 409
+
+
+def test_o_GATILHO_e_o_RELATORIO_concordam_sobre_os_cinco(conn, cfg):
+    """Duas implementacoes da mesma regra divergem. Esta compara as duas.
+
+    O gatilho (d) conta, por escopo, o manifesto MAIS RECENTE com `passa = 1`;
+    `escopos.composicao` faz o mesmo em Python. Sao arquivos diferentes, e a
+    divergencia so apareceria no dia em que um escopo tivesse dois manifestos
+    com vereditos opostos - que e exatamente o cenario 4 abaixo.
+    """
+    from app.certificacao import escopos as escopos_mod
+
+    _cenario_pronto_para_selar(conn, cfg)
+    alvo_hash = str(_alvo_de_agora(conn)["alvo_de_certificacao_hash"])
+    fech = conn.execute(
+        "SELECT id, fim_ms_exclusive FROM calibracao_regime_fechamento"
+    ).fetchone()
+    ident, _ = _identidade_e_alvo_do_fechamento(conn, int(fech["id"]))
+
+    cenarios = [
+        ("nenhum", []),
+        ("quatro", [(["a1a", "a1b", "a2", "a3"], True)]),
+        ("cinco", [(["a4"], True)]),
+        ("o quinto FALHOU depois de passar", [(["a4"], False)]),
+        ("e passou de novo", [(["a4"], True)]),
+    ]
+    vistos = set()
+    for nome, passos in cenarios:
+        for quais, passa in passos:
+            certificar(conn, escopos=quais, passa=passa)
+
+        do_relatorio = escopos_mod.composicao(conn, alvo_hash)["passa"]
+
+        # O veredito do BANCO, sem gravar nada: tenta e desfaz.
+        conn.execute("SAVEPOINT sonda")
+        try:
+            revalidacao_crua(
+                conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
+                calibracao_ate=int(fech["fim_ms_exclusive"]),
+                alvo_hash=alvo_hash, identidade=ident,
+            )
+            do_banco = True
+        except sqlite3.IntegrityError as erro:
+            assert "CINCO escopos" in str(erro), (
+                f"{nome}: recusou por outro motivo - {erro}"
+            )
+            do_banco = False
+        finally:
+            conn.execute("ROLLBACK TO sonda")
+            conn.execute("RELEASE sonda")
+
+        assert do_banco == do_relatorio, (
+            f"{nome}: o banco diz {do_banco} e o relatorio diz {do_relatorio}"
+        )
+        vistos.add(do_relatorio)
+
+    assert vistos == {True, False}, (
+        "o teste tem de exercitar os DOIS vereditos; so um seria vacuidade"
+    )
+
+
+def test_INSERT_em_janela_revalidacao_existe_num_lugar_SO():
+    """A metade que o banco nao alcanca: quem ESCREVE o `alvo_hash`.
+
+    O gatilho (f) prova que o alvo citado descreve a identidade da janela. O
+    que ele nao pode provar e que esse alvo corresponde ao CODIGO que roda
+    agora - isso exige o fechamento transitivo por AST dos 71 modulos e a
+    leitura dos arquivos, e nao ha SQL que faca.
+
+    O que fecha essa metade e haver **um escritor so**, e ele derivar os dois
+    campos em vez de recebe-los. Esta guarda varre a FORMA: um `INSERT` novo em
+    qualquer modulo de `app/` quebra o teste ate alguem decidir.
+    """
+    import pathlib
+    import re
+
+    from tests._prosa import sql_sem_prosa
+
+    raiz = pathlib.Path(__file__).resolve().parents[1] / "app"
+    padrao = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+janela_revalidacao",
+                        re.IGNORECASE)
+    achados = sorted(
+        arq.relative_to(raiz).as_posix()
+        for arq in raiz.rglob("*.py")
+        if padrao.search(sql_sem_prosa(arq))
+    )
+    assert achados == ["calibracao/ajuste.py"], (
+        "a janela de revalidacao tem UM escritor, e ele deriva alvo e"
+        f" identidade em vez de recebe-los. Achados: {achados}"
+    )
+
+    # E a guarda nao e vazia: ela acha o escritor que existe.
+    assert padrao.search(
+        sql_sem_prosa(raiz / "calibracao" / "ajuste.py")
+    ), "a guarda nao enxerga nem o escritor conhecido - ela esta vazia"
+
+
+def test_UMA_rota_so_chama_selar_revalidacao():
+    """A outra metade: nenhuma rota alem de uma chega a `selar_revalidacao`.
+
+    O `INSERT` morar num lugar so nao basta — se duas rotas chamassem a funcao,
+    a conferencia de certificacao seria contornavel por quem chamasse a que
+    nao a faz. Hoje ela e feita DENTRO de `selar_revalidacao`, entao qualquer
+    chamador a recebe; esta guarda existe para que um segundo chamador seja
+    uma decisao, e nao um descuido.
+
+    A varredura e sobre `app/` inteiro, por FORMA — nao sobre uma lista de
+    arquivos que envelheceria calada.
+    """
+    import pathlib
+    import re
+
+    from tests._prosa import codigo_sem_prosa
+
+    raiz = pathlib.Path(__file__).resolve().parents[1] / "app"
+    chamada = re.compile(r"\bselar_revalidacao\s*\(")
+    achados = sorted(
+        arq.relative_to(raiz).as_posix()
+        for arq in raiz.rglob("*.py")
+        if arq.name != "migrations.py"
+        and chamada.search(codigo_sem_prosa(arq))
+    )
+    # `calibracao/ajuste.py` aparece porque e onde ela e DEFINIDA (`def
+    # selar_revalidacao(`); a rota e o unico chamador.
+    assert achados == ["api/rotas/calibracao.py", "calibracao/ajuste.py"], (
+        f"chamadores inesperados de `selar_revalidacao`: {achados}"
+    )
+
+
+def test_os_DOIS_campos_sao_NOT_NULL__um_INSERT_que_os_omita_e_RECUSADO(conn):
+    """"Nenhuma insercao valida" tem uma metade que nao precisa de gatilho.
+
+    `alvo_hash` e `identidade_executavel` sao `NOT NULL`: um `INSERT` cru que
+    simplesmente nao os traga e recusado pelo BANCO, antes de qualquer gatilho.
+    Sem isso, a porta mais obvia — omitir o campo — ficaria aberta, e os tres
+    gatilhos leriam `NULL`.
+    """
+    colunas = {
+        r["name"]: r for r in conn.execute("PRAGMA table_info(janela_revalidacao)")
+    }
+    for campo in ("alvo_hash", "identidade_executavel"):
+        assert colunas[campo]["notnull"] == 1, campo
+        assert colunas[campo]["dflt_value"] is None, (
+            f"{campo} tem DEFAULT — um `INSERT` que o omitisse passaria com um"
+            " valor que ninguem escolheu"
+        )
+
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'janela_revalidacao'"
+    ).fetchone()["sql"]
+    assert "length(alvo_hash) = 64" in ddl, (
+        "sem o CHECK de comprimento, um `alvo_hash` truncado entraria e os"
+        " gatilhos procurariam manifesto de um alvo que nao existe"
+    )
+
+
 def test_GARANTIA_7_INVERTIDA_selar_revalidacao_SEM_finalizacao_e_recusado(
     conn, cfg
 ):
@@ -1363,16 +1917,29 @@ def test_GARANTIA_7_INVERTIDA_selar_revalidacao_SEM_finalizacao_e_recusado(
         regime=REGIME_DE_TESTE, n_efetivo=conta["n_efetivo"],
         ultimo_t_grid_ms=conta["ultimo_t_grid_ms"],
     )
-    # SEM a finalizacao, selar a revalidacao e recusado pelo BANCO.
     assert ajuste.ler_finalizacao(
         conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT"
     ) is None
-    with pytest.raises(sqlite3.IntegrityError) as e:
+
+    # (1) O CAMINHO recusa, e diz qual PASSO do runbook falta.
+    with pytest.raises(ajuste.SemJanelaDeCalibracao) as e:
         ajuste.selar_revalidacao(
             conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
             regime=REGIME_DE_TESTE,
         )
-    assert "finalizacao" in str(e.value)
+    assert "passo 8" in str(e.value)
+
+    # (2) E o BANCO tambem, por `INSERT` cru - porque uma recusa que vive so
+    #     no caminho some no dia em que alguem escrever um segundo caminho.
+    fech = conn.execute(
+        "SELECT id, fim_ms_exclusive FROM calibracao_regime_fechamento"
+    ).fetchone()
+    with pytest.raises(sqlite3.IntegrityError) as e2:
+        revalidacao_crua(
+            conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
+            calibracao_ate=int(fech["fim_ms_exclusive"]),
+        )
+    assert "finalizacao" in str(e2.value)
 
 
 def test_a_FINALIZACAO_e_UNICA_por_janela_e_IDEMPOTENTE(conn, cfg):
@@ -1721,6 +2288,18 @@ def test_GARANTIA_8_o_B1_negativo_e_reexecutado_sob_a_versao_CALIBRADA(
     assert r.status_code == 201, r.text
     corpo = r.json()
 
+    # ANTES da certificacao, selar a revalidacao continua recusado - e agora
+    # por OUTRO motivo, que o corpo nomeia. Este e o passo 9 do runbook visto
+    # do lado do codigo: a identidade calibrada existe e nao foi conferida.
+    sem_certificado = client.post(
+        "/api/calibracao/selar-revalidacao", headers=CABECALHO,
+        json={"author": "teste", "regime": "vol_baixa"},
+    )
+    assert sem_certificado.status_code == 409, sem_certificado.text
+    assert sem_certificado.json()["detail"]["o_que_falta"] == "certificacao"
+
+    certificar(conn)  # o passo 9: os cinco escopos, sobre a identidade NOVA
+
     depois = client.post("/api/calibracao/selar-revalidacao",
                          headers=CABECALHO,
                          json={"author": "teste", "regime": "vol_baixa"})
@@ -1740,10 +2319,12 @@ def test_sem_ajuste_aplicado_o_B1_NAO_afirma_ter_rodado(conn, cfg, client):
     """Dizer "passou" sem reexecutar seria afirmar uma conferência que não
     aconteceu - `None` com o motivo escrito, como o Portão A já faz."""
     montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
-    # A ORDEM e a garantia: fecha o regime, so entao sela. Pela rota, selar
-    # antes do fechamento devolve 409 - nao ha fronteira a partir da qual
-    # comecar, e inventa-la seria escolher o periodo que confirma.
-    fechar_e_selar(conn, cfg)
+    # So o FECHAMENTO. Nao ha revalidacao a selar aqui, e isso e consequencia
+    # e nao conveniencia: com `ASK_PESSIMISTA` a finalizacao nao aplica
+    # override nenhum, entao nao nasce identidade calibrada - e uma janela de
+    # revalidacao sem identidade a confirmar nao tem sujeito. O teste da linha
+    # abaixo fixa essa consequencia.
+    fechar_regime_medido(conn, cfg)
     r = client.post("/api/calibracao/ajustar", headers=CABECALHO,
                     json={"author": "teste"})
     corpo = r.json()
@@ -2599,16 +3180,23 @@ def test_o_selo_da_REVALIDACAO_tambem_e_conferido(conn):
     fech = _fechamento_cru(conn)
     retroativo = _relogio_ms() - 365 * 86_400_000
     cal_ate = T0 + GRADE * 2
+    # A identidade e o alvo entram VALIDOS: o teste perturba UM campo, e o
+    # campo e `selada_em_ms`. Deixa-los nulos faria a linha ser recusada pela
+    # trava da identidade, e o teste passaria afirmando outra coisa.
+    certificar(conn)
+    ident, alvo_h = _identidade_e_alvo_do_fechamento(conn, fech)
     with pytest.raises(sqlite3.IntegrityError) as e:
         conn.execute(
             "INSERT INTO janela_revalidacao (contrato, venue, symbol, regime,"
             " de_ms, ate_ms_exclusive, calibracao_fechamento_id,"
-            " calibracao_ate_ms_exclusive, selada_em_ms, selada_em, grade_ms)"
+            " calibracao_ate_ms_exclusive, selada_em_ms, selada_em, grade_ms,"
+            " alvo_hash, identidade_executavel)"
             f" VALUES (?, 'binance', 'BTCUSDT', 'vol_baixa',"
             f" {ajuste.PRIMEIRA_GRADE_SQL}, {ajuste.PRIMEIRA_GRADE_SQL} + ?,"
-            " ?, ?, ?, 'x', ?)",
+            " ?, ?, ?, 'x', ?, ?, ?)",
             (CONTRATO, GRADE, GRADE, cal_ate, GRADE, GRADE, cal_ate,
-             DURACAO_DE_TESTE, fech, cal_ate, retroativo, GRADE),
+             DURACAO_DE_TESTE, fech, cal_ate, retroativo, GRADE,
+             alvo_h, ident),
         )
     assert "relogio do BANCO" in str(e.value)
 
@@ -2675,14 +3263,19 @@ def test_o_INICIO_da_revalidacao_e_CALCULADO_pelo_banco(conn):
 
     fech = _fechamento_cru(conn, "vol_media")
     cal_ate = T0 + GRADE * 2
+    # Identidade e alvo VALIDOS - so a fronteira e perturbada.
+    certificar(conn)
+    ident, alvo_h = _identidade_e_alvo_do_fechamento(conn, fech)
 
     def tentar(de_ms, ate_ms):
         return conn.execute(
             "INSERT INTO janela_revalidacao (contrato, venue, symbol, regime,"
             " de_ms, ate_ms_exclusive, calibracao_fechamento_id,"
-            " calibracao_ate_ms_exclusive, grade_ms)"
-            " VALUES (?, 'binance', 'BTCUSDT', 'vol_media', ?, ?, ?, ?, ?)",
-            (CONTRATO, de_ms, ate_ms, fech, cal_ate, GRADE),
+            " calibracao_ate_ms_exclusive, grade_ms, alvo_hash,"
+            " identidade_executavel)"
+            " VALUES (?, 'binance', 'BTCUSDT', 'vol_media', ?, ?, ?, ?, ?,"
+            " ?, ?)",
+            (CONTRATO, de_ms, ate_ms, fech, cal_ate, GRADE, alvo_h, ident),
         )
 
     # 3. FORA DA GRADE
@@ -3671,7 +4264,7 @@ def test_NAO_EXISTE_janela_de_revalidacao_sem_calibracao_FINALIZADA(
     assert ajuste.ler_finalizacao(
         conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT"
     ) is None
-    with pytest.raises(sqlite3.IntegrityError) as e:
+    with pytest.raises(ajuste.SemJanelaDeCalibracao) as e:
         ajuste.selar_revalidacao(
             conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
             regime=REGIME_DE_TESTE,

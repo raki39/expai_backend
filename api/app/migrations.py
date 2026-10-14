@@ -4665,6 +4665,28 @@ MIGRACOES: list[tuple[int, str, str]] = [
                 DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             grade_ms     INTEGER NOT NULL CHECK (grade_ms > 0),
 
+            -- ------------------------------------------------------------
+            -- A IDENTIDADE CALIBRADA QUE ESTA JANELA CONFIRMA, E O ALVO
+            -- CERTIFICADO DELA. Exigencia do usuario em 2026-10-13.
+            -- ------------------------------------------------------------
+            --
+            -- `janela_revalidacao_exige_a_finalizacao` prova que o perfil
+            -- EXISTE. Nao prova que ele foi CERTIFICADO - e produzir
+            -- observacao de revalidacao sob laboratorio nao certificado e
+            -- exatamente a fronteira que o runbook moveu para o passo 9.
+            --
+            -- As duas colunas sao GRAVADAS, e nao derivadas na leitura: a
+            -- janela tem de dizer, para sempre, sob qual identidade e sob
+            -- qual alvo ela foi reservada. Um campo recalculado na leitura
+            -- passaria a descrever o laboratorio de HOJE, e nao o que
+            -- autorizou a reserva - que e o padrao que este projeto conta.
+            --
+            -- Nenhuma das duas vem do corpo do pedido: `selar_revalidacao`
+            -- as DERIVA, e os tres gatilhos da secao 8 (d, e, f) recusam
+            -- qualquer combinacao que o chamador tentasse escolher.
+            alvo_hash             TEXT NOT NULL CHECK (length(alvo_hash) = 64),
+            identidade_executavel TEXT NOT NULL CHECK (length(identidade_executavel) > 0),
+
             UNIQUE (contrato, venue, symbol, regime),
             -- NO MAXIMO UMA revalidacao por fechamento. A segunda e recusada
             -- pelo BANCO, e nao por um `if` - repetir a confirmacao ate passar
@@ -5368,6 +5390,113 @@ MIGRACOES: list[tuple[int, str, str]] = [
         BEGIN
             SELECT RAISE(ABORT,
                 'nao ha finalizacao da calibracao para esta janela: a revalidacao confirma o perfil CONSOLIDADO, e selar antes dele reservaria periodo para confirmar o que ainda nao foi decidido');
+        END;
+
+        -- ==================================================================
+        -- (d), (e), (f) - A IDENTIDADE CALIBRADA TEM DE ESTAR CERTIFICADA
+        --
+        -- Exigencia do usuario em 2026-10-13:
+        --
+        --   > "`janela_revalidacao_exige_a_finalizacao` prova que o perfil
+        --   > existe, mas nao prova que ele foi certificado."
+        --
+        -- Esta e a fronteira dupla do runbook, vista do lado do banco: nada e
+        -- materializado sob alvo nao certificado (passo 3), e nada e
+        -- CONFIRMADO sob identidade nao certificada (passo 9). A primeira
+        -- metade ja era imposta pelo codigo; esta e a segunda, e ela e
+        -- ESTRUTURAL.
+        --
+        -- ## O que o banco consegue provar, e o que nao consegue
+        --
+        -- | afirmacao | onde vive | por que |
+        -- |---|---|---|
+        -- | os CINCO escopos tem manifesto que PASSA para `alvo_hash` | (d) | manifesto e tabela |
+        -- | a identidade e a da FINALIZACAO daquela janela | (e) | `config_hash` e `calibracao_perfil_hash` sao colunas |
+        -- | o alvo certificado DESCREVE essa identidade | (f) | `componentes_json` guarda o componente |
+        -- | o `alvo_hash` corresponde ao codigo que roda AGORA | **codigo** | exige AST dos 71 modulos e leitura de arquivo - nao ha SQL que faca |
+        --
+        -- A ultima linha e a unica que o banco nao alcanca, e ela e declarada
+        -- em vez de fingida. O que a fecha e o fato de haver **um unico
+        -- escritor**: `INSERT INTO janela_revalidacao` existe em um lugar so
+        -- em `app/`, e ha guarda estrutural varrendo a forma. Quem chegasse
+        -- por SQL cru com um alvo antigo esbarraria em (e) e (f).
+
+        -- (d) OS CINCO ESCOPOS, CERTIFICADOS PARA ESTE ALVO.
+        --
+        -- A regra e a MESMA de `escopos.composicao`: por escopo, vale o
+        -- manifesto MAIS RECENTE, e ele tem de ter `passa = 1`. Contar
+        -- `passa = 1` distintos seria mais simples e estaria errado - um
+        -- escopo com manifesto que falhou DEPOIS de um que passou continuaria
+        -- contando, e a composicao do Portao A diria o contrario.
+        --
+        -- Duas implementacoes da mesma regra divergem: ha teste que compara,
+        -- em varios cenarios, o veredito deste gatilho com o de
+        -- `escopos.composicao(...)['passa']`.
+        CREATE TRIGGER janela_revalidacao_exige_os_cinco_certificados
+        BEFORE INSERT ON janela_revalidacao
+        WHEN (
+            SELECT COUNT(*) FROM (
+                SELECT e.escopo AS escopo,
+                       (SELECT m2.passa
+                          FROM certificacao_manifesto m2
+                          JOIN certificacao_execucao e2 ON e2.id = m2.execucao_id
+                         WHERE m2.alvo_hash = NEW.alvo_hash
+                           AND e2.escopo = e.escopo
+                         ORDER BY m2.execucao_id DESC LIMIT 1) AS passa
+                  FROM certificacao_manifesto m
+                  JOIN certificacao_execucao e ON e.id = m.execucao_id
+                 WHERE m.alvo_hash = NEW.alvo_hash
+                 GROUP BY e.escopo
+            ) WHERE passa = 1
+        ) <> 5
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a identidade calibrada nao esta certificada: o Portao A exige os CINCO escopos com manifesto que passa para ESTE alvo, e revalidar sob laboratorio nao certificado produziria confirmacao de um simulador que ninguem conferiu');
+        END;
+
+        -- (e) A IDENTIDADE E A DA FINALIZACAO DAQUELA JANELA.
+        --
+        -- `IS NOT`, e nao `<>`: com `config_version_nova` nula - finalizacao
+        -- que nao aplicou override nenhum - a subconsulta devolve NULL, e
+        -- `<>` com NULL e NULL, que NAO dispara o gatilho. Seria uma guarda
+        -- vazia, que e pior que guarda ausente.
+        CREATE TRIGGER janela_revalidacao_identidade_e_a_da_finalizacao
+        BEFORE INSERT ON janela_revalidacao
+        WHEN NEW.identidade_executavel IS NOT (
+            SELECT c.config_hash || '+'
+                   || COALESCE(c.calibracao_perfil_hash, 'sem-perfil')
+              FROM calibracao_regime_fechamento f
+              JOIN calibracao_versao v
+                ON v.janela_calibracao_id = f.janela_calibracao_id
+              JOIN config_version c ON c.id = v.config_version_nova
+             WHERE f.id = NEW.calibracao_fechamento_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'a identidade declarada nao e a que a finalizacao desta janela produziu: a revalidacao confirma o perfil consolidado, e confirmar outra identidade seria confirmar um simulador que a calibracao nao criou');
+        END;
+
+        -- (f) O ALVO CERTIFICADO DESCREVE ESSA IDENTIDADE.
+        --
+        -- `certificacao_execucao.componentes_json` guarda os componentes do
+        -- alvo, e `identidade_executavel` e um deles. Como o hash do alvo e
+        -- funcao dos componentes, duas execucoes com o mesmo `alvo_hash`
+        -- declaram a mesma identidade por construcao - este gatilho e a
+        -- conferencia de que ninguem forjou uma linha dizendo o contrario.
+        --
+        -- E e ele que fecha a porta que (d) sozinho deixaria aberta: um alvo
+        -- ANTIGO, com os cinco certificados, mas de outra identidade.
+        CREATE TRIGGER janela_revalidacao_alvo_descreve_a_identidade
+        BEFORE INSERT ON janela_revalidacao
+        WHEN EXISTS (
+            SELECT 1 FROM certificacao_execucao e
+             WHERE e.alvo_hash = NEW.alvo_hash
+               AND json_extract(e.componentes_json, '$.identidade_executavel')
+                   IS NOT NEW.identidade_executavel
+        )
+        BEGIN
+            SELECT RAISE(ABORT,
+                'o alvo citado foi certificado sob OUTRA identidade executavel: os cinco certificados descreveriam um laboratorio que nao e o que a calibracao produziu');
         END;
         """,
     ),

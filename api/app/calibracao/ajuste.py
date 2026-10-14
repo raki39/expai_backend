@@ -145,6 +145,39 @@ class JanelaDeCalibracaoNaoTerminou(Exception):
     """
 
 
+class IdentidadeCalibradaNaoCertificada(Exception):
+    """Os cinco escopos do Portao A nao tem certificado para ESTA identidade.
+
+    O passo 9 do runbook existe por isto: aplicar a calibracao cria uma
+    identidade executavel NOVA, e `identidade_executavel` e componente do
+    alvo. Uma observacao de revalidacao produzida antes da segunda
+    certificacao confirmaria um simulador que ninguem conferiu - e a
+    confirmacao e justamente o que nao se refaz, porque a janela e de uso
+    unico e comeca no FUTURO.
+
+    A excecao carrega `composicao`, para que quem leia veja **quais** escopos
+    faltam em vez de so saber que faltam.
+    """
+
+    def __init__(self, mensagem: str, *, composicao: dict | None = None):
+        super().__init__(mensagem)
+        self.composicao = composicao or {}
+
+
+class IdentidadeVigenteNaoEADaFinalizacao(Exception):
+    """A config vigente deixou de ser a que a finalizacao criou.
+
+    Acontece quando alguem cria uma `config_version` depois da certificacao -
+    reancoragem, troca de preco, outro perfil. O alvo passa a descrever outra
+    identidade, e os cinco certificados descrevem um laboratorio que nao e
+    mais o que executa.
+
+    Recusar aqui e o que torna a garantia reversivel no sentido certo: ela
+    volta a valer sozinha quando a identidade voltar a ser a certificada, e
+    nao exige que ninguem se lembre de revogar nada.
+    """
+
+
 class RevalidacaoNaoSelada(Exception):
     """A janela de revalidacao tem de ser selada ANTES do ajuste. Garantia 7."""
 
@@ -743,6 +776,105 @@ def ler_fechamento(
     return d
 
 
+def _identidade_certificada(
+    conn: sqlite3.Connection, *, janela_calibracao_id: int,
+) -> tuple[str, str]:
+    """A identidade que a finalizacao criou, e o alvo CERTIFICADO dela.
+
+    Devolve `(identidade_executavel, alvo_hash)` ou levanta. Nada aqui vem do
+    chamador alem da janela de calibracao, que por sua vez veio do fechamento
+    do regime - e o fechamento veio do banco.
+
+    ## Por que a comparacao e com a config VIGENTE
+
+    `alvo.montar` monta a identidade a partir de `config_service.versao_atual`:
+    o alvo descreve **o que executa**, e nao o que um dia foi decidido. Entao
+    pedir que a vigente seja a da finalizacao nao e redundancia - e a unica
+    forma de a garantia voltar a valer sozinha quando alguem criar uma
+    `config_version` depois da certificacao.
+
+    Sem ela, a sequencia *finalizar - certificar - reancorar - selar* passaria:
+    os cinco certificados existiriam para um alvo que deixou de descrever o
+    laboratorio, e nada acusaria.
+
+    ## O que esta funcao NAO faz
+
+    Ela nao escolhe nada. O alvo e recalculado agora, a identidade e lida da
+    finalizacao, e a composicao do Portao A vem de `escopos.composicao` - a
+    mesma funcao que o painel publica. Uma segunda regra aqui divergiria da
+    primeira, e o banco confere as duas pelos gatilhos (d), (e) e (f).
+    """
+    # Importados DENTRO da funcao, e de proposito: `app.certificacao.alvo`
+    # importa `app.calibracao.identidade`, e um import de topo aqui criaria
+    # dependencia circular entre os dois pacotes.
+    from ..certificacao import alvo as alvo_mod
+    from ..certificacao import escopos as escopos_mod
+    from ..dataset import loader as dataset_loader
+    from . import identidade as identidade_mod
+
+    final = conn.execute(
+        "SELECT v.config_version_nova AS nova, c.config_hash AS config_hash,"
+        "       c.calibracao_perfil_hash AS perfil"
+        "  FROM calibracao_versao v"
+        "  LEFT JOIN config_version c ON c.id = v.config_version_nova"
+        " WHERE v.janela_calibracao_id = ?",
+        (janela_calibracao_id,),
+    ).fetchone()
+    if final is None:
+        # O gatilho `janela_revalidacao_exige_a_finalizacao` diria o mesmo, e
+        # dizer aqui da o nome do passo que falta em vez do nome do gatilho.
+        raise SemJanelaDeCalibracao(
+            "nao ha finalizacao para esta janela de calibracao: a revalidacao"
+            " confirma o perfil CONSOLIDADO, e ele nasce no passo 8 do runbook"
+        )
+    if final["nova"] is None:
+        raise NadaACalibrar(
+            "a finalizacao nao aplicou override nenhum - nenhum regime"
+            " alcancou `n_exigido` dentro da janela. Nao ha identidade"
+            " calibrada a confirmar, e isso e o desfecho honesto, nao falha"
+        )
+
+    identidade_calibrada = identidade_mod.identidade_executavel(
+        str(final["config_hash"]), final["perfil"]
+    )
+
+    meta = dataset_loader.dataset_vigente(conn)
+    fonte_hash = (
+        None if meta is None
+        else (getattr(meta, "sha256", None) or getattr(meta, "hash", None))
+    )
+    if fonte_hash is None:
+        raise SemJanelaDeCalibracao(
+            "sem dataset vigente: nao ha fonte de dados, e sem ela nao ha alvo"
+            " de certificacao a conferir"
+        )
+    o_alvo = alvo_mod.montar(conn, dataset_hash=fonte_hash)
+    identidade_vigente = str(
+        o_alvo["componentes"]["identidade_executavel"]
+    )
+    if identidade_vigente != identidade_calibrada:
+        raise IdentidadeVigenteNaoEADaFinalizacao(
+            "a config vigente deixou de ser a que a calibracao produziu:"
+            f" vigente {identidade_vigente!r}, da finalizacao"
+            f" {identidade_calibrada!r}. O alvo descreve o que EXECUTA, entao"
+            " os certificados do alvo atual nao descrevem a identidade"
+            " calibrada - e a revalidacao confirma essa identidade"
+        )
+
+    alvo_hash = str(o_alvo["alvo_de_certificacao_hash"])
+    comp = escopos_mod.composicao(conn, alvo_hash)
+    if not comp["passa"]:
+        raise IdentidadeCalibradaNaoCertificada(
+            "a identidade calibrada ainda nao esta certificada:"
+            f" {comp['por_que']}. O passo 9 do runbook vem ANTES do 10 porque"
+            " a observacao de revalidacao e produzida pelo laboratorio, e"
+            " confirmar sob laboratorio nao certificado e confirmar um"
+            " simulador que ninguem conferiu",
+            composicao=comp,
+        )
+    return identidade_calibrada, alvo_hash
+
+
 def selar_revalidacao(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     regime: str,
@@ -763,6 +895,23 @@ def selar_revalidacao(
     | `n_exigido` da revalidacao | `calibracao_regime_regra` |
     | confianca, metodo, dependencia, alvo, encerramento | `janela_calibracao` |
     | `delta` | `DELTA_MILI_BPS`, sem parametro |
+    | **identidade executavel** | a `config_version` que a FINALIZACAO criou |
+    | **alvo de certificacao** | `alvo.montar`, recalculado AGORA |
+
+    **E ela recusa enquanto a identidade calibrada nao estiver certificada.**
+    Exigencia do usuario em 2026-10-13, e e a segunda metade da fronteira
+    dupla do runbook: nada e materializado sob alvo nao certificado, e nada e
+    CONFIRMADO sob identidade nao certificada. As duas recusas sao distintas
+    de proposito:
+
+    - `IdentidadeVigenteNaoEADaFinalizacao` - a config vigente deixou de ser a
+      que a calibracao produziu. Alguem criou versao nova depois;
+    - `IdentidadeCalibradaNaoCertificada` - e a certa, e os cinco escopos nao
+      tem certificado para o alvo dela.
+
+    Um erro so diria "nao da" e mandaria procurar. E nenhum dos dois valores
+    vem do corpo: os dois sao DERIVADOS aqui, e tres gatilhos da migracao 33
+    recusam qualquer combinacao que o chamador tentasse escolher.
 
     Um parametro `dias` aqui - que existia - permitia encurtar a confirmacao no
     momento de sela-la, e encurtar a confirmacao e escolher quanta evidencia
@@ -800,6 +949,11 @@ def selar_revalidacao(
     )
     assert janela_cal is not None  # o fechamento so existe com ela
     grade_ms = int(janela_cal["grade_ms"])
+
+    # A IDENTIDADE E O ALVO, DERIVADOS - nunca recebidos.
+    identidade_calibrada, alvo_hash = _identidade_certificada(
+        conn, janela_calibracao_id=int(janela_cal["id"])
+    )
     # A DURACAO E CONGELADA, e vem da janela de calibracao - selada antes do
     # primeiro dado. Nao ha argumento que a encurte.
     duracao = int(janela_cal["duracao_minima_ms"])
@@ -827,13 +981,15 @@ def selar_revalidacao(
         conn.execute(
             "INSERT INTO janela_revalidacao (contrato, venue, symbol, regime,"
             " de_ms, ate_ms_exclusive, calibracao_fechamento_id,"
-            " calibracao_ate_ms_exclusive, grade_ms)"
+            " calibracao_ate_ms_exclusive, grade_ms, alvo_hash,"
+            " identidade_executavel)"
             f" VALUES (?,?,?,?,{PRIMEIRA_GRADE_SQL},"
-            f" {PRIMEIRA_GRADE_SQL} + ?,?,?,?)",
+            f" {PRIMEIRA_GRADE_SQL} + ?,?,?,?,?,?)",
             (contrato, venue, symbol, regime,
              grade_ms, grade_ms, fim_cal,
              grade_ms, grade_ms, fim_cal, duracao,
-             int(fechamento["id"]), fim_cal, grade_ms),
+             int(fechamento["id"]), fim_cal, grade_ms,
+             alvo_hash, identidade_calibrada),
         )
     janela = ler_revalidacao(
         conn, contrato=contrato, venue=venue, symbol=symbol, regime=regime
