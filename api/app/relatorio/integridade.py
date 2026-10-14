@@ -167,6 +167,9 @@ GATILHOS_ESPERADOS = [
     "janela_revalidacao_exige_os_cinco_certificados",
     "janela_revalidacao_identidade_e_a_da_finalizacao",
     "janela_revalidacao_alvo_descreve_a_identidade",
+    # Migracao 35 - os TRES estados por regime. A ausencia de linha voltou a
+    # dizer UMA coisa, e o estado gravado nao pode discordar do valor.
+    "calibracao_perfil_regime_estado_coerente",
     # Migracao 34 - OP-3: os gatilhos do parcelado deixaram de ser do a1a.
     # `copia_so_em_execucao_parcelada` nao entra: ele ja existia na 32 e so
     # mudou de corpo, entao a lista anterior ja o declara.

@@ -256,10 +256,46 @@ def _preflight_33(conn: sqlite3.Connection) -> None:
         )
 
 
+def _preflight_35(conn: sqlite3.Connection) -> None:
+    """A 35 rotula o passado por DEFAULT, e isso so vale se o rotulo descrever.
+
+    `tem_override` entra com `DEFAULT 1`, e para as linhas que ja existem isso
+    e correto: sob a semantica antiga do ADR 0033 uma linha so era gravada
+    para regime com override.
+
+    **O caso que mentiria** e uma linha antiga cujo `spread_bps_x1000` ja fosse
+    igual a base do perfil - ela seria rotulada como override sem o ser. Em
+    producao nao ha linha nenhuma (a identidade vigente termina em
+    `sem-perfil`), mas "nao havia quando eu olhei" nao e garantia: esta
+    conferencia roda na mesma transacao, imediatamente antes do `ALTER`.
+
+    Ela PARA em vez de rotular errado, porque um rotulo errado aqui e
+    invisivel: o valor continua certo, e so o estado publicado fica falso.
+    """
+    mentiriam = [
+        dict(linha) for linha in conn.execute(
+            "SELECT r.perfil_hash, r.regime, r.spread_bps_x1000"
+            "  FROM calibracao_perfil_regime r"
+            "  JOIN calibracao_perfil p ON p.hash = r.perfil_hash"
+            " WHERE r.spread_bps_x1000 = p.spread_bps_base_x1000"
+        )
+    ]
+    if mentiriam:
+        raise PreflightFalhou(
+            f"a migracao 35 rotularia como `tem_override = 1` linha(s) cujo"
+            f" valor ja e igual a base: {mentiriam}. Sob a semantica nova elas"
+            f" sao `calibrado_sem_override`, e o DEFAULT as descreveria"
+            f" errado. Decida o rotulo de cada uma antes"
+        )
+
+
 #: Conferencias que rodam IMEDIATAMENTE antes do SQL de uma migracao, na mesma
 #: transacao. Uma migracao destrutiva que nao confere o que vai destruir e uma
 #: aposta em que ninguem escreveu entre a leitura e o deploy.
-PREFLIGHT = {33: _preflight_33}
+#:
+#: A 35 nao destroi nada, e tem preflight pelo motivo vizinho: ela ROTULA o
+#: passado por `DEFAULT`, e um rotulo errado nao aparece em numero nenhum.
+PREFLIGHT = {33: _preflight_33, 35: _preflight_35}
 
 
 def _impressao_da_janela_piloto(conn: sqlite3.Connection) -> list[tuple]:

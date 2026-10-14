@@ -21,12 +21,33 @@ aparencia de conservadorismo.
 
 O passo 3 usa a **base**, e nao o override de outro regime.
 
-## A ausencia de linha E a informacao
+## A ausencia de linha diz UMA coisa, e ate 2026-10-14 dizia duas
 
-Um regime sem override nao tem linha em `calibracao_perfil_regime`. Gravar uma
-linha com valor "herdado" tornaria a heranca invisivel; a ausencia a torna
-impossivel - e ha `CHECK` proibindo linha para `indefinido`, que nao e regime
-da taxonomia.
+A frase original era *"a ausencia de linha E a informacao"*, e ela estava certa
+sobre o que decidia: regime sem override nao herda parametro de outro. Mas
+colava dois fatos diferentes.
+
+    nao_calibrado           nao alcancou `n_exigido`. NAO ha medicao
+    calibrado_sem_override  alcancou, e `p10(E2) >= delta` ja na base
+
+O segundo e uma CONCLUSAO de calibracao, e das boas: o simulador ja e
+pessimista o bastante naquele regime. Nao aumentar o spread ali e o resultado
+correto da medicao, e nao ausencia de medicao.
+
+**Hoje todo regime CALIBRADO tem linha**, com `tem_override` dizendo se o valor
+efetivo difere da base. A ausencia significa `nao_calibrado`, e so isso.
+
+    | estado | linha | valor efetivo | revalidacao |
+    |---|---|---|---|
+    | `nao_calibrado`          | nao existe | a base, e o resultado fica inconclusivo quanto a fidelidade | nao |
+    | `calibrado_sem_override` | existe, `tem_override = 0` | a base, e isso foi MEDIDO | sim |
+    | `calibrado_com_override` | existe, `tem_override = 1` | o ajustado | sim |
+
+Os dois calibrados entram no hash, sao certificados juntos e geram janela de
+revalidacao. O nao calibrado nao gera, e nunca herda parametro de outro regime
+- a garantia 4 do ADR 0027, intacta.
+
+E ha `CHECK` proibindo linha para `indefinido`, que nao e regime da taxonomia.
 """
 
 from __future__ import annotations
@@ -50,30 +71,68 @@ class RegimeInvalido(Exception):
     """`indefinido` nao e regime da taxonomia, e nao pode ter override."""
 
 
+#: Os TRES resultados possiveis por regime. `nao_calibrado` e a AUSENCIA de
+#: linha - ele nao e um valor gravado, e nao poderia ser: gravar uma linha
+#: dizendo "nao medi" faria a ausencia e a declaracao competirem pelo mesmo
+#: fato.
+NAO_CALIBRADO = "nao_calibrado"
+CALIBRADO_SEM_OVERRIDE = "calibrado_sem_override"
+CALIBRADO_COM_OVERRIDE = "calibrado_com_override"
+ESTADOS = (NAO_CALIBRADO, CALIBRADO_SEM_OVERRIDE, CALIBRADO_COM_OVERRIDE)
+
+
 @dataclass(frozen=True)
-class Override:
+class Decisao:
+    """A decisao de calibracao de UM regime. Ela existe sempre que ele fechou.
+
+    Chamava-se `Override`, e o nome descrevia enquanto so havia linha para
+    quem subia. Mantê-lo agora faria um objeto chamado `Override` representar
+    "nao houve override" - a forma exata do defeito que este projeto conta.
+
+    `spread_bps_x1000` e o valor EFETIVO: igual a base quando
+    `tem_override` e falso. Quem le o perfil nao precisa saber qual dos dois
+    casos e para usar o numero.
+    """
+
     regime: str
     spread_bps_x1000: int
+    tem_override: bool
     n: int
     p10_mili_bps: int
+    motivo: str
+
+    @property
+    def estado(self) -> str:
+        return CALIBRADO_COM_OVERRIDE if self.tem_override else CALIBRADO_SEM_OVERRIDE
 
 
 @dataclass(frozen=True)
 class Perfil:
     hash: str
     spread_bps_base_x1000: int
-    overrides: dict[str, Override]
+    decisoes: dict[str, Decisao]
     taxonomia: dict[str, int]
 
     def spread_bps_x1000(self, regime: str | None) -> tuple[int, bool]:
         """O `spread_bps` efetivo do instante, e se ele foi CALIBRADO.
 
-        `regime` vem do detector e pode ser `None` (indefinido). Nos dois
-        casos sem override, devolve a BASE - nunca o override de outro regime.
+        `regime` vem do detector e pode ser `None` (indefinido). Sem decisao
+        para ele, devolve a BASE - nunca o valor de outro regime.
+
+        **O segundo elemento diz CALIBRADO, e nao "tem override".** Um regime
+        `calibrado_sem_override` devolve `(base, True)`: o valor e o da base
+        porque foi isso que a medicao concluiu, e dizer `False` ali
+        publicaria como nao medido um regime que foi medido.
         """
-        if regime is not None and regime in self.overrides:
-            return self.overrides[regime].spread_bps_x1000, True
+        d = None if regime is None else self.decisoes.get(regime)
+        if d is not None:
+            return d.spread_bps_x1000, True
         return self.spread_bps_base_x1000, False
+
+    def estado(self, regime: str | None) -> str:
+        """Um dos TRES. A ausencia de decisao e `nao_calibrado`, e so isso."""
+        d = None if regime is None else self.decisoes.get(regime)
+        return NAO_CALIBRADO if d is None else d.estado
 
 
 def _agora() -> str:
@@ -81,9 +140,9 @@ def _agora() -> str:
 
 
 def calcular_hash(
-    *, spread_bps_base_x1000: int, overrides: list[Override],
+    *, spread_bps_base_x1000: int, decisoes: list[Decisao],
 ) -> str:
-    """`sha256` sobre a taxonomia declarada e os overrides ORDENADOS.
+    """`sha256` sobre a taxonomia declarada e as DECISOES ordenadas.
 
     A taxonomia entra porque, se os cortes da D40 mudassem, `vol_alta`
     passaria a nomear outra coisa e o override deixaria de descrever o que
@@ -101,13 +160,21 @@ def calcular_hash(
             "permanencia_barras": deteccao.PERMANENCIA_BARRAS,
         },
         "spread_bps_base_x1000": spread_bps_base_x1000,
-        "overrides": {
-            o.regime: {
-                "spread_bps_x1000": o.spread_bps_x1000,
-                "n": o.n,
-                "p10_mili_bps": o.p10_mili_bps,
+        # A chave mudou de `overrides` para `decisoes` em 2026-10-14, e isso
+        # SOZINHO muda todo hash - o que e o certo: o perfil passou a
+        # representar outra coisa, e um perfil novo com hash antigo afirmaria
+        # equivalencia que nao existe.
+        #
+        # `motivo` fica FORA: ele e prosa, e reescrever a frase nao muda o
+        # simulador. Dentro do hash, uma virgula exigiria recertificar.
+        "decisoes": {
+            d.regime: {
+                "spread_bps_x1000": d.spread_bps_x1000,
+                "tem_override": bool(d.tem_override),
+                "n": d.n,
+                "p10_mili_bps": d.p10_mili_bps,
             }
-            for o in sorted(overrides, key=lambda x: x.regime)
+            for d in sorted(decisoes, key=lambda x: x.regime)
         },
     }
     canonico = json.dumps(corpo, sort_keys=True, separators=(",", ":"))
@@ -116,7 +183,7 @@ def calcular_hash(
 
 def gravar(
     conn: sqlite3.Connection, *, spread_bps_base_x1000: int,
-    overrides: list[Override],
+    decisoes: list[Decisao],
 ) -> Perfil:
     """Grava o perfil. Idempotente pelo hash: mesmo conteudo, mesmo perfil.
 
@@ -124,15 +191,32 @@ def gravar(
     quarto regime - e a declaracao de que faltam 672 barras anteriores para
     classificar, e dar-lhe parametro seria calibrar uma classe que nao existe.
     """
-    for o in overrides:
-        if o.regime not in REGIMES_DA_TAXONOMIA:
+    for d in decisoes:
+        if d.regime not in REGIMES_DA_TAXONOMIA:
             raise RegimeInvalido(
-                f"{o.regime!r} nao e regime da taxonomia {REGIMES_DA_TAXONOMIA}. "
+                f"{d.regime!r} nao e regime da taxonomia {REGIMES_DA_TAXONOMIA}. "
                 f"`indefinido` nunca pode herdar parametro de outro regime"
+            )
+        # A mesma regra do gatilho, do lado de ca. Ela e repetida de proposito:
+        # o gatilho protege o BANCO de qualquer caminho, e esta levanta um erro
+        # legivel antes de o `INSERT` sair - e ha teste exigindo que as duas
+        # recusem o mesmo caso.
+        if d.tem_override and d.spread_bps_x1000 <= spread_bps_base_x1000:
+            raise RegimeInvalido(
+                f"{d.regime!r} declara override com {d.spread_bps_x1000} sobre"
+                f" base {spread_bps_base_x1000}: override que nao SOBE nao e"
+                f" override, e reduzir custo tornaria o simulador otimista"
+            )
+        if not d.tem_override and d.spread_bps_x1000 != spread_bps_base_x1000:
+            raise RegimeInvalido(
+                f"{d.regime!r} declara `calibrado_sem_override` com valor"
+                f" {d.spread_bps_x1000} diferente da base"
+                f" {spread_bps_base_x1000}: sem override o valor efetivo E a"
+                f" base"
             )
 
     h = calcular_hash(
-        spread_bps_base_x1000=spread_bps_base_x1000, overrides=overrides
+        spread_bps_base_x1000=spread_bps_base_x1000, decisoes=decisoes
     )
     existente = ler(conn, h)
     if existente is not None:
@@ -148,20 +232,24 @@ def gravar(
          deteccao.JANELA_BARRAS, deteccao.PERMANENCIA_BARRAS,
          spread_bps_base_x1000, _agora()),
     )
-    for o in sorted(overrides, key=lambda x: x.regime):
+    for d in sorted(decisoes, key=lambda x: x.regime):
         conn.execute(
             "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
-            " spread_bps_x1000, n, p10_mili_bps) VALUES (?,?,?,?,?)",
-            (h, o.regime, o.spread_bps_x1000, o.n, o.p10_mili_bps),
+            " spread_bps_x1000, n, p10_mili_bps, tem_override, motivo)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (h, d.regime, d.spread_bps_x1000, d.n, d.p10_mili_bps,
+             1 if d.tem_override else 0, d.motivo),
         )
 
+    decididos = {d.regime for d in decisoes}
     log.info("calibracao.perfil_gravado", extra={
         "hash": h[:16], "base_x1000": spread_bps_base_x1000,
-        "regimes_com_override": [o.regime for o in overrides],
-        "regimes_na_base": [
-            r for r in REGIMES_DA_TAXONOMIA
-            if r not in {o.regime for o in overrides}
-        ],
+        "calibrado_com_override": [
+            d.regime for d in decisoes if d.tem_override],
+        "calibrado_sem_override": [
+            d.regime for d in decisoes if not d.tem_override],
+        "nao_calibrado": [
+            r for r in REGIMES_DA_TAXONOMIA if r not in decididos],
     })
     return ler(conn, h)  # type: ignore[return-value]
 
@@ -178,13 +266,16 @@ def ler(conn: sqlite3.Connection, perfil_hash: str) -> Perfil | None:
     ).fetchone()
     if linha is None:
         return None
-    overrides = {
-        r["regime"]: Override(
+    decisoes = {
+        r["regime"]: Decisao(
             regime=r["regime"], spread_bps_x1000=int(r["spread_bps_x1000"]),
+            tem_override=bool(r["tem_override"]),
             n=int(r["n"]), p10_mili_bps=int(r["p10_mili_bps"]),
+            motivo=str(r["motivo"]),
         )
         for r in conn.execute(
-            "SELECT regime, spread_bps_x1000, n, p10_mili_bps"
+            "SELECT regime, spread_bps_x1000, n, p10_mili_bps, tem_override,"
+            "       motivo"
             "  FROM calibracao_perfil_regime WHERE perfil_hash = ?"
             " ORDER BY regime",
             (perfil_hash,),
@@ -193,7 +284,7 @@ def ler(conn: sqlite3.Connection, perfil_hash: str) -> Perfil | None:
     return Perfil(
         hash=str(linha["hash"]),
         spread_bps_base_x1000=int(linha["spread_bps_base_x1000"]),
-        overrides=overrides,
+        decisoes=decisoes,
         taxonomia={
             "corte_inferior_mili_bps": int(linha["corte_inferior"]),
             "corte_superior_mili_bps": int(linha["corte_superior"]),
@@ -264,9 +355,13 @@ def fidelidade(
     garantiria que ele nunca saisse desse estado.
     """
     nomes = sorted({r if r is not None else "indefinido" for r in regimes_tocados})
-    overrides = set(perfil.overrides) if perfil is not None else set()
-    calibrados = sorted(n for n in nomes if n in overrides)
-    faltando = sorted(n for n in nomes if n not in overrides)
+    # CALIBRADO, e nao "tem override". Um regime `calibrado_sem_override` foi
+    # medido: a medicao concluiu que a base ja basta ali. Conta-lo como nao
+    # calibrado tornaria inconclusivo um resultado cuja fidelidade E conhecida
+    # - e empurraria na direcao de preferir o override a conclusao correta.
+    decididos = set(perfil.decisoes) if perfil is not None else set()
+    calibrados = sorted(n for n in nomes if n in decididos)
+    faltando = sorted(n for n in nomes if n not in decididos)
 
     if not nomes:
         return Fidelidade(
@@ -278,7 +373,11 @@ def fidelidade(
         return Fidelidade(
             conclusiva=True, regimes_tocados=nomes,
             regimes_calibrados=calibrados, regimes_nao_calibrados=[],
-            motivo="todo regime tocado tem override calibrado",
+            motivo=(
+                "todo regime tocado foi CALIBRADO - com ou sem override. O"
+                " valor efetivo de cada um saiu de medicao propria, e nenhum"
+                " herdou parametro de outro"
+            ),
         )
     return Fidelidade(
         conclusiva=False, regimes_tocados=nomes,

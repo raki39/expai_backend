@@ -5563,6 +5563,87 @@ MIGRACOES: list[tuple[int, str, str]] = [
         END;
         """,
     ),
+    (
+        35,
+        "os TRES estados do regime: a ausencia volta a dizer UMA coisa",
+        """
+        -- ==================================================================
+        -- A AUSENCIA DE LINHA DIZIA DUAS COISAS, E ELAS SAO DIFERENTES
+        --
+        -- O ADR 0033 escreveu "a ausencia de linha E a informacao", e estava
+        -- certo sobre o que ele decidia: regime sem override nao herda
+        -- parametro de outro. Mas a frase colou dois fatos que nao sao o
+        -- mesmo:
+        --
+        --   nao_calibrado           nao alcancou `n_exigido`. NAO ha medicao
+        --   calibrado_sem_override  alcancou, e `p10(E2) >= delta` ja na base
+        --
+        -- O segundo e uma CONCLUSAO DE CALIBRACAO, e das boas: o simulador ja
+        -- e pessimista o bastante naquele regime. Trata-lo como ausencia de
+        -- evidencia e o oposto do que ele significa - e com `aplicavel` lendo
+        -- "algum regime subiu", uma janela em que NENHUM precisasse subir nao
+        -- produzia perfil nenhum, e a medicao inteira sumia do registro.
+        --
+        -- A partir daqui:
+        --
+        --   | estado | linha em calibracao_perfil_regime | valor efetivo |
+        --   |---|---|---|
+        --   | nao_calibrado          | NAO EXISTE | a base, e o resultado fica inconclusivo quanto a fidelidade |
+        --   | calibrado_sem_override | existe, `tem_override = 0` | a base, e isso foi MEDIDO |
+        --   | calibrado_com_override | existe, `tem_override = 1` | o ajustado |
+        --
+        -- Os dois calibrados entram no `calibracao_perfil_hash`, sao
+        -- certificados juntos e geram janela de revalidacao. O nao calibrado
+        -- nao gera, e nunca herda parametro de outro regime - que e a
+        -- garantia 4 do ADR 0027, intacta.
+        --
+        -- ## Por que ALTER, e nao recriar
+        --
+        -- `calibracao_perfil_regime` nasceu na migracao 25 e ESTA EM
+        -- PRODUCAO. Recria-la exigiria provar que ela esta vazia; `ALTER
+        -- TABLE ADD COLUMN` nao destroi linha nenhuma, e o `DEFAULT` descreve
+        -- corretamente o passado - sob a semantica antiga, toda linha gravada
+        -- ERA um override.
+        --
+        -- O caso em que esse DEFAULT mentiria - linha antiga cujo valor ja
+        -- fosse igual a base - e conferido pelo preflight da 35, que PARA em
+        -- vez de rotular errado.
+        -- ==================================================================
+
+        ALTER TABLE calibracao_perfil_regime
+            ADD COLUMN tem_override INTEGER NOT NULL DEFAULT 1
+            CHECK (tem_override IN (0, 1));
+
+        ALTER TABLE calibracao_perfil_regime
+            ADD COLUMN motivo TEXT NOT NULL DEFAULT
+            'linha anterior a 2026-10-14. Sob a semantica antiga do ADR 0033, uma linha so existia para regime com override - entao `tem_override = 1` descreve o passado, e o preflight da migracao 35 confere que nenhuma delas tinha valor igual a base';
+
+        -- O ESTADO E O VALOR NAO PODEM DISCORDAR.
+        --
+        -- `tem_override` e derivavel de "o valor difere da base", e e gravado
+        -- assim mesmo: o campo DIZ o que a linha significa, em vez de obrigar
+        -- quem le a recalcular a comparacao. O preco de gravar uma coisa
+        -- derivavel e poder divergir dela, e e esse preco que o gatilho paga.
+        --
+        -- Ele tambem impoe a garantia 5 pela segunda ponta: override que nao
+        -- SOBE nao e override - reduzir custo tornaria o simulador mais
+        -- otimista, e esse e o unico erro que nao se pode cometer.
+        CREATE TRIGGER calibracao_perfil_regime_estado_coerente
+        BEFORE INSERT ON calibracao_perfil_regime
+        WHEN (NEW.tem_override = 0
+              AND NEW.spread_bps_x1000 <> (
+                  SELECT spread_bps_base_x1000 FROM calibracao_perfil
+                   WHERE hash = NEW.perfil_hash))
+          OR (NEW.tem_override = 1
+              AND NEW.spread_bps_x1000 <= (
+                  SELECT spread_bps_base_x1000 FROM calibracao_perfil
+                   WHERE hash = NEW.perfil_hash))
+        BEGIN
+            SELECT RAISE(ABORT,
+                'estado e valor discordam: `tem_override = 0` exige o valor IGUAL a base, e `tem_override = 1` exige valor MAIOR que ela - override que nao sobe nao e override');
+        END;
+        """,
+    ),
 ]
 
 # Estados em que um run bloqueia alteracao de configuracao.

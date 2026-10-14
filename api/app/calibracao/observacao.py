@@ -47,6 +47,8 @@ from ..config.schema import ExperimentConfig
 from ..dataset.loader import BarraCarregada
 from ..simulador.execucao import preco_executado, preco_referencia
 from ..store import bloco_atomico
+from . import identidade
+from . import perfil as perfil_mod
 from . import regimes
 
 log = logging.getLogger(__name__)
@@ -131,14 +133,31 @@ def prever(
 def calcular(
     *, t_grid_ms: int, lado: str, abertura: int, amostra: sqlite3.Row,
     config: ExperimentConfig, orcamento_cents: int,
+    spread_bps: Decimal | None = None,
 ) -> Observacao:
-    """Uma observacao, a partir da barra e da amostra de BBO do mesmo instante."""
+    """Uma observacao, a partir da barra e da amostra de BBO do mesmo instante.
+
+    ## `spread_bps`, e por que ele e o conserto de um defeito
+
+    `P_exec_previsto` e o preco que **o simulador daquela identidade** preve.
+    Ate 2026-10-14 esta funcao chamava `prever` sem override, entao a previsao
+    saia sempre da BASE - mesmo numa linha que declarava
+    `calibracao_perfil_hash` de um perfil com override.
+
+    Na calibracao isso e correto e necessario: `p10(E2)` tem de ser medido sob
+    a base, porque e dele que o deficit sai. **Na revalidacao e errado**, e
+    materialmente: ela existe para confirmar `LB95(p10(E2)) >= 0` sob o
+    simulador que a calibracao produziu, e media-lo sob a base confirmaria
+    outro simulador - um que ninguem vai executar.
+
+    `None` continua reproduzindo o comportamento historico byte a byte.
+    """
     bid = int(amostra["bid"])
     ask = int(amostra["ask"])
     bid_qty = int(amostra["bid_qty"])
     ask_qty = int(amostra["ask_qty"])
 
-    previsto = prever(abertura, lado, config)
+    previsto = prever(abertura, lado, config, spread_bps=spread_bps)
 
     if lado == "compra":
         # Pagamos o ask. Pessimismo = prever pagar pelo menos ele.
@@ -356,6 +375,23 @@ def registrar(
         conn, venue=venue, symbol=symbol, timeframe=c.timeframe
     )
 
+    # O PERFIL DA IDENTIDADE DECLARADA, e nao o vigente.
+    #
+    # Cada instante e previsto sob o `spread_bps` EFETIVO do regime dele
+    # naquele perfil. Sem isto, uma observacao de revalidacao declarava um
+    # perfil com override e previa sob a base - confirmaria um simulador que
+    # ninguem executa.
+    #
+    # Na calibracao o perfil e o da identidade BASE (`sem-perfil`), entao a
+    # leitura devolve `None` e a previsao sai da base, que e o que ela tem de
+    # ser: `p10(E2)` e o insumo de onde o deficit sai, e medi-lo sob o proprio
+    # override seria circular.
+    perfil = (
+        None if not calibracao_perfil_hash
+        or calibracao_perfil_hash == identidade.SEM_PERFIL
+        else perfil_mod.ler(conn, calibracao_perfil_hash)
+    )
+
     # E A COBERTURA DO FLUXO, que decide se o instante PODE ser materializado.
     #
     # Classificar e funcao do conteudo da janela causal, e o conteudo pode
@@ -390,11 +426,16 @@ def registrar(
             if apenas_regime is not None and regime != apenas_regime:
                 fora_do_regime += len(lados)
                 continue
+            spread_do_regime = None
+            if perfil is not None:
+                x1000, _calibrado = perfil.spread_bps_x1000(regime)
+                spread_do_regime = Decimal(x1000) / 1000
             for lado in lados:
                 o = calcular(
                     t_grid_ms=int(linha["t_grid_ms"]), lado=lado,
                     abertura=int(linha["abertura"]), amostra=linha,
                     config=config, orcamento_cents=orcamento_cents,
+                    spread_bps=spread_do_regime,
                 )
                 if not o.dentro_do_l1:
                     excluidos += 1

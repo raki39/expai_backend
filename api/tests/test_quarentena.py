@@ -649,7 +649,9 @@ def test_conferir_RECUSA_divergencia_de_identidade(conn, cenario_congelavel):
     # conferência.
     p = perfil_mod.gravar(
         conn, spread_bps_base_x1000=1_000,
-        overrides=[perfil_mod.Override("vol_baixa", 1_674, 500, 163)],
+        decisoes=[perfil_mod.Decisao(
+            regime="vol_baixa", spread_bps_x1000=1_674, tem_override=True,
+            n=500, p10_mili_bps=163, motivo="decisao montada pelo teste")],
     )
     conn.execute("DROP TRIGGER IF EXISTS run_sem_update")
     conn.execute(

@@ -473,11 +473,33 @@ class Ajuste:
     spread_bps_x1000_depois: int
     aplicavel: bool
     motivo: str
-    overrides: list = None  # type: ignore[assignment]
+    #: Uma `perfil_mod.Decisao` por regime CALIBRADO - com ou sem override.
+    #: O campo chamava-se `overrides` e so trazia quem subia; o nome deixou de
+    #: descrever quando "nao subir" virou uma conclusao registrada.
+    decisoes: list = None  # type: ignore[assignment]
 
 
 def derivar(estimativa: Estimativa, config: ExperimentConfig) -> Ajuste:
-    """Os overrides POR REGIME. **Nunca mais otimista.** Garantias 4 e 5.
+    """A decisao de calibracao de CADA regime. **Nunca mais otimista.**
+
+    ## Os TRES resultados, e por que separa-los importa
+
+        nao_calibrado           nao fechou: nao alcancou `n_exigido`
+        calibrado_sem_override  fechou, e `p10(E2) >= delta` ja na base
+        calibrado_com_override  fechou, e precisou subir `2 x (delta - p10)`
+
+    Ate 2026-10-14 os dois primeiros eram indistinguiveis no perfil: um regime
+    sem override simplesmente nao tinha linha. E `aplicavel` lia *"algum regime
+    subiu"* - entao uma janela em que NENHUM precisasse subir nao produzia
+    perfil nenhum, e a medicao inteira sumia do registro.
+
+    **Nao aumentar o spread e uma conclusao de calibracao valida**, e das
+    boas: ela diz que o simulador ja e pessimista o bastante naquele regime.
+    Trata-la como ausencia de evidencia e o oposto do que ela significa.
+
+    `aplicavel` passou a ler **"algum regime fechou"**. Ele continua decidindo
+    se nasce `config_version` nova - e nasce, porque o perfil REGISTRA a
+    medicao e o `calibracao_perfil_hash` entra na identidade executavel.
 
     ## O que esta funcao deixou de fazer, e por que
 
@@ -493,63 +515,81 @@ def derivar(estimativa: Estimativa, config: ExperimentConfig) -> Ajuste:
     de MAIOR volatilidade, onde o custo tende a ser pior. Aplicar ali um numero
     medido no tercil mais calmo e otimismo com cara de conservadorismo.
 
-    Hoje cada regime calibrado ganha o **seu** override, e regime sem amostra
-    fica **sem linha** - usando a base, que e hipotese declarada e nao medicao
-    emprestada.
-
-    A garantia 5 continua valendo, agora POR REGIME: cada override e comparado
-    com a base por `max`, entao nenhum deles pode reduzir custo.
+    A garantia 5 continua valendo, POR REGIME: cada valor efetivo e comparado
+    com a base por `max`, entao nenhum deles reduz custo.
     """
     base = int(Decimal(str(config.spread_bps)) * 1000)
-    overrides: list[perfil_mod.Override] = []
+    decisoes: list[perfil_mod.Decisao] = []
     for r in estimativa.calibrados:
         pedido = r.spread_bps_x1000 or base
-        overrides.append(perfil_mod.Override(
+        efetivo = max(base, pedido)
+        p10 = int(round(r.p10_mili_bps or 0))
+        subiu = efetivo > base
+        decisoes.append(perfil_mod.Decisao(
             regime=r.regime,
-            spread_bps_x1000=max(base, pedido),
+            spread_bps_x1000=efetivo,
+            tem_override=subiu,
             n=r.n,
-            p10_mili_bps=int(round(r.p10_mili_bps or 0)),
+            p10_mili_bps=p10,
+            motivo=(
+                f"p10(E2) = {p10} mili-bps < delta = {DELTA_MILI_BPS}: o"
+                f" deficit por lado e {DELTA_MILI_BPS - p10}, e `spread_bps`"
+                f" sobe o DOBRO dele porque e o spread cheio aplicado pela"
+                f" metade em cada ponta"
+                if subiu else
+                f"p10(E2) = {p10} mili-bps >= delta = {DELTA_MILI_BPS} ja com"
+                f" a base de {base / 1000:.3f} bps. O regime foi MEDIDO e nao"
+                f" precisou de ajuste - isso e conclusao de calibracao, e nao"
+                f" ausencia de evidencia. Reduzir o valor tornaria o simulador"
+                f" mais otimista, e esse e o unico erro que nao se pode cometer"
+            ),
         ))
 
-    sem_override = [
+    nao_calibrados = [
         r.regime for r in estimativa.por_regime
         if r.regime != "indefinido" and r.estado != "calibrado"
     ]
 
-    if not overrides:
+    if not decisoes:
         return Ajuste(
             spread_bps_x1000_antes=base, spread_bps_x1000_depois=base,
-            aplicavel=False, overrides=[],
-            motivo="nenhum regime alcancou a amostra necessaria para δ = 0,5 "
-                   "bps. Nada e aplicado, e cada regime fica registrado como "
-                   "nao_calibrado - que vira condicao de validade",
+            aplicavel=False, decisoes=[],
+            motivo=f"nenhum regime FECHOU: nenhum alcancou o proprio"
+                   f" `n_exigido` congelado. Nada e aplicado, e cada regime"
+                   f" fica `nao_calibrado` - que vira condicao de validade."
+                   f" Nao calibrados: {', '.join(nao_calibrados) or 'nenhum'}",
         )
 
-    subiram = [o for o in overrides if o.spread_bps_x1000 > base]
-    if not subiram:
-        return Ajuste(
-            spread_bps_x1000_antes=base, spread_bps_x1000_depois=base,
-            aplicavel=False, overrides=overrides,
-            motivo=f"a base ({base / 1000:.3f} bps) ja e ao menos tao "
-                   f"pessimista quanto o alvo em todo regime calibrado. "
-                   f"MANTIDA - reduzir custo tornaria o simulador mais "
-                   f"otimista, e esse e o unico erro que nao se pode cometer",
+    subiram = [d for d in decisoes if d.tem_override]
+    na_base = [d for d in decisoes if not d.tem_override]
+    pedacos = []
+    if subiram:
+        pedacos.append(
+            "com override: "
+            + ", ".join(
+                f"{d.regime} -> {d.spread_bps_x1000 / 1000:.3f}"
+                for d in subiram
+            )
+        )
+    if na_base:
+        pedacos.append(
+            f"calibrados e SEM override, na base de {base / 1000:.3f}: "
+            + ", ".join(d.regime for d in na_base)
+            + " (p10 >= delta: medido, e nao suposto)"
+        )
+    if nao_calibrados:
+        pedacos.append(
+            "NAO calibrados, sem linha no perfil: "
+            + ", ".join(nao_calibrados)
         )
 
-    detalhe = ", ".join(
-        f"{o.regime} -> {o.spread_bps_x1000 / 1000:.3f}" for o in overrides
-    )
-    resto = (
-        f" Sem override, na base de {base / 1000:.3f}: "
-        f"{', '.join(sem_override)}." if sem_override else ""
-    )
     return Ajuste(
         spread_bps_x1000_antes=base,
-        spread_bps_x1000_depois=max(o.spread_bps_x1000 for o in overrides),
-        aplicavel=True, overrides=overrides,
-        motivo=f"override POR REGIME: {detalhe}.{resto} A base nao muda, e "
-               f"`slippage_bps` e `penalty_bps` ficam INTACTOS: eles modelam "
-               f"impacto e atraso, e o topo de livro nao os observa",
+        spread_bps_x1000_depois=max(d.spread_bps_x1000 for d in decisoes),
+        aplicavel=True, decisoes=decisoes,
+        motivo=f"{'. '.join(pedacos)}. A base nao muda, e `slippage_bps` e "
+               f"`penalty_bps` ficam INTACTOS: eles modelam impacto e atraso, "
+               f"e o topo de livro nao os observa",
     )
 
 
@@ -1144,7 +1184,7 @@ def aplicar(
         p = perfil_mod.gravar(
             conn,
             spread_bps_base_x1000=ajuste.spread_bps_x1000_antes,
-            overrides=list(ajuste.overrides or []),
+            decisoes=list(ajuste.decisoes or []),
         )
         perfil_hash = p.hash
         versao = config_service.criar_versao(
@@ -1204,6 +1244,39 @@ def aplicar(
         "calibracao_perfil_hash": perfil_hash,
         "spread_bps_base": ajuste.spread_bps_x1000_antes / 1000,
         "motivo": ajuste.motivo,
+        # OS TRES ESTADOS, nomeados. `aplicado` sozinho nao os distingue: ele
+        # diz "nasceu identidade calibrada", e ela nasce tambem quando NENHUM
+        # regime precisou subir - porque o perfil REGISTRA a medicao.
+        "por_estado": {
+            perfil_mod.CALIBRADO_COM_OVERRIDE: [
+                d.regime for d in (ajuste.decisoes or []) if d.tem_override
+            ],
+            perfil_mod.CALIBRADO_SEM_OVERRIDE: [
+                d.regime for d in (ajuste.decisoes or []) if not d.tem_override
+            ],
+            perfil_mod.NAO_CALIBRADO: [
+                r.regime for r in estimativa.por_regime
+                if r.regime != "indefinido" and r.estado != "calibrado"
+            ],
+        },
+        "o_que_cada_estado_significa": {
+            perfil_mod.NAO_CALIBRADO: (
+                "nao alcancou o proprio `n_exigido`. NAO tem linha no perfil,"
+                " usa a base como HIPOTESE, nao gera revalidacao e nunca"
+                " herda parametro de outro regime"
+            ),
+            perfil_mod.CALIBRADO_SEM_OVERRIDE: (
+                "alcancou `n_exigido` e `p10(E2) >= delta` ja na base. TEM"
+                " linha no perfil, com o valor efetivo igual a base e o"
+                " motivo escrito. Entra no hash, e certificado e GERA"
+                " revalidacao - nao aumentar o spread e conclusao de"
+                " calibracao, e nao ausencia de evidencia"
+            ),
+            perfil_mod.CALIBRADO_COM_OVERRIDE: (
+                "alcancou `n_exigido` e precisou subir. Mesma coisa, com o"
+                " valor ajustado"
+            ),
+        },
         "delta_mili_bps": DELTA_MILI_BPS,
         "estimativa": {
             "de_ms": estimativa.de_ms,
@@ -1402,6 +1475,28 @@ def revalidar(
 # ===========================================================================
 
 
+def _perfil_da_finalizacao(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+) -> perfil_mod.Perfil | None:
+    """O perfil que a FINALIZACAO daquela janela criou, ou `None`.
+
+    Da finalizacao, e nao da config vigente: os tres estados descrevem o que a
+    calibracao concluiu, e a vigente pode ter sido trocada depois. Ler a
+    vigente faria o estado de um regime mudar por causa de uma reancoragem.
+    """
+    linha = conn.execute(
+        "SELECT nova.calibracao_perfil_hash AS perfil"
+        "  FROM calibracao_versao cv"
+        "  JOIN config_version nova ON nova.id = cv.config_version_nova"
+        " WHERE cv.contrato = ? AND cv.venue = ? AND cv.symbol = ?"
+        "   AND cv.aplicado = 1",
+        (contrato, venue, symbol),
+    ).fetchone()
+    if linha is None or linha["perfil"] is None:
+        return None
+    return perfil_mod.ler(conn, str(linha["perfil"]))
+
+
 def estado_por_regime(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
 ) -> dict:
@@ -1409,15 +1504,49 @@ def estado_por_regime(
 
     `indefinido` nao aparece: ele nao e regime, e nao pode ter fechamento,
     override nem revalidacao - os `CHECK` das tres tabelas recusam.
+
+    ## SAO DUAS PERGUNTAS, e elas sao publicadas em campos diferentes
+
+    | campo | pergunta |
+    |---|---|
+    | `estado` | onde o regime esta no CICLO: nao calibrado, calibrado, em revalidacao, revalidado, falhou |
+    | `calibracao` | qual foi o RESULTADO da calibracao: nao calibrado, calibrado sem override, calibrado com override |
+
+    Um campo so nao da conta. `calibrado_sem_override` e `calibrado` no ciclo
+    e uma conclusao especifica na calibracao; juntar os dois obrigaria a
+    escolher qual dos dois fatos publicar, e o outro ficaria invisivel.
+
+    `calibracao` sai do PERFIL - a unica fonte dos tres estados. Ausencia de
+    decisao ali significa `nao_calibrado`, e so isso.
     """
+    perfil = _perfil_da_finalizacao(
+        conn, contrato=contrato, venue=venue, symbol=symbol
+    )
     saida = {}
     for regime in REGIMES_CALIBRAVEIS:
+        calibracao = (
+            perfil_mod.NAO_CALIBRADO if perfil is None
+            else perfil.estado(regime)
+        )
+        decisao = None if perfil is None else perfil.decisoes.get(regime)
+        detalhe_da_calibracao = {
+            "calibracao": calibracao,
+            "spread_bps_efetivo": (
+                None if perfil is None
+                else perfil.spread_bps_x1000(regime)[0] / 1000
+            ),
+            "tem_override": None if decisao is None else decisao.tem_override,
+            "por_que_a_calibracao": (
+                None if decisao is None else decisao.motivo
+            ),
+        }
         fechamento = ler_fechamento(
             conn, contrato=contrato, venue=venue, symbol=symbol, regime=regime
         )
         if fechamento is None:
             saida[regime] = {
                 "estado": "nao_calibrado",
+                **detalhe_da_calibracao,
                 "por_que": (
                     "o regime nao alcancou o proprio `n_exigido`, ou nao tem"
                     " amostra nenhuma. `delta` nao e relaxado e o calendario"
@@ -1433,6 +1562,7 @@ def estado_por_regime(
         if janela is None:
             saida[regime] = {
                 "estado": "calibrado",
+                **detalhe_da_calibracao,
                 "fechamento": fechamento,
                 "por_que": (
                     "o ajuste foi calculado para o regime e a revalidacao"
@@ -1447,6 +1577,7 @@ def estado_por_regime(
         if uso is None:
             saida[regime] = {
                 "estado": "em_revalidacao",
+                **detalhe_da_calibracao,
                 "fechamento": fechamento,
                 "janela": janela,
                 "por_que": "a confirmacao esta acumulando",
@@ -1457,6 +1588,7 @@ def estado_por_regime(
         passou = bool(uso["passou"])
         saida[regime] = {
             "estado": "revalidado" if passou else "falhou_revalidacao",
+            **detalhe_da_calibracao,
             "fechamento": fechamento,
             "janela": janela,
             "por_que": (

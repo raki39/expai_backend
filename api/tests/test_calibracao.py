@@ -1433,10 +1433,28 @@ def test_GARANTIA_4_o_regime_COM_amostra_e_calibrado(conn, cfg):
 # ------------------------------------------- garantia 5: nunca mais otimista
 
 
-def test_GARANTIA_5_config_ja_pessimista_e_MANTIDA(conn, cfg):
+def test_GARANTIA_5_config_ja_pessimista_e_MANTIDA__e_isso_e_CALIBRADO(
+    conn, cfg
+):
     """Reduzir custo tornaria o simulador mais otimista, e esse é o único erro
-    que este projeto não pode cometer."""
-    from app.calibracao import ajuste
+    que este projeto não pode cometer. **O valor é mantido.**
+
+    E a partir de 2026-10-14 isso deixou de significar "nada aconteceu".
+
+    A versão anterior deste teste exigia `not a.aplicavel`: com nenhum regime
+    precisando subir, nenhum perfil nascia, e a medição inteira — que concluiu
+    que a base JÁ BASTA naquele regime — desaparecia do registro. O usuário
+    apontou o caso:
+
+    > "Se `p10(E2) >= δ` com amostra suficiente, não aumentar o spread é uma
+    > conclusão de calibração válida. Esse regime deve entrar no perfil
+    > consolidado, ser certificado e seguir para revalidação usando o valor
+    > base. Não pode ser confundido com ausência de evidência."
+
+    Então o teste passou a exigir as duas coisas: o valor não sobe, **e** o
+    regime fica registrado como `calibrado_sem_override`.
+    """
+    from app.calibracao import ajuste, perfil as perfil_mod
 
     montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, aquecimento=680,
                   instantes=1_400)
@@ -1447,9 +1465,25 @@ def test_GARANTIA_5_config_ja_pessimista_e_MANTIDA(conn, cfg):
     )
     a = ajuste.derivar(e, cfg.config)
     assert e.p10_mili_bps > ajuste.DELTA_MILI_BPS, "o cenário é o de folga"
-    assert not a.aplicavel
+
+    # O VALOR NÃO SOBE — a garantia 5, intacta.
     assert a.spread_bps_x1000_depois == a.spread_bps_x1000_antes
-    assert "MANTIDA" in a.motivo
+
+    # E A MEDIÇÃO FICA REGISTRADA: há decisão, sem override.
+    assert a.aplicavel is True, (
+        "a calibração concluiu algo — que a base basta neste regime — e um"
+        " `aplicavel` falso faria a conclusão sumir do perfil"
+    )
+    assert len(a.decisoes) == 1
+    d = a.decisoes[0]
+    assert d.regime == "vol_baixa"
+    assert d.tem_override is False
+    assert d.spread_bps_x1000 == a.spread_bps_x1000_antes, (
+        "sem override, o valor efetivo É a base"
+    )
+    assert d.estado == perfil_mod.CALIBRADO_SEM_OVERRIDE
+    assert "conclusao de calibracao" in d.motivo
+    assert "SEM override" in a.motivo
 
 
 def test_GARANTIA_5_o_ajuste_NUNCA_devolve_valor_menor(conn, cfg):
@@ -2317,20 +2351,63 @@ def test_GARANTIA_8_o_B1_negativo_e_reexecutado_sob_a_versao_CALIBRADA(
 
 def test_sem_ajuste_aplicado_o_B1_NAO_afirma_ter_rodado(conn, cfg, client):
     """Dizer "passou" sem reexecutar seria afirmar uma conferência que não
-    aconteceu - `None` com o motivo escrito, como o Portão A já faz."""
+    aconteceu - `None` com o motivo escrito, como o Portão A já faz.
+
+    **O cenário mudou em 2026-10-14, e a mudança é o ponto.** Ele era
+    `ASK_PESSIMISTA` com o regime fechado: nenhum override subia, nada era
+    aplicado. Hoje esse caso é `calibrado_sem_override` — uma conclusão de
+    calibração — e produz identidade nova, então o B1 **tem** de ser
+    reexecutado sob ela.
+
+    "Nenhum ajuste aplicado" passou a significar uma coisa só: **nenhum regime
+    fechou**. É o único estado em que não há o que reexecutar.
+    """
     montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
-    # So o FECHAMENTO. Nao ha revalidacao a selar aqui, e isso e consequencia
-    # e nao conveniencia: com `ASK_PESSIMISTA` a finalizacao nao aplica
-    # override nenhum, entao nao nasce identidade calibrada - e uma janela de
-    # revalidacao sem identidade a confirmar nao tem sujeito. O teste da linha
-    # abaixo fixa essa consequencia.
-    fechar_regime_medido(conn, cfg)
+    # NENHUM fechamento. Sem regime fechado não há decisão de calibração, não
+    # nasce perfil nem `config_version`, e não há identidade nova sob a qual
+    # reexecutar o B1.
     r = client.post("/api/calibracao/ajustar", headers=CABECALHO,
                     json={"author": "teste"})
     corpo = r.json()
     assert corpo["aplicado"] is False
+    assert corpo["por_estado"]["calibrado_com_override"] == []
+    assert corpo["por_estado"]["calibrado_sem_override"] == []
+    assert sorted(corpo["por_estado"]["nao_calibrado"]) == [
+        "vol_alta", "vol_baixa", "vol_media",
+    ]
     assert corpo["b1_negativo"]["reexecutado"] is False
     assert "nenhum ajuste" in corpo["b1_negativo"]["motivo"]
+
+
+def test_calibrado_SEM_override_tambem_reexecuta_o_B1(conn, cfg, client):
+    """O contraste do teste acima, e sem ele o de cima não prova nada.
+
+    Um teste que só mostra "não reexecutou" é compatível com um sistema que
+    nunca reexecuta. Este fixa a outra metade: a conclusão "a base já basta"
+    produz identidade nova, e o B1 roda sob ela.
+    """
+    from tests.test_maos_rapidas import precos_passeio
+    from tests.test_simulador import criar_dataset
+
+    assert criar_dataset(conn, precos_passeio(3_000))
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
+    fechar_regime_medido(conn, cfg)
+
+    r = client.post("/api/calibracao/ajustar", headers=CABECALHO,
+                    json={"author": "teste"})
+    corpo = r.json()
+    assert corpo["aplicado"] is True, corpo.get("motivo")
+    assert corpo["por_estado"]["calibrado_sem_override"] == ["vol_baixa"]
+    assert corpo["por_estado"]["calibrado_com_override"] == []
+    assert corpo["config_version_nova"] is not None
+    assert corpo["calibracao_perfil_hash"] is not None
+
+    b1 = corpo["b1_negativo"]
+    assert b1["reexecutado"] is True, b1.get("motivo")
+    assert b1["config_version"] == corpo["config_version_nova"]
+    assert b1["negativo"] is True, (
+        f"operar ao acaso passou a dar LUCRO: {b1['corridas']}"
+    )
 
 
 def test_a_revalidacao_VAZIA_nao_consome_a_janela(conn, cfg, client):
@@ -2364,11 +2441,430 @@ def test_a_revalidacao_VAZIA_nao_consome_a_janela(conn, cfg, client):
 # ===========================================================================
 
 
-def ov(regime: str, spread_x1000: int):
-    from app.calibracao.perfil import Override
+def ov(regime: str, spread_x1000: int, *, base_x1000: int = 1_000):
+    """Uma `Decisao` de calibracao. `tem_override` sai do VALOR, nao de um flag.
 
-    return Override(regime=regime, spread_bps_x1000=spread_x1000,
-                    n=500, p10_mili_bps=163)
+    Derivar aqui e o certo: e exatamente a regra que o gatilho
+    `calibracao_perfil_regime_estado_coerente` impoe, e um helper que
+    aceitasse os dois independentes deixaria o teste declarar estado
+    incoerente sem perceber.
+    """
+    from app.calibracao.perfil import Decisao
+
+    return Decisao(
+        regime=regime, spread_bps_x1000=spread_x1000,
+        tem_override=spread_x1000 > base_x1000,
+        n=500, p10_mili_bps=163,
+        motivo="decisao montada pelo teste",
+    )
+
+
+# ===========================================================================
+# OS TRÊS ESTADOS POR REGIME — exigência do usuário em 2026-10-14
+#
+# > "Se `p10(E2) >= δ` com amostra suficiente, não aumentar o spread é uma
+# > conclusão de calibração válida. Esse regime deve entrar no perfil
+# > consolidado, ser certificado e seguir para revalidação usando o valor base.
+# > Não pode ser confundido com ausência de evidência."
+#
+#   | estado | linha no perfil | valor efetivo | revalidação |
+#   |---|---|---|---|
+#   | `nao_calibrado`          | NÃO existe | base, como HIPÓTESE | não |
+#   | `calibrado_sem_override` | existe, `tem_override = 0` | base, MEDIDO | sim |
+#   | `calibrado_com_override` | existe, `tem_override = 1` | o ajustado | sim |
+#
+# A ausência de linha voltou a dizer **uma** coisa.
+# ===========================================================================
+
+
+def _perfil(conn, *, base=1_000, decisoes=()):
+    from app.calibracao import perfil as perfil_mod
+
+    return perfil_mod.gravar(
+        conn, spread_bps_base_x1000=base, decisoes=list(decisoes)
+    )
+
+
+def test_TRES_ESTADOS_amostra_insuficiente_e_nao_calibrado_sem_revalidacao(
+    conn, cfg
+):
+    """Estado 1: não fechou, então não há linha — e não há revalidação.
+
+    O regime não alcançou o próprio `n_exigido`. A base continua sendo usada,
+    mas como **hipótese**, e todo resultado que o atravesse fica inconclusivo
+    quanto à fidelidade. E ele não gera janela de revalidação: não há decisão
+    a confirmar.
+    """
+    from app.calibracao import ajuste, perfil as perfil_mod
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, instantes=1_400)
+    # NENHUM fechamento.
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    a = ajuste.derivar(e, cfg.config)
+    assert a.aplicavel is False
+    assert a.decisoes == []
+
+    # Sem linha no perfil: a AUSÊNCIA é o estado.
+    p = _perfil(conn, decisoes=a.decisoes)
+    assert p.decisoes == {}
+    for regime in ("vol_baixa", "vol_media", "vol_alta"):
+        assert p.estado(regime) == perfil_mod.NAO_CALIBRADO
+        assert p.spread_bps_x1000(regime) == (1_000, False)
+
+    # E não há revalidação a selar: sem fechamento não há de onde começar.
+    with pytest.raises(ajuste.CalibracaoDoRegimeNaoFechada):
+        ajuste.selar_revalidacao(
+            conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+            regime="vol_baixa",
+        )
+
+
+def test_TRES_ESTADOS_p10_acima_de_delta_e_CALIBRADO_SEM_override(conn, cfg):
+    """Estado 2, e é o caso que não existia: medido, e a base já basta.
+
+    `p10(E2) >= δ` com amostra suficiente. O valor efetivo é a base — e isso
+    é **conclusão**, não ausência. A linha existe, com o motivo escrito.
+    """
+    from app.calibracao import ajuste, perfil as perfil_mod
+
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, aquecimento=680,
+                  instantes=1_400)
+    fechar_regime_medido(conn, cfg, regime="vol_baixa")
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    assert e.p10_mili_bps >= ajuste.DELTA_MILI_BPS, "o cenário é o de folga"
+    a = ajuste.derivar(e, cfg.config)
+
+    assert a.aplicavel is True
+    d = a.decisoes[0]
+    assert d.tem_override is False
+    assert d.spread_bps_x1000 == 1_000, "o valor efetivo É a base"
+
+    p = _perfil(conn, decisoes=a.decisoes)
+    assert p.estado("vol_baixa") == perfil_mod.CALIBRADO_SEM_OVERRIDE
+    # O SIMULADOR usa a base, E publica que o regime foi calibrado.
+    assert p.spread_bps_x1000("vol_baixa") == (1_000, True)
+
+    # A linha EXISTE no banco, com `tem_override = 0` e o motivo.
+    linha = conn.execute(
+        "SELECT tem_override, motivo, spread_bps_x1000"
+        "  FROM calibracao_perfil_regime"
+        " WHERE perfil_hash = ? AND regime = 'vol_baixa'", (p.hash,),
+    ).fetchone()
+    assert linha is not None, "regime calibrado SEM registro explicito"
+    assert int(linha["tem_override"]) == 0
+    assert int(linha["spread_bps_x1000"]) == 1_000
+    assert "conclusao de calibracao" in linha["motivo"]
+
+
+def test_TRES_ESTADOS_p10_abaixo_de_delta_e_CALIBRADO_COM_override(conn, cfg):
+    """Estado 3: medido, e precisou subir `2 x (δ - p10)`."""
+    from app.calibracao import ajuste, perfil as perfil_mod
+
+    montar_piloto(conn, cfg, ask=ASK_JUSTO, aquecimento=680, instantes=1_400)
+    fechar_regime_medido(conn, cfg, regime="vol_baixa")
+    e = ajuste.estimar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id,
+    )
+    assert e.p10_mili_bps < ajuste.DELTA_MILI_BPS, "o cenário é o de déficit"
+    a = ajuste.derivar(e, cfg.config)
+
+    d = a.decisoes[0]
+    assert d.tem_override is True
+    assert d.spread_bps_x1000 > 1_000
+
+    p = _perfil(conn, decisoes=a.decisoes)
+    assert p.estado("vol_baixa") == perfil_mod.CALIBRADO_COM_OVERRIDE
+    assert p.spread_bps_x1000("vol_baixa") == (d.spread_bps_x1000, True)
+
+
+def test_TRES_ESTADOS_um_perfil_MISTO_carrega_os_tres(conn):
+    """Os três ao mesmo tempo, que é o caso realista.
+
+    Um regime subiu, outro foi medido e não precisou, e o terceiro nunca
+    acumulou amostra. Os dois primeiros têm linha; o terceiro não.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    p = _perfil(conn, decisoes=[
+        ov("vol_alta", 2_000),   # com override
+        ov("vol_baixa", 1_000),  # sem override: igual à base
+        # `vol_media` ausente: nao_calibrado
+    ])
+
+    assert p.estado("vol_alta") == perfil_mod.CALIBRADO_COM_OVERRIDE
+    assert p.estado("vol_baixa") == perfil_mod.CALIBRADO_SEM_OVERRIDE
+    assert p.estado("vol_media") == perfil_mod.NAO_CALIBRADO
+    assert p.estado(None) == perfil_mod.NAO_CALIBRADO
+
+    assert p.spread_bps_x1000("vol_alta") == (2_000, True)
+    assert p.spread_bps_x1000("vol_baixa") == (1_000, True)
+    assert p.spread_bps_x1000("vol_media") == (1_000, False)
+
+    # E a FIDELIDADE: os dois calibrados são conclusivos; o ausente não.
+    assert perfil_mod.fidelidade(p, ["vol_alta", "vol_baixa"]).conclusiva
+    f = perfil_mod.fidelidade(p, ["vol_alta", "vol_media"])
+    assert f.conclusiva is False
+    assert f.regimes_nao_calibrados == ["vol_media"]
+
+
+def test_TRES_ESTADOS_tirar_o_SEM_override_do_perfil_muda_o_HASH(conn):
+    """A exigência que torna o estado 2 parte da identidade.
+
+    Se `calibrado_sem_override` não entrasse no hash, um perfil com a medição
+    e um perfil sem ela seriam o MESMO objeto — e a identidade executável não
+    distinguiria "medi e a base basta" de "não medi". A certificação do passo
+    9 estaria certificando duas coisas diferentes sob o mesmo número.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    com = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000,
+        decisoes=[ov("vol_alta", 2_000), ov("vol_baixa", 1_000)],
+    )
+    sem = perfil_mod.calcular_hash(
+        spread_bps_base_x1000=1_000, decisoes=[ov("vol_alta", 2_000)],
+    )
+    assert com != sem, (
+        "tirar o regime calibrado SEM override não mudou o hash: a identidade"
+        " deixou de distinguir medição de ausência de medição"
+    )
+
+    # E os dois perfis coexistem no banco, cada um com o seu hash.
+    a = _perfil(conn, decisoes=[ov("vol_alta", 2_000), ov("vol_baixa", 1_000)])
+    b = _perfil(conn, decisoes=[ov("vol_alta", 2_000)])
+    assert a.hash == com and b.hash == sem and a.hash != b.hash
+
+
+def test_TRES_ESTADOS_sem_override_NAO_e_nao_calibrado(conn):
+    """A confusão que o usuário mandou impedir, exercida pelos dois lados.
+
+    Os dois usam a base como valor efetivo — e é só isso que têm em comum. Um
+    foi medido e o outro não, e o perfil tem de dizer qual é qual sem que
+    ninguém precise saber de antemão.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    p = _perfil(conn, decisoes=[ov("vol_baixa", 1_000)])
+
+    # O MESMO valor efetivo nos dois.
+    assert p.spread_bps_x1000("vol_baixa")[0] == 1_000
+    assert p.spread_bps_x1000("vol_media")[0] == 1_000
+
+    # E ESTADOS DIFERENTES — é isso que estava impossível de distinguir.
+    assert p.estado("vol_baixa") != p.estado("vol_media")
+    assert p.estado("vol_baixa") == perfil_mod.CALIBRADO_SEM_OVERRIDE
+    assert p.estado("vol_media") == perfil_mod.NAO_CALIBRADO
+
+    # O segundo elemento de `spread_bps_x1000` diz CALIBRADO, e não "subiu".
+    assert p.spread_bps_x1000("vol_baixa")[1] is True
+    assert p.spread_bps_x1000("vol_media")[1] is False
+
+    # No banco: um tem linha, o outro não.
+    regimes = {
+        r["regime"] for r in conn.execute(
+            "SELECT regime FROM calibracao_perfil_regime WHERE perfil_hash = ?",
+            (p.hash,),
+        )
+    }
+    assert regimes == {"vol_baixa"}
+
+
+def test_TRES_ESTADOS_o_BANCO_recusa_estado_que_discorda_do_VALOR(conn):
+    """`tem_override` é gravado e derivável — então pode divergir, e o banco impede.
+
+    O preço de gravar algo derivável é poder divergir dele. É esse preço que o
+    gatilho `calibracao_perfil_regime_estado_coerente` paga, e ele impõe a
+    garantia 5 pela segunda ponta: override que não SOBE não é override.
+    """
+    from app.calibracao import perfil as perfil_mod
+
+    p = _perfil(conn, decisoes=[ov("vol_baixa", 1_674)])
+
+    def cru(regime, valor, tem_override):
+        return conn.execute(
+            "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
+            " spread_bps_x1000, n, p10_mili_bps, tem_override, motivo)"
+            " VALUES (?,?,?,500,163,?,'x')",
+            (p.hash, regime, valor, tem_override),
+        )
+
+    # `tem_override = 0` com valor DIFERENTE da base.
+    with pytest.raises(sqlite3.IntegrityError) as e1:
+        cru("vol_media", 2_000, 0)
+    assert "discordam" in str(e1.value)
+
+    # `tem_override = 1` com valor IGUAL à base — override que não sobe.
+    with pytest.raises(sqlite3.IntegrityError) as e2:
+        cru("vol_media", 1_000, 1)
+    assert "discordam" in str(e2.value)
+
+    # E o Python recusa os mesmos dois casos, antes do `INSERT`.
+    for valor, tem in ((2_000, False), (1_000, True)):
+        with pytest.raises(perfil_mod.RegimeInvalido):
+            perfil_mod.gravar(
+                conn, spread_bps_base_x1000=1_000,
+                decisoes=[perfil_mod.Decisao(
+                    regime="vol_alta", spread_bps_x1000=valor,
+                    tem_override=tem, n=1, p10_mili_bps=1, motivo="x")],
+            )
+
+    # Os dois coerentes entram.
+    cru("vol_media", 1_000, 0)
+    cru("vol_alta", 3_000, 1)
+
+
+def test_TRES_ESTADOS_a_SEGUNDA_finalizacao_da_mesma_janela_e_RECUSADA(
+    conn, cfg
+):
+    """O `UNIQUE (janela_calibracao_id)` continua valendo com os três estados.
+
+    Ele é o que fixa em UMA a quantidade de identidades calibradas — e o
+    estado novo não abre uma segunda porta: `aplicar` devolve a finalização
+    que existe, e um `INSERT` cru bate no `UNIQUE`.
+    """
+    from app.settings import get_settings
+
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
+    fechar_regime_medido(conn, cfg)
+
+    primeira = ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="t",
+        settings=get_settings(),
+    )
+    assert primeira["aplicado"] is True
+    assert primeira["por_estado"]["calibrado_sem_override"] == ["vol_baixa"]
+
+    # IDEMPOTENTE: devolve a mesma, sem escrever.
+    segunda = ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="t",
+        settings=get_settings(),
+    )
+    assert segunda["calibracao_id"] == primeira["calibracao_id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM calibracao_versao"
+    ).fetchone()[0] == 1
+
+    # E o BANCO recusa a segunda por `INSERT` cru.
+    jc = conn.execute(
+        "SELECT id, de_ms, ate_ms_exclusive FROM janela_calibracao"
+    ).fetchone()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO calibracao_versao (contrato, venue, symbol,"
+            " config_version_origem, janela_calibracao_id, calibracao_de_ms,"
+            " calibracao_ate_ms_exclusive, delta_mili_bps, n,"
+            " n_efetivo_x1000, tau_x1000, sigma_e_x1000, p10_mili_bps,"
+            " n_necessario, aplicado, motivo, criado_em)"
+            " VALUES (?,'binance','BTCUSDT',1,?,?,?,500,10,10000,1000,100,"
+            " 600,5,0,'segunda','x')",
+            (CONTRATO, jc["id"], jc["de_ms"], jc["ate_ms_exclusive"]),
+        )
+
+
+def test_TRES_ESTADOS_a_REVALIDACAO_preve_sob_o_PERFIL_e_nao_sob_a_base(
+    conn, cfg
+):
+    """Um defeito achado ao implementar isto, e ele era material.
+
+    `observacao.calcular` chamava `prever` sem override, então
+    `P_exec_previsto` saía sempre da BASE — inclusive numa linha que declarava
+    `calibracao_perfil_hash` de um perfil com override.
+
+    Na calibração isso é correto: `p10(E2)` tem de ser medido sob a base,
+    porque é dele que o déficit sai. **Na revalidação é errado**: ela existe
+    para confirmar `LB95(p10(E2)) >= 0` sob o simulador que a calibração
+    produziu, e medi-lo sob a base confirmaria outro simulador.
+    """
+    from decimal import Decimal
+
+    from app.calibracao import observacao
+
+    abertura = 60_000_00000000
+    amostra = {"bid": abertura - 10, "ask": abertura + 10,
+               "bid_qty": 10**12, "ask_qty": 10**12}
+
+    base = observacao.calcular(
+        t_grid_ms=T0, lado="compra", abertura=abertura, amostra=amostra,
+        config=cfg.config, orcamento_cents=1, spread_bps=None,
+    )
+    com_override = observacao.calcular(
+        t_grid_ms=T0, lado="compra", abertura=abertura, amostra=amostra,
+        config=cfg.config, orcamento_cents=1,
+        spread_bps=Decimal(cfg.config.spread_bps) * 3,
+    )
+    assert com_override.p_exec_previsto > base.p_exec_previsto, (
+        "o override não chegou à previsão: a revalidação confirmaria a base"
+    )
+    assert com_override.e2_mili_bps > base.e2_mili_bps
+
+    # E `None` reproduz o comportamento histórico byte a byte.
+    de_novo = observacao.calcular(
+        t_grid_ms=T0, lado="compra", abertura=abertura, amostra=amostra,
+        config=cfg.config, orcamento_cents=1,
+    )
+    assert de_novo.p_exec_previsto == base.p_exec_previsto
+
+
+def test_TRES_ESTADOS_sem_override_TAMBEM_gera_janela_de_revalidacao(
+    conn, cfg
+):
+    """A exigência que fecha o caso: `calibrado_sem_override` é confirmável.
+
+    > "ambos podem gerar janela de revalidação depois da segunda certificação"
+
+    Antes de 2026-10-14 ele não podia, e por uma cadeia inteira: sem override
+    não nascia perfil, sem perfil não nascia `config_version`, e sem ela
+    `selar_revalidacao` levantava `NadaACalibrar`. A conclusão "a base já
+    basta" ficava **sem confirmação possível**.
+
+    E a revalidação dele roda sob a base — que é o valor efetivo dele.
+    """
+    from app.settings import get_settings
+
+    # A fonte de dados e componente do ALVO, e sem ela nao ha alvo a conferir.
+    semear_dataset(conn)
+    montar_piloto(conn, cfg, ask=ASK_PESSIMISTA, instantes=1_400)
+    fechar_regime_medido(conn, cfg)
+    final = ajuste.aplicar(
+        conn, contrato=CONTRATO, venue="binance", symbol="BTCUSDT",
+        config=cfg.config, config_version_id=cfg.id, autor="teste",
+        settings=get_settings(),
+    )
+    assert final["por_estado"]["calibrado_sem_override"] == [REGIME_DE_TESTE]
+    assert final["por_estado"]["calibrado_com_override"] == []
+
+    # A SEGUNDA CERTIFICAÇÃO — o passo 9. Sem ela a janela é recusada.
+    with pytest.raises(ajuste.IdentidadeCalibradaNaoCertificada):
+        _selar(conn)
+    certificar(conn)
+
+    janela = _selar(conn)
+    assert janela["regime"] == REGIME_DE_TESTE
+    assert janela["identidade_executavel"].endswith(
+        final["calibracao_perfil_hash"]
+    ), "a janela confirma o perfil que a calibração consolidou"
+
+    # E o valor sob o qual ela confirma é a BASE, porque é o efetivo dele.
+    from app.calibracao import perfil as perfil_mod
+
+    perf = perfil_mod.ler(conn, final["calibracao_perfil_hash"])
+    assert perf.estado(REGIME_DE_TESTE) == perfil_mod.CALIBRADO_SEM_OVERRIDE
+    assert perf.spread_bps_x1000(REGIME_DE_TESTE) == (
+        int(float(cfg.config.spread_bps) * 1000), True
+    )
+
+    # O NÃO CALIBRADO continua sem janela: não há fechamento de onde partir.
+    with pytest.raises(ajuste.CalibracaoDoRegimeNaoFechada):
+        _selar(conn, regime="vol_alta")
 
 
 def test_regime_SEM_override_usa_a_BASE_e_nunca_o_de_outro(conn, cfg):
@@ -2381,7 +2877,7 @@ def test_regime_SEM_override_usa_a_BASE_e_nunca_o_de_outro(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)]
     )
 
     assert p.spread_bps_x1000("vol_baixa") == (1_674, True)
@@ -2399,7 +2895,7 @@ def test_INDEFINIDO_nunca_herda_parametro_de_ninguem(conn, cfg):
     with pytest.raises(perfil_mod.RegimeInvalido) as e:
         perfil_mod.gravar(
             conn, spread_bps_base_x1000=1_000,
-            overrides=[ov("indefinido", 1_674)],
+            decisoes=[ov("indefinido", 1_674)],
         )
     assert "nunca pode herdar" in str(e.value)
 
@@ -2407,7 +2903,7 @@ def test_INDEFINIDO_nunca_herda_parametro_de_ninguem(conn, cfg):
 def test_o_BANCO_tambem_recusa_override_para_indefinido(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
-    p = perfil_mod.gravar(conn, spread_bps_base_x1000=1_000, overrides=[])
+    p = perfil_mod.gravar(conn, spread_bps_base_x1000=1_000, decisoes=[])
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
@@ -2422,7 +2918,7 @@ def test_a_AUSENCIA_de_linha_e_a_informacao(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)]
     )
     linhas = [
         r["regime"] for r in conn.execute(
@@ -2444,11 +2940,11 @@ def test_o_hash_do_perfil_inclui_a_TAXONOMIA(conn, cfg, monkeypatch):
     from app.regime import deteccao
 
     antes = perfil_mod.calcular_hash(
-        spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+        spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)]
     )
     monkeypatch.setattr(deteccao, "CORTE_SUPERIOR_MILI_BPS", 25_400)
     depois = perfil_mod.calcular_hash(
-        spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+        spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)]
     )
     assert antes != depois
 
@@ -2458,11 +2954,11 @@ def test_o_hash_nao_depende_da_ORDEM_de_insercao(conn, cfg):
 
     a = perfil_mod.calcular_hash(
         spread_bps_base_x1000=1_000,
-        overrides=[ov("vol_alta", 2_000), ov("vol_baixa", 1_674)],
+        decisoes=[ov("vol_alta", 2_000), ov("vol_baixa", 1_674)],
     )
     b = perfil_mod.calcular_hash(
         spread_bps_base_x1000=1_000,
-        overrides=[ov("vol_baixa", 1_674), ov("vol_alta", 2_000)],
+        decisoes=[ov("vol_baixa", 1_674), ov("vol_alta", 2_000)],
     )
     assert a == b
 
@@ -2471,9 +2967,9 @@ def test_gravar_e_IDEMPOTENTE_pelo_hash(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     a = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
     b = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
     assert a.hash == b.hash
     assert conn.execute(
         "SELECT COUNT(*) FROM calibracao_perfil").fetchone()[0] == 1
@@ -2483,7 +2979,7 @@ def test_o_perfil_e_IMUTAVEL(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
     with pytest.raises(sqlite3.IntegrityError) as e:
         conn.execute("UPDATE calibracao_perfil SET spread_bps_base_x1000 = 2")
     assert "perfil NOVO" in str(e.value)
@@ -2509,7 +3005,7 @@ def test_o_vinculo_e_feito_no_INSERT_e_a_linha_nao_muda(conn, cfg):
         "função que o banco impede de rodar não deve existir"
     )
     a = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
     with pytest.raises(sqlite3.IntegrityError) as e:
         conn.execute(
             "UPDATE config_version SET calibracao_perfil_hash = ? WHERE id = ?",
@@ -2564,7 +3060,7 @@ def test_regime_nao_calibrado_deixa_o_resultado_INCONCLUSIVO(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
 
     f = perfil_mod.fidelidade(p, ["vol_baixa", "vol_baixa"])
     assert f.conclusiva is True
@@ -2580,7 +3076,7 @@ def test_periodo_so_com_INDEFINIDO_tambem_e_inconclusivo(conn, cfg):
     from app.calibracao import perfil as perfil_mod
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)])
     f = perfil_mod.fidelidade(p, [None, None])
     assert f.conclusiva is False
     assert f.regimes_nao_calibrados == ["indefinido"]
@@ -2642,7 +3138,7 @@ def test_perfis_DIFERENTES_dao_identidades_diferentes_com_o_MESMO_config_hash(
     from app.settings import get_settings
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_baixa", 1_674)]
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_baixa", 1_674)]
     )
     v2 = config_service.criar_versao(
         conn, get_settings(), {}, author="teste", note="perfil",
@@ -2689,7 +3185,7 @@ def test_o_run_PERSISTE_o_perfil_que_usou(conn, cfg):
     livro.encerrar_run(conn, run_antigo, "concluido")
 
     p = perfil_mod.gravar(
-        conn, spread_bps_base_x1000=1_000, overrides=[ov("vol_alta", 2_000)])
+        conn, spread_bps_base_x1000=1_000, decisoes=[ov("vol_alta", 2_000)])
     config_service.criar_versao(
         conn, get_settings(), {}, author="t", note="perfil",
         calibracao_perfil_hash=p.hash,
@@ -2797,7 +3293,7 @@ def test_a_REANCORAGEM_nao_perde_o_perfil_de_calibracao(conn, cfg):
 
     p = perfil_mod.gravar(
         conn, spread_bps_base_x1000=1_000,
-        overrides=[perfil_mod.Override("vol_baixa", 1_674, 500, 163)],
+        decisoes=[ov("vol_baixa", 1_674)],
     )
     v2 = config_service.criar_versao(
         conn, get_settings(), {}, author="t", note="perfil",

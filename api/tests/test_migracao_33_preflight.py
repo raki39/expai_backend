@@ -190,11 +190,82 @@ def _versao(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_o_PREFLIGHT_esta_ligado_a_migracao_33_e_nao_a_outra(em_32):
-    """A lista não é um `if` perdido: ela é um mapa por versão, e só a 33 está
-    nele — porque só ela é destrutiva."""
-    assert sorted(store.PREFLIGHT) == [33]
+def test_o_PREFLIGHT_esta_ligado_a_VERSAO_e_cada_um_tem_motivo(em_32):
+    """A lista não é um `if` perdido: é um mapa por versão.
+
+    A 33 está nele porque **destrói** — ela recria cinco tabelas. A 35 está
+    porque **rotula**: ela acrescenta `tem_override` com `DEFAULT 1`, e um
+    rótulo errado não aparece em número nenhum. São motivos diferentes para a
+    mesma precaução, e por isso os dois são nomeados aqui.
+
+    Uma versão nova no mapa quebra este teste até alguém dizer qual dos dois
+    motivos ela tem — ou que não tem nenhum e saiu do mapa.
+    """
+    assert sorted(store.PREFLIGHT) == [33, 35]
     assert set(RECRIADAS) <= set(store._preflight_33.__doc__ and RECRIADAS)
+    # E cada um confere a coisa que o seu motivo nomeia.
+    assert "vazias" in store._preflight_33.__doc__
+    assert "DEFAULT" in store._preflight_35.__doc__
+
+
+def test_o_PREFLIGHT_35_PARA_quando_o_rotulo_mentiria(em_32):
+    """Uma linha antiga cujo valor já é a base seria rotulada como override.
+
+    Em produção não há linha nenhuma — a identidade vigente termina em
+    `sem-perfil` —, mas "não havia quando eu olhei" não é garantia. A
+    conferência roda na mesma transação, imediatamente antes do `ALTER`.
+    """
+    em_32.execute(
+        "INSERT INTO calibracao_perfil (hash,"
+        " taxonomia_corte_inferior_mili_bps, taxonomia_corte_superior_mili_bps,"
+        " taxonomia_janela_barras, taxonomia_permanencia_barras,"
+        " spread_bps_base_x1000, criado_em)"
+        " VALUES (?,19300,25300,672,672,1000,'x')", ("p" * 64,)
+    )
+    # Uma linha cujo valor JÁ É a base: sob a semântica nova ela é
+    # `calibrado_sem_override`, e o `DEFAULT 1` a descreveria errado.
+    em_32.execute(
+        "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
+        " spread_bps_x1000, n, p10_mili_bps) VALUES (?,'vol_baixa',1000,5,600)",
+        ("p" * 64,)
+    )
+    with pytest.raises(store.PreflightFalhou) as e:
+        store.migrar(em_32)
+    assert "vol_baixa" in str(e.value)
+    assert store.versao_schema(em_32) < 35, (
+        "a migração 35 entrou mesmo com o preflight recusando"
+    )
+
+
+def test_o_PREFLIGHT_35_NAO_recusa_override_de_verdade(em_32):
+    """A outra metade, e sem ela a de cima mostraria só que nada passa.
+
+    O preflight recusa o caso que **mentiria** — valor igual à base —, e não a
+    existência de linha. Uma linha que é override de verdade atravessa, e o
+    `DEFAULT 1` a descreve corretamente.
+
+    Em teste separado porque `calibracao_perfil_regime` é append-only: o
+    gatilho de `DELETE` recusa, corretamente, e desfazer a linha do teste
+    anterior é impossível por desenho.
+    """
+    em_32.execute(
+        "INSERT INTO calibracao_perfil (hash,"
+        " taxonomia_corte_inferior_mili_bps, taxonomia_corte_superior_mili_bps,"
+        " taxonomia_janela_barras, taxonomia_permanencia_barras,"
+        " spread_bps_base_x1000, criado_em)"
+        " VALUES (?,19300,25300,672,672,1000,'x')", ("p" * 64,)
+    )
+    em_32.execute(
+        "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
+        " spread_bps_x1000, n, p10_mili_bps) VALUES (?,'vol_baixa',1674,5,163)",
+        ("p" * 64,)
+    )
+    assert store.migrar(em_32) == migrations.MIGRACOES[-1][0]
+    linha = em_32.execute(
+        "SELECT tem_override, motivo FROM calibracao_perfil_regime"
+    ).fetchone()
+    assert int(linha["tem_override"]) == 1
+    assert "semantica antiga" in linha["motivo"]
 
 
 # ===========================================================================

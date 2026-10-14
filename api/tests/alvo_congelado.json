@@ -33,6 +33,10 @@
    {
     "implementacao_hash": "77656fd3f80fedb4",
     "o_que_era": "a sexta versao, antes de a janela de revalidacao exigir que a identidade calibrada esteja CERTIFICADA (2026-10-13): a migracao 33 ganhou `alvo_hash` e `identidade_executavel` em `janela_revalidacao`, e os tres gatilhos (d), (e) e (f)"
+   },
+   {
+    "implementacao_hash": "d0c9b3a0c878ca09",
+    "o_que_era": "a setima versao, antes de os TRES estados por regime existirem (2026-10-14): a migracao 35 separou `calibrado_sem_override` de `nao_calibrado`, e a ausencia de linha em `calibracao_perfil_regime` voltou a significar UMA coisa"
    }
   ],
   "o_que_falta": "RECERTIFICAR os cinco escopos, e a OP-3 entra nesta mesma janela. Ate la nenhum resultado pode ser citado como certificado sob o alvo novo",
@@ -49,7 +53,7 @@
   "quando": "2026-09-22, revisado em 2026-10-07"
  },
  "conferido": "o hash canonico da implementacao calculado no Windows e o reportado pelo container Linux sao o MESMO numero - a OP-2 funcionando entre maquinas",
- "implementacao_hash": "d0c9b3a0c878ca09",
+ "implementacao_hash": "f13f84039a4616c3",
  "implementacao_hash_anterior": "ed239872e6ae9bdb",
  "implementacao_hash_em_producao": "ed239872e6ae9bdb",
  "modulos": {
@@ -108,7 +112,7 @@
   "app.maos_rapidas.curva": "3e151cd08c596bcb",
   "app.maos_rapidas.executor": "93b993bd8ec75b28",
   "app.maos_rapidas.series": "cb00bb6b7aeb20ae",
-  "app.migrations": "062380aa664a4a26",
+  "app.migrations": "c4c1938ea6c3be42",
   "app.regra": "535d0d7fd77dc5a3",
   "app.regra.registro": "a607bd3fe6b591a2",
   "app.regra.schema": "8129afb3eab83763",
@@ -118,7 +122,7 @@
   "app.settings": "9eaeee2d679f1834",
   "app.simulador": "2f947532633d7877",
   "app.simulador.execucao": "9710b8dd2b69300a",
-  "app.store": "6d411511dbe5b0e1",
+  "app.store": "3bc28bdb1bb10ee2",
   "app.validador": "18c8ea673b8f5ef8",
   "app.validador.contador": "da2a3df97046531f",
   "app.validador.estados": "c9af9416fef92544",
