@@ -513,6 +513,75 @@ def test_ENSAIO_os_TRES_gatilhos_do_parcelado_deixaram_de_ser_do_a1a(em_32):
     assert sorted(esc.PLANOS) == ["a1a", "a2"]
 
 
+def test_ENSAIO_o_caminho_vai_ate_a_35_e_os_artefatos_DELA_existem(em_32):
+    """O caminho completo `32 -> 33 -> 34 -> 35`, afirmado e nao implicado.
+
+    Os outros testes do ensaio comparam com `MIGRACOES[-1][0]`, que e o certo:
+    uma migracao nova quebra a suite pedindo decisao. Mas comparar com o
+    ultimo **nao afirma o que o ultimo faz** — se a 35 fosse removida, todos
+    eles continuariam passando contra a 34.
+
+    Este nomeia os artefatos dela: as duas colunas e o gatilho. E nomeia
+    tambem o VALOR do `DEFAULT`, porque e ele que rotula o passado.
+    """
+    _contrato_e_piloto(em_32)
+
+    # Em 32 as colunas NAO existem — o ponto de partida e real.
+    antes = {r["name"] for r in em_32.execute(
+        "PRAGMA table_info(calibracao_perfil_regime)")}
+    assert "tem_override" not in antes
+    assert "motivo" not in antes
+
+    assert store.migrar(em_32) == 35, (
+        "o ensaio tem de chegar a 35: a representacao dos tres estados vive"
+        " nela, e um caminho que parasse na 34 nao a exercitaria"
+    )
+
+    colunas = {
+        r["name"]: r for r in em_32.execute(
+            "PRAGMA table_info(calibracao_perfil_regime)")
+    }
+    for campo in ("tem_override", "motivo"):
+        assert campo in colunas, campo
+        assert int(colunas[campo]["notnull"]) == 1, campo
+        assert colunas[campo]["dflt_value"] is not None, (
+            f"{campo} sem DEFAULT: o `ALTER` de uma coluna NOT NULL exige um,"
+            f" e e ele que descreve as linhas que ja existiam"
+        )
+    assert colunas["tem_override"]["dflt_value"] == "1", (
+        "o DEFAULT tem de ser 1: sob a semantica antiga do ADR 0033 uma linha"
+        " so existia para regime COM override, e um DEFAULT 0 rotularia todas"
+        " elas como `calibrado_sem_override`"
+    )
+
+    gatilhos = {r["name"] for r in em_32.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger'")}
+    assert "calibracao_perfil_regime_estado_coerente" in gatilhos
+
+    # E ele FUNCIONA sobre a copia migrada — nao basta existir.
+    em_32.execute(
+        "INSERT INTO calibracao_perfil (hash,"
+        " taxonomia_corte_inferior_mili_bps, taxonomia_corte_superior_mili_bps,"
+        " taxonomia_janela_barras, taxonomia_permanencia_barras,"
+        " spread_bps_base_x1000, criado_em)"
+        " VALUES (?,19300,25300,672,672,1000,'x')", ("e" * 64,)
+    )
+    with pytest.raises(sqlite3.IntegrityError) as e:
+        em_32.execute(
+            "INSERT INTO calibracao_perfil_regime (perfil_hash, regime,"
+            " spread_bps_x1000, n, p10_mili_bps, tem_override, motivo)"
+            " VALUES (?,'vol_baixa',2000,5,600,0,'x')", ("e" * 64,)
+        )
+    assert "discordam" in str(e.value)
+
+    # Os TRES estados, pelo modulo que os define, sobre a copia migrada.
+    from app.calibracao import perfil as perfil_mod
+
+    assert perfil_mod.ESTADOS == (
+        "nao_calibrado", "calibrado_sem_override", "calibrado_com_override",
+    )
+
+
 def test_ENSAIO_a_implementacao_nova_aparece_INVALIDADA(em_32):
     """A conferencia 8, e ela nao depende do banco.
 
