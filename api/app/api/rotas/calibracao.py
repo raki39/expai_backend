@@ -283,46 +283,34 @@ def estado(
 
     erro: dict[str, Any] = {"estado": "piloto_em_andamento"}
     if janela is not None:
-        # `serie_e2_do_piloto`, com a finalidade LITERAL no SQL. E o que este
-        # bloco sempre quis dizer - ele le a janela do PILOTO -, e agora o nome
-        # da funcao afirma isso. O `config_version_id` saiu: a identidade da
-        # janela e congelada pelo gatilho, e filtrar por ela aqui deixaria a
-        # serie depender da config vigente no momento da leitura.
-        e2 = observacao.serie_e2_do_piloto(
-            conn, contrato=contrato, venue=venue, symbol=symbol, lado=lado,
-            de_ms=janela.de_ms, ate_ms_exclusive=janela.ate_ms_exclusive,
-        )
+        # DELEGADO a `dimensionamento`, e nao recalculado aqui.
+        #
+        # Este bloco reimplementava a estimativa do piloto e a publicava com as
+        # chaves `p10_mili_bps`, `limite_inferior_95_mili_bps` e `pessimista` -
+        # **byte a byte as mesmas** que `ajuste` usa para o p10 que AJUSTA
+        # (ajuste.py, `estimar_por_regime`) e para o LB95 que CONFIRMA
+        # (`revalidar`). Duas grandezas de finalidades diferentes sob um nome
+        # so: quem lesse o diagnostico do piloto leria um ajuste.
+        #
+        # `pessimista` era o pior dos tres. Ele e `LB95 >= 0`, que e literal e
+        # exatamente `REGRAS_DA_REVALIDACAO["alvo"]` - o criterio de
+        # revalidacao -, calculado sobre a janela do PILOTO e publicado como
+        # veredito booleano. O ADR 0027 par.5 e o ADR 0041 sao explicitos em
+        # que os dados do piloto ficam fora da revalidacao; um campo que
+        # responde a pergunta dela sobre a serie errada e a forma mais direta
+        # de atravessar essa fronteira.
+        #
+        # `dimensionamento.como_dict()` ja era o contrato correto - nomes
+        # `*_diagnostico`, aninhados, com o que eles NAO sao escrito ao lado.
+        # Havia duas implementacoes da mesma coisa, e elas divergiram.
         try:
-            ic = bootstrap.limite_inferior_do_quantil(e2, 0.10)
-            sigma = bootstrap.desvio_padrao([float(v) for v in e2])
-            necessario = bootstrap.tamanho_necessario(
-                sigma_e=sigma, delta=500.0, tau=ic.tau.tau
+            d = dimensionamento.dimensionar(
+                conn, contrato=contrato, venue=venue, symbol=symbol,
+                config=versao.config, lado=lado,
             )
-            erro = {
-                "estado": "medido",
-                "o_que_isto_e": (
-                    "DIMENSIONAMENTO E DIAGNOSTICO, e nao calibracao. Do"
-                    " piloto saem `sigma_e`, `tau` e a forma da cauda (ADR"
-                    " 0027 par.5); o `p10` daqui NAO produz override de"
-                    " parametro. Quem calibra le a janela de CALIBRACAO, que e"
-                    " posterior e disjunta"
-                ),
-                "finalidade_da_serie": "piloto",
-                "n": ic.n,
-                "n_efetivo": round(ic.n_efetivo, 1),
-                "p10_mili_bps": round(ic.ponto, 1),
-                "limite_inferior_95_mili_bps": round(ic.limite_inferior, 1),
-                "pessimista": ic.limite_inferior >= 0,
-                "bloco": ic.bloco,
-                "tau": round(ic.tau.tau, 3),
-                "tau_bruto": round(ic.tau.tau_bruto, 3),
-                "ar1_plausivel": ic.tau.ar1_plausivel,
-                "sigma_e_mili_bps": round(sigma, 1),
-                "n_efetivo_necessario": necessario.n_efetivo,
-                "n_bruto_necessario": necessario.n_bruto,
-                "amostra_suficiente": ic.n_efetivo >= necessario.n_efetivo,
-            }
-        except bootstrap.SerieCurtaDemais as e:
+            erro = {"estado": "medido", **d.como_dict()}
+        except (dimensionamento.PilotoNaoMaterializado,
+                bootstrap.SerieCurtaDemais) as e:
             erro = {"estado": "amostra_insuficiente", "motivo": str(e)}
 
     return {
@@ -404,6 +392,283 @@ class PedidoPorRegime(PedidoDeAjuste):
     """
 
     regime: str = Field(pattern="^(vol_baixa|vol_media|vol_alta)$")
+
+
+@router.get("/previa-selamento")
+def previa_selamento(
+    request: Request,
+    venue: str = "binance",
+    symbol: str = "BTCUSDT",
+    contrato: str = CONTRATO_PADRAO,
+) -> dict[str, Any]:
+    """O que `selar-calibracao` GRAVARIA, sem gravar. Somente leitura.
+
+    Existe porque selar e **irreversivel e uma vez so** - `ler_janela_de_
+    calibracao` devolve a que existe, e uma segunda seria uma segunda chance
+    de escolher a fronteira. Conferir depois de gravar e conferir tarde.
+
+    **Os DOIS lados sao calculados**, e nao so o `compra` que `selar_calibracao`
+    usa por default. A regra que decide qual lado determina `n_exigido` **nao
+    esta declarada em lugar nenhum** - e um default de Python, herdado em
+    silencio -, entao publicar um lado so esconderia a escolha.
+    """
+    conn = _conn(request)
+    versao = config_service.versao_atual(conn)
+    if versao is None:
+        raise HTTPException(status_code=503, detail="sem config_version")
+
+    grade_ms = int(bbo.ler_contrato(conn, contrato).grade_ms)
+    serie_bbo = bbo.Serie(venue=venue, symbol=symbol,
+                          price_scale_exp=0, volume_scale_exp=0)
+    janela_p = piloto.ler(conn, serie_bbo, contrato)
+    if janela_p is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="o piloto nao fechou; nao ha o que prever",
+        )
+
+    ja = materializacao.ler_janela_de_calibracao(
+        conn, contrato=contrato, venue=venue, symbol=symbol
+    )
+
+    # A MESMA EXPRESSAO do `INSERT`, como SELECT. Reimplementa-la em Python
+    # daria um segundo lugar calculando a fronteira - foi por isso que
+    # `_agora_ms_do_banco` foi removida.
+    de_ms = int(conn.execute(
+        f"SELECT {ajuste.PRIMEIRA_GRADE_SQL}",
+        (grade_ms, grade_ms, janela_p.ate_ms_exclusive),
+    ).fetchone()[0])
+
+    por_lado: dict[str, Any] = {}
+    for lado in ("compra", "venda"):
+        try:
+            d = dimensionamento.dimensionar(
+                conn, contrato=contrato, venue=venue, symbol=symbol,
+                config=versao.config, lado=lado,
+            )
+        except (dimensionamento.PilotoNaoMaterializado,
+                bootstrap.SerieCurtaDemais) as e:
+            por_lado[lado] = {"estado": "sem_amostra", "motivo": str(e)}
+            continue
+        try:
+            duracao_ms, conta = dimensionamento.duracao_da_calibracao_ms(
+                d, grade_ms=grade_ms
+            )
+        except dimensionamento.SemHorizonteDerivavel as e:
+            duracao_ms, conta = None, {"erro": str(e)}
+        por_lado[lado] = {
+            "estado": "medido",
+            "n": d.n,
+            "sigma_e_mili_bps": round(d.sigma_e_mili_bps, 3),
+            "tau": round(d.tau, 4),
+            "n_exigido_global": d.n_exigido,
+            "n_bruto_exigido_global": d.n_bruto_exigido,
+            "regras_que_seriam_gravadas": [
+                {
+                    "regime": r.regime,
+                    "n_exigido_calibracao": r.n_exigido,
+                    "n_exigido_revalidacao": r.n_exigido,
+                    "sigma_e_mili_bps": (
+                        None if r.sigma_e_mili_bps is None
+                        else round(r.sigma_e_mili_bps, 3)
+                    ),
+                    "tau": None if r.tau is None else round(r.tau, 4),
+                    "piloto_n": r.n,
+                    "fracao_do_piloto_ppm": r.fracao_do_piloto_ppm,
+                    "barras_de_calendario": r.barras_de_calendario,
+                    "motivo": r.motivo,
+                    "entraria_na_tabela": r.n_exigido is not None,
+                }
+                for r in d.por_regime
+            ],
+            "duracao_calibracao_ms": duracao_ms,
+            "duracao_barras": (
+                None if duracao_ms is None else duracao_ms // grade_ms
+            ),
+            "duracao_horas_milesimos": (
+                None if duracao_ms is None
+                else round(duracao_ms / 3_600_000, 3)
+            ),
+            "ate_ms_exclusive": (
+                None if duracao_ms is None else de_ms + duracao_ms
+            ),
+            "horizonte_derivado": conta,
+        }
+
+    return {
+        "o_que_isto_e": (
+            "PREVIA. Nada e gravado. Mostra exatamente o que"
+            " `POST /api/calibracao/selar-calibracao` escreveria em"
+            " `janela_calibracao` e `calibracao_regime_regra` se fosse"
+            " chamado agora"
+        ),
+        "ja_existe_janela_selada": ja is not None,
+        "alvo_e_identidade": _alvo_e_identidade(conn, versao),
+        "janela_que_seria_gravada": {
+            "de_ms": de_ms,
+            "primeira_grade_admissivel": (
+                "a PROXIMA fronteira de grade estritamente depois do"
+                " selamento, e nunca antes do fim do piloto. Calculada pelo"
+                " relogio do BANCO dentro do INSERT; o gatilho"
+                " `janela_calibracao_de_ms_calculado_pelo_banco` recalcula a"
+                " mesma conta e recusa qualquer outro valor"
+            ),
+            "expressao": ajuste.PRIMEIRA_GRADE_SQL,
+            "piloto_ate_ms_exclusive": janela_p.ate_ms_exclusive,
+            "grade_ms": grade_ms,
+            "delta_mili_bps": ajuste.DELTA_MILI_BPS,
+            "regras_da_revalidacao": dict(ajuste.REGRAS_DA_REVALIDACAO),
+            "dias_revalidacao": ajuste.DIAS_REVALIDACAO,
+            "de_ms_anda_com_o_relogio": (
+                "este `de_ms` vale para o instante desta leitura. Selar mais"
+                " tarde empurra a fronteira, porque ela e a proxima grade"
+                " depois do selamento - e so ela"
+            ),
+        },
+        "por_lado": por_lado,
+        "o_lado_NAO_TEM_REGRA_DECLARADA": _o_lado_nao_tem_regra(),
+        "o_piso_de_10_NAO_e_autorizacao": _o_piso_de_10(),
+        "permanencia_e_cobertura": _permanencia_e_cobertura(),
+    }
+
+
+def _alvo_e_identidade(conn, versao) -> dict[str, Any]:
+    from ...certificacao import alvo as alvo_mod
+    from ...certificacao import escopos as escopos_mod
+
+    meta = dataset_loader.dataset_vigente(conn)
+    fonte = None if meta is None else (
+        getattr(meta, "sha256", None) or getattr(meta, "hash", None)
+    )
+    perfil_vigente = _perfil_da_versao(conn, versao.id)
+    if fonte is None:
+        # DECLARA em vez de levantar. A previa e leitura, e um 500 aqui
+        # esconderia tudo o mais que ela tem a dizer - `n_exigido` por regime,
+        # o piso, a cobertura - por causa de um componente do alvo que nao
+        # existe neste ambiente.
+        return {
+            "alvo_de_certificacao_hash": None,
+            "por_que_nao": (
+                "nao ha dataset vigente, e o alvo tem a fonte de dados como"
+                " componente. Sem ela o alvo nao e derivavel - e inventar um"
+                " seria publicar um hash que nao descreve laboratorio nenhum"
+            ),
+            "config_version_id": versao.id,
+            "calibracao_perfil_hash": perfil_vigente,
+            "e_a_identidade_BASE": perfil_vigente == SEM_PERFIL,
+        }
+    o_alvo = alvo_mod.montar(conn, dataset_hash=fonte)
+    alvo_hash = o_alvo["alvo_de_certificacao_hash"]
+    comp = escopos_mod.composicao(conn, alvo_hash)
+    return {
+        "alvo_de_certificacao_hash": alvo_hash,
+        "identidade_executavel": o_alvo["componentes"]["identidade_executavel"],
+        "config_version_id": versao.id,
+        "calibracao_perfil_hash": perfil_vigente,
+        "e_a_identidade_BASE": perfil_vigente == SEM_PERFIL,
+        "certificacao_do_alvo": {
+            "passa": comp["passa"],
+            "certificados": comp["certificados"],
+            "pendentes": comp["pendentes"],
+        },
+        "o_que_selar_NAO_confere": (
+            "`selar-calibracao` NAO exige alvo certificado - quem exige e"
+            " `selar-revalidacao`, por gatilho. Selar a calibracao sob"
+            " laboratorio nao certificado produziria observacao que o passo 3"
+            " do runbook existe para preceder"
+        ),
+    }
+
+
+def _o_lado_nao_tem_regra() -> dict[str, Any]:
+    return {
+        "fato": (
+            "`ajuste.selar_calibracao` chama `dimensionamento.dimensionar`"
+            " SEM passar `lado`, entao o `n_exigido` de cada regime e"
+            " congelado a partir do lado COMPRA - pelo default de Python, e"
+            " nao por regra escrita"
+        ),
+        "e_o_corpo_do_pedido_nao_resolve": (
+            "`PedidoDeAjuste` aceita `lado` e `selar_calibracao` nao tem esse"
+            " parametro: o campo viaja no POST e e DESCARTADO. Ele parece"
+            " escolher e nao escolhe"
+        ),
+        "e_fechar_regime_usa_o_lado_do_PEDIDO": (
+            "a rota `fechar-regime` passa `lado=pedido.lado` para"
+            " `ajuste.medir_regime`. Entao da para congelar `n_exigido` do"
+            " lado COMPRA e fechar o regime contando observacoes do lado"
+            " VENDA, contra um limiar derivado da outra populacao"
+        ),
+        "o_que_falta": (
+            "uma DECISAO declarada - compra, venda, o maior dos dois, ou"
+            " `n_exigido` por lado -, tomada por argumento e nao olhando"
+            " qual lado da o numero menor"
+        ),
+    }
+
+
+def _o_piso_de_10() -> dict[str, Any]:
+    return {
+        "o_que_o_10_e": (
+            f"`MINIMO_PARA_O_QUANTIL = {bootstrap.MINIMO_PARA_O_QUANTIL}` e o"
+            f" tamanho a partir do qual o bootstrap de quantil EXISTE. Abaixo"
+            f" dele `limite_inferior_do_quantil` levanta `SerieCurtaDemais`"
+        ),
+        "o_que_o_10_NAO_e": (
+            "NAO e alvo, NAO e autorizacao para fechar um regime, e NAO"
+            " substitui `n_exigido`. Fechar com 10 observacoes so seria"
+            " legitimo se `n_exigido` daquele regime fosse 10 por derivacao"
+            " de `sigma_e` - e mesmo ai o numero sai da formula, nao do piso"
+        ),
+        "onde_o_piso_entra": (
+            "em `_por_regime`, como `max(n_bruto, MINIMO_PARA_O_QUANTIL)`, e"
+            " so para converter observacoes em CALENDARIO. Ele impede a"
+            " janela de ser dimensionada para uma medicao que nao acontece;"
+            " nao autoriza parar nela"
+        ),
+        "o_risco_concreto": (
+            "quando `sigma_e` e pequeno, a formula devolve menos que 10 e o"
+            " piso vence. A duracao derivada fica MUITO curta, e uma janela"
+            " curta nao da tempo de os outros regimes aparecerem - ver"
+            " `permanencia_e_cobertura`"
+        ),
+        "formula": "n_exigido = ceil(K * (z * sigma_e / delta)^2)",
+        "K": bootstrap.K_QUANTIL_P10,
+        "z": bootstrap.Z_95_BILATERAL,
+        "delta_mili_bps": ajuste.DELTA_MILI_BPS,
+    }
+
+
+def _permanencia_e_cobertura() -> dict[str, Any]:
+    from ...regime import deteccao
+
+    return {
+        "janela_causal_barras": deteccao.JANELA_BARRAS,
+        "permanencia_barras": deteccao.PERMANENCIA_BARRAS,
+        "permanencia_dias": deteccao.PERMANENCIA_BARRAS * 15 / 60 / 24,
+        "regimes_minimos": deteccao.REGIMES_MINIMOS,
+        "como_eles_interagem_com_o_piso": (
+            "sao reguas DIFERENTES e nenhuma domina a outra."
+            " `n_exigido` conta OBSERVACOES de um regime;"
+            f" `PERMANENCIA_BARRAS = {deteccao.PERMANENCIA_BARRAS}` exige"
+            " barras CONSECUTIVAS no mesmo regime para que exista EPISODIO; e"
+            f" `REGIMES_MINIMOS = {deteccao.REGIMES_MINIMOS}` exige episodios"
+            " de dois regimes distintos"
+        ),
+        "o_vao_que_isto_revela": (
+            "`duracao_da_calibracao_ms` deriva a duracao do regime mais lento"
+            " ENTRE OS QUE APARECERAM NO PILOTO, e nao sabe de permanencia nem"
+            " de cobertura. Se so um regime apareceu, a duracao sai"
+            " dimensionada para ele sozinho - e pode terminar antes de"
+            " qualquer outro regime ter um episodio"
+        ),
+        "consequencia_declarada": (
+            "regime que nao acumular o proprio `n_exigido` dentro da janela"
+            " permanece NAO CALIBRADO, sem override e sem revalidacao (ADR"
+            " 0033 e ADR 0041). Isso e §8.3 ao pe da letra, e nao uma falha -"
+            " mas e uma consequencia a aceitar DE OLHOS ABERTOS antes de selar"
+        ),
+    }
 
 
 @router.post("/selar-calibracao", status_code=status.HTTP_201_CREATED)

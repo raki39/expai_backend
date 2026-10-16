@@ -5219,3 +5219,136 @@ def preencher_buraco(conn, buraco_ms: int) -> None:
             relogio_medido_em_ms=corrigido - 30_000,
         )],
     )
+
+
+# ===========================================================================
+# A PREVIA DE `selar-calibracao` — somente leitura
+# ===========================================================================
+
+
+def _piloto_pronto_para_selar(conn, *, ask: int = ASK_PESSIMISTA,
+                              aquecimento: int = 680, instantes: int = 1_400):
+    """Fecha o piloto COM aquecimento e NAO materializa.
+
+    `montar_piloto` materializa por dentro - e so o lado `compra` - e ainda
+    sela a calibracao. Aqui os dois passos ficam para as rotas, que e o que
+    producao faz: `POST /rodar` materializa os DOIS lados, e so depois se sela.
+
+    O aquecimento existe porque classificar regime exige 672 barras anteriores
+    (ADR 0026): sem ele todo instante sai `indefinido`, nenhum regime ganha
+    `sigma_e` proprio, e a previa nao teria regra nenhuma a mostrar.
+    """
+    from app.aovivo import bbo as m
+
+    serie = m.Serie(venue="binance", symbol="BTCUSDT",
+                    price_scale_exp=8, volume_scale_exp=8)
+    m.receber(conn, serie, CONTRATO, [
+        semear_par(conn, i, ask=ask, disponivel=False)
+        for i in range(aquecimento)
+    ] + [
+        semear_par(conn, i, ask=ask)
+        for i in range(aquecimento, aquecimento + instantes)
+    ])
+    return piloto.fechar(
+        conn,
+        m.Serie(venue="binance", symbol="BTCUSDT",
+                price_scale_exp=0, volume_scale_exp=0),
+        CONTRATO,
+    )
+
+
+def test_a_PREVIA_concorda_com_o_selamento_REAL_e_nao_grava_nada(
+    client, conn, cfg
+):
+    """A previa so vale se ela disser o que o selo de fato grava.
+
+    `selar-calibracao` e IRREVERSIVEL e uma vez so: `ler_janela_de_calibracao`
+    devolve a que existe, e uma segunda seria uma segunda chance de escolher a
+    fronteira. Conferir depois de gravar e conferir tarde - por isso a previa.
+
+    A assercao central NAO e sobre `de_ms`, que anda com o relogio: e sobre
+    `regras_que_seriam_gravadas`, porque o `n_exigido` congelado ali e o que
+    nunca mais muda.
+    """
+    _piloto_pronto_para_selar(conn)
+    assert client.post("/api/calibracao/rodar", headers=CABECALHO,
+                       json={"finalidade": "piloto"}).status_code == 200
+
+    antes = _fotografia(conn)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM janela_calibracao"
+    ).fetchone()[0] == 0
+
+    r = client.get("/api/calibracao/previa-selamento", headers=CABECALHO)
+    assert r.status_code == 200, r.text
+    previa = r.json()
+
+    # 1. NAO GRAVOU. Nem a janela, nem nada do experimento.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM janela_calibracao"
+    ).fetchone()[0] == 0
+    assert _fotografia(conn) == antes
+    assert previa["ja_existe_janela_selada"] is False
+
+    # 2. OS DOIS LADOS, porque a regra que escolhe um nao esta declarada.
+    assert set(previa["por_lado"]) == {"compra", "venda"}
+    assert previa["o_lado_NAO_TEM_REGRA_DECLARADA"]["fato"]
+
+    # 3. E AGORA O SELO DE VERDADE, para comparar.
+    r = client.post("/api/calibracao/selar-calibracao", headers=CABECALHO,
+                    json={"author": "teste"})
+    assert r.status_code == 201, r.text
+    janela_id = int(r.json()["janela_de_calibracao"]["id"])
+
+    gravadas = {
+        linha["regime"]: int(linha["n_exigido_calibracao"])
+        for linha in conn.execute(
+            "SELECT regime, n_exigido_calibracao FROM calibracao_regime_regra"
+            " WHERE janela_calibracao_id = ?", (janela_id,)
+        )
+    }
+    # `selar_calibracao` usa o lado COMPRA por default de Python - e e
+    # exatamente isso que a previa expoe. Se alguem declarar outra regra, este
+    # teste quebra pedindo que a previa acompanhe.
+    previstas = {
+        x["regime"]: x["n_exigido_calibracao"]
+        for x in previa["por_lado"]["compra"]["regras_que_seriam_gravadas"]
+        if x["entraria_na_tabela"]
+    }
+    assert previstas == gravadas, (
+        "a previa discorda do que o selo gravou. Uma previa que erra o"
+        " `n_exigido` e pior que nenhuma: ela autoriza uma decisao"
+        " irreversivel com o numero errado"
+    )
+    assert gravadas, "cenario vazio: o teste nao exercita nada"
+
+
+def test_a_PREVIA_publica_o_piso_de_10_como_PISO_e_nao_como_alvo(
+    client, conn, cfg
+):
+    """O usuario foi explicito: 10 nao autoriza fechar a calibracao.
+
+    `MINIMO_PARA_O_QUANTIL` e o tamanho a partir do qual o estimador EXISTE.
+    Publicá-lo ao lado de `n_exigido` sem dizer isso convida a leitura errada,
+    e a leitura errada aqui fecha um regime cedo demais.
+    """
+    _piloto_pronto_para_selar(conn)
+    assert client.post("/api/calibracao/rodar", headers=CABECALHO,
+                       json={"finalidade": "piloto"}).status_code == 200
+
+    previa = client.get("/api/calibracao/previa-selamento",
+                        headers=CABECALHO).json()
+    piso = previa["o_piso_de_10_NAO_e_autorizacao"]
+    assert piso["K"] == bootstrap.K_QUANTIL_P10
+    assert piso["delta_mili_bps"] == ajuste.DELTA_MILI_BPS
+    assert "NAO e alvo" in piso["o_que_o_10_NAO_e"]
+    assert "nao autoriza parar nela" in piso["onde_o_piso_entra"]
+
+    # E a permanencia e a cobertura saem JUNTO, porque sao as reguas que o
+    # piso NAO substitui.
+    pc = previa["permanencia_e_cobertura"]
+    from app.regime import deteccao
+
+    assert pc["permanencia_barras"] == deteccao.PERMANENCIA_BARRAS
+    assert pc["regimes_minimos"] == deteccao.REGIMES_MINIMOS
+    assert "nao sabe de permanencia nem" in pc["o_vao_que_isto_revela"]

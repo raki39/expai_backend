@@ -984,6 +984,20 @@ FORA_DO_EXPORT = {
     # olha `/api/aovivo/bbo/estado`, que ESTA no export com cobertura,
     # motivos de indisponibilidade e a janela do piloto.
     "/api/aovivo/bbo/ponto": "coordenacao da extracao, nao estado do experimento",
+    # PREVIA de uma escrita que ainda nao aconteceu, e nao estado do
+    # experimento. Dois motivos, e o segundo e o que decide:
+    #
+    # 1. ela descreve o que `selar-calibracao` GRAVARIA, e o export existe
+    #    para carregar o que FOI gravado;
+    # 2. o `de_ms` dela e a proxima fronteira de grade depois de AGORA, entao
+    #    ele muda a cada leitura sem o experimento ter mudado. Poe-lo no
+    #    pacote faria duas exportacoes do mesmo estado diferirem - e e
+    #    exatamente isso que o export existe para nao fazer.
+    #
+    # Quando a janela for selada, ela entra no export pela rota que publica a
+    # janela GRAVADA, e ai o numero para de andar.
+    "/api/calibracao/previa-selamento": "previa de escrita futura; o `de_ms`"
+                                        " anda com o relogio",
 }
 
 

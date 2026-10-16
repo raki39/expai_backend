@@ -27,6 +27,22 @@ seria esconder o numero que diz se o simulador esta pessimista; o que ele nao
 pode e virar parametro. O campo se chama `p10_diagnostico_mili_bps` para que
 ninguem precise saber disso de cor.
 
+## O que mudou em 2026-10-16, e por que o nome nao era suficiente
+
+O atributo ja se chamava `p10_diagnostico_mili_bps`, mas a CHAVE PUBLICADA era
+`p10_mili_bps` - a mesma, byte a byte, que `ajuste` usa para o p10 que ajusta.
+E `lb95_mili_bps` era a mesma de `revalidar`. Aninhar sob `diagnostico` nao
+resolve: leitor que achata o json, procura a chave ou copia o campo le a
+grandeza errada sem que nada acuse.
+
+Agora o sufixo viaja com o valor - `p10_DIAGNOSTICO_mili_bps` - e ha guarda
+estrutural em `tests/test_fronteira_das_finalidades.py`.
+
+**E `pessimista` deixou de existir.** Ele era `lb95 >= 0`, que e literalmente
+`REGRAS_DA_REVALIDACAO["alvo"]`, avaliado sobre a serie do PILOTO. Um booleano
+nao se le como diagnostico: le-se como resposta. A pergunta "o simulador esta
+confirmado?" e de `revalidar`, por regime, sobre a janela de revalidacao.
+
 ## `n_exigido`, e delta nao se move
 
     n_exigido = ceil( K * (z * sigma_e / delta)^2 )      K = 2,92 · z = 1,96
@@ -116,6 +132,19 @@ class Dimensionamento:
 
     def como_dict(self) -> dict:
         return {
+            # A FINALIDADE VAI NO CORPO, e nao so no nome da rota. Quem copia
+            # um pedaco deste json leva junto de qual serie ele saiu - e e a
+            # serie, e nao a chave, que decide se o numero ajusta, confirma ou
+            # so dimensiona.
+            "finalidade_da_serie": "piloto",
+            "o_que_isto_e": (
+                "DIMENSIONAMENTO E DIAGNOSTICO, e nao calibracao. Do piloto"
+                " saem `sigma_e`, `tau` e a forma da cauda (ADR 0027 par.5);"
+                " nada aqui produz override de parametro nem confirma o"
+                " simulador. Quem ajusta le a janela de CALIBRACAO e quem"
+                " confirma le a de REVALIDACAO - as duas posteriores e"
+                " disjuntas desta"
+            ),
             "janela_do_piloto": {
                 "de_ms": self.de_ms,
                 "ate_ms_exclusive": self.ate_ms_exclusive,
@@ -140,15 +169,39 @@ class Dimensionamento:
             },
             "forma_da_cauda": self.forma_da_cauda,
             "diagnostico": {
-                "p10_mili_bps": round(self.p10_diagnostico_mili_bps, 1),
-                "lb95_mili_bps": round(self.lb95_diagnostico_mili_bps, 1),
-                "pessimista": self.lb95_diagnostico_mili_bps >= 0,
+                # OS NOMES SAO PARTE DA GARANTIA, e nao enfeite.
+                #
+                # Enquanto estas chaves se chamavam `p10_mili_bps` e
+                # `lb95_mili_bps`, elas eram IDENTICAS as que `ajuste` publica
+                # para o p10 que ajusta e o LB95 que confirma. Aninhar sob
+                # `diagnostico` nao basta: qualquer leitor que achate o json,
+                # procure a chave ou copie um campo le a grandeza errada sem
+                # que nada acuse. O sufixo viaja com o valor.
+                "p10_DIAGNOSTICO_mili_bps": round(
+                    self.p10_diagnostico_mili_bps, 1),
+                "lb95_DIAGNOSTICO_mili_bps": round(
+                    self.lb95_diagnostico_mili_bps, 1),
                 "o_que_isto_NAO_e": (
                     "NAO aprova o simulador e NAO produz override de"
                     " parametro. Do piloto saem `sigma_e`, `tau` e a forma da"
                     " cauda (ADR 0027 par.5); quem calibra le a janela de"
                     " CALIBRACAO, que e posterior e disjunta"
                 ),
+                # `pessimista` MORREU AQUI, e a ausencia e a correcao.
+                #
+                # Ele era `lb95 >= 0`, que e literalmente
+                # `REGRAS_DA_REVALIDACAO["alvo"]` - o criterio de revalidacao -
+                # avaliado sobre a serie do PILOTO e publicado como veredito
+                # booleano. Um booleano nao se le como diagnostico: ele se le
+                # como resposta. Quem responde essa pergunta e `revalidar`,
+                # sobre a janela de revalidacao daquele regime, e so ela.
+                "onde_mora_a_resposta": {
+                    "p10_que_AJUSTA": "finalidade `calibracao`, via"
+                                      " `ajuste.estimar_por_regime`",
+                    "lb95_que_CONFIRMA": "finalidade `revalidacao`, via"
+                                         " `ajuste.revalidar`, por regime e"
+                                         " uma vez so",
+                },
             },
             "dimensionamento": {
                 "delta_mili_bps": self.delta_mili_bps,
