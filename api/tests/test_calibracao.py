@@ -368,6 +368,26 @@ def certificar(conn, *, escopos=None, alvo: dict | None = None,
     return alvo_hash
 
 
+def _fim_da_janela_de_calibracao(conn) -> int:
+    """`janela_calibracao.ate_ms_exclusive` - o fim da JANELA, nao o do regime.
+
+    O gatilho `janela_revalidacao_fronteiras_conferidas` confere contra ele, e
+    o comentario dele diz por que: *"o perfil e consolidado no fim da janela,
+    entao e dali que a confirmacao tem de comecar. Usar o fim do regime
+    deixaria a revalidacao comecar antes de o perfil que ela confirma
+    existir"*.
+
+    Os testes passavam `calibracao_regime_fechamento.fim_ms_exclusive`, e isso
+    so funcionava porque a janela curta fazia os dois coincidirem. Com os 90
+    dias do ADR 0043 eles deixaram de coincidir, e a coincidencia era o que
+    sustentava o teste.
+    """
+    return int(conn.execute(
+        "SELECT ate_ms_exclusive FROM janela_calibracao WHERE contrato = ?",
+        (CONTRATO,),
+    ).fetchone()[0])
+
+
 def revalidacao_crua(conn, *, fech: int, regime: str, calibracao_ate: int,
                      symbol: str = "BTCUSDT",
                      duracao: int = DURACAO_DE_TESTE,
@@ -594,7 +614,8 @@ def semear(
     for i in range(n + 1):
         t = T0 + i * GRADE
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -874,7 +895,8 @@ def semear_barras(conn: sqlite3.Connection, precos: list[int]) -> None:
     for i, p in enumerate(precos):
         t = T0 + i * GRADE
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -1141,7 +1163,8 @@ def semear_par(
 
     t = T0 + i * GRADE
     conn.execute(
-        "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+        "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
         " open, high, low, close, volume, quote_volume, trades,"
         " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
         " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -1253,7 +1276,11 @@ def montar_piloto(
         symbol="BTCUSDT", config=cfg.config, config_version_id=cfg.id,
         calibracao_perfil_hash=PERFIL_DE_TESTE, janela_hash=HASH_DE_TESTE,
         de_ms=janela.de_ms, ate_ms_exclusive=janela.ate_ms_exclusive,
-        orcamento_cents=1_000, lados=("compra",),
+        orcamento_cents=1_000,
+        # OS DOIS LADOS, como producao faz. ADR 0042: um regime medido num
+        # lado so nao tem `n_exigido`, porque fechar exige os dois - entao um
+        # preparo de um lado so nao alcanca nenhum ramo de calibracao.
+        lados=("compra", "venda"),
     )
 
     # ETAPA 2 - a CALIBRACAO, pelo CAMINHO OFICIAL. `selar_calibracao` congela
@@ -1276,13 +1303,69 @@ def montar_piloto(
     # ter fim DECLARADO, derivado do piloto, e o gatilho recusa instante fora
     # dele.
     de_cal = int(jc["de_ms"])
+    # O FLUXO PRIMEIRO, e so depois as observacoes.
+    #
+    # `registrar` ADIA instante cuja janela causal de 672 barras ainda nao
+    # esta completa - e adiado nao e perdido: ele volta na proxima
+    # materializacao. Preencher o fluxo DEPOIS de registrar tornaria
+    # materializaveis instantes antes adiados, e rematerializar passaria a
+    # acrescentar observacao a um regime ja FECHADO - que o gatilho recusa,
+    # corretamente. Em producao o rele entrega continuamente, entao o dado ja
+    # esta la quando se materializa; esta ordem e a fiel.
+    avancar_watermark_do_rele(conn, ate_ms=int(jc["ate_ms_exclusive"]))
     obs.registrar(
         conn, finalidade="calibracao", contrato=CONTRATO, venue="binance",
         symbol="BTCUSDT", config=cfg.config, config_version_id=cfg.id,
         calibracao_perfil_hash=PERFIL_DE_TESTE, janela_hash=HASH_DE_TESTE,
         de_ms=de_cal,
         ate_ms_exclusive=min(int(ultimo) + GRADE, int(jc["ate_ms_exclusive"])),
-        orcamento_cents=1_000, lados=("compra",),
+        orcamento_cents=1_000,
+        # OS DOIS LADOS, como producao. ADR 0042: fechar exige compra E venda
+        # alcancarem o `n_exigido`, entao um preparo de um lado so deixa o
+        # regime eternamente `nao_calibrado` - que e a regra funcionando, e
+        # nao o cenario que estes testes querem exercitar.
+        lados=("compra", "venda"),
+    )
+
+
+def avancar_watermark_do_rele(conn, *, ate_ms: int) -> None:
+    """Preenche o FLUXO ate `ate_ms`, contiguo, so com BARRAS.
+
+    Com o ADR 0043 a janela de calibracao dura 8.640 barras. `aplicar` exige
+    que o rele tenha ALCANCADO o fim dela, e o que ele le e
+    `MAX(stream_bar.open_time_ms)`.
+
+    **Contiguo, e nao uma barra solta no fim.** A primeira versao inseria uma
+    so: ela satisfazia o watermark e quebrava a contiguidade, porque
+    `semear_adiante` parte do mesmo `MAX` - passava a semear 90 dias adiante,
+    com um vao atras, e `janela_causal_incompleta` adiava tudo para sempre. O
+    docstring de `semear_adiante` ja avisava disso.
+
+    **So as barras.** BBO e `calibracao_observacao` ficam onde estavam:
+    materializar 8.640 instantes nos dois lados para satisfazer uma leitura de
+    watermark deixaria a suite lenta sem exercitar nada a mais. O horizonte
+    tem teste proprio, em `tests/test_dimensionamento.py`.
+    """
+    ultimo = conn.execute(
+        "SELECT MAX(open_time_ms) AS t FROM stream_bar"
+        " WHERE venue = 'binance' AND symbol = 'BTCUSDT' AND timeframe = '15m'"
+    ).fetchone()["t"]
+    if ultimo is None:
+        return
+    alvo = int(ate_ms) + GRADE
+    linhas = [
+        ("binance", "BTCUSDT", "15m", t, ABERTURA, ABERTURA, ABERTURA,
+         ABERTURA, 1, 1, 1, GRADE, 8, 8, "x", "ao_vivo")
+        for t in range(int(ultimo) + GRADE, alvo + GRADE, GRADE)
+    ]
+    if not linhas:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO stream_bar (venue, symbol, timeframe,"
+        " open_time_ms, open, high, low, close, volume, quote_volume, trades,"
+        " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
+        " origem) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        linhas,
     )
 
 
@@ -1661,7 +1744,7 @@ def test_CINCO_escopos_de_OUTRO_alvo_sao_RECUSADOS(conn, cfg):
     with pytest.raises(sqlite3.IntegrityError) as e:
         revalidacao_crua(
             conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
-            calibracao_ate=int(fech["fim_ms_exclusive"]),
+            calibracao_ate=_fim_da_janela_de_calibracao(conn),
             alvo_hash="a" * 64, identidade=ident_certa,
         )
     assert "OUTRA identidade" in str(e.value)
@@ -1804,7 +1887,7 @@ def test_o_GATILHO_e_o_RELATORIO_concordam_sobre_os_cinco(conn, cfg):
         try:
             revalidacao_crua(
                 conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
-                calibracao_ate=int(fech["fim_ms_exclusive"]),
+                calibracao_ate=_fim_da_janela_de_calibracao(conn),
                 alvo_hash=alvo_hash, identidade=ident,
             )
             do_banco = True
@@ -1971,7 +2054,7 @@ def test_GARANTIA_7_INVERTIDA_selar_revalidacao_SEM_finalizacao_e_recusado(
     with pytest.raises(sqlite3.IntegrityError) as e2:
         revalidacao_crua(
             conn, fech=int(fech["id"]), regime=REGIME_DE_TESTE,
-            calibracao_ate=int(fech["fim_ms_exclusive"]),
+            calibracao_ate=_fim_da_janela_de_calibracao(conn),
         )
     assert "finalizacao" in str(e2.value)
 
@@ -4195,9 +4278,13 @@ def test_selar_revalidacao_NAO_recebe_data_tamanho_metodo_nem_duracao(conn):
     # E a rota tambem nao: `extra=forbid` transforma a tentativa em 422.
     from app.api.rotas.calibracao import PedidoPorRegime
 
+    # `lado` SAIU do corpo em 2026-10-16 (ADR 0042): selar, fechar e revalidar
+    # percorrem sempre os DOIS lados, e o chamador nao escolhe qual. Com
+    # `extra=forbid`, manda-lo agora e 422.
     assert set(PedidoPorRegime.model_fields) == {
-        "author", "venue", "symbol", "contrato", "lado", "regime"
+        "author", "venue", "symbol", "contrato", "regime"
     }
+    assert "lado" not in PedidoPorRegime.model_fields
 
 
 def test_a_ROTA_de_selar_revalidacao_recusa_data_no_corpo(client):
@@ -4534,7 +4621,8 @@ def semear_adiante(conn, *, quantos: int, salto: bool = False) -> int:
         ms = inicio + k * GRADE
         preco = ABERTURA + ((k % 2) * 3_000_00000000 if salto else 0)
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -4610,7 +4698,8 @@ def test_o_regime_GRAVADO_nao_se_move_quando_chega_barra_FUTURA(conn, cfg):
         t = int(ultimo) + k * GRADE
         preco = ABERTURA + (k % 2) * 3_000_00000000   # salto enorme por barra
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -4861,7 +4950,8 @@ def test_instante_com_JANELA_INCOMPLETA_e_ADIADO_e_nao_gravado_indefinido(
     for k in range(2, 120):            # pula k = 1: o buraco
         ms = buraco + (k - 1) * GRADE
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -5168,7 +5258,8 @@ def semear_adiante_com_buraco(conn, buraco_ms: int, *, quantos: int = 120) -> in
     for k in range(1, quantos):
         ms = buraco_ms + k * GRADE
         conn.execute(
-            "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+            "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
             " open, high, low, close, volume, quote_volume, trades,"
             " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
             " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -5195,7 +5286,8 @@ def preencher_buraco(conn, buraco_ms: int) -> None:
     from app.aovivo import bbo as m
 
     conn.execute(
-        "INSERT INTO stream_bar (venue, symbol, timeframe, open_time_ms,"
+        "INSERT OR REPLACE INTO stream_bar (venue, symbol, timeframe,"
+            " open_time_ms,"
         " open, high, low, close, volume, quote_volume, trades,"
         " interval_ms, price_scale_exp, volume_scale_exp, recebido_em,"
         " origem) VALUES ('binance','BTCUSDT','15m',?,?,?,?,?,1,1,1,"
@@ -5292,7 +5384,7 @@ def test_a_PREVIA_concorda_com_o_selamento_REAL_e_nao_grava_nada(
 
     # 2. OS DOIS LADOS, porque a regra que escolhe um nao esta declarada.
     assert set(previa["por_lado"]) == {"compra", "venda"}
-    assert previa["o_lado_NAO_TEM_REGRA_DECLARADA"]["fato"]
+    assert previa["a_regra_dos_dois_lados"]["adr"] == "0042"
 
     # 3. E AGORA O SELO DE VERDADE, para comparar.
     r = client.post("/api/calibracao/selar-calibracao", headers=CABECALHO,

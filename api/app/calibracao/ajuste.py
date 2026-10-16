@@ -72,6 +72,13 @@ DIAS_REVALIDACAO = 14
 
 REGIMES = ("vol_baixa", "vol_media", "vol_alta", "indefinido")
 
+#: OS DOIS LADOS, importados do modulo que os define. ADR 0042.
+#:
+#: Importado e nunca copiado: duas tuplas iguais em modulos diferentes
+#: divergem, e aqui a divergencia faria o fechamento percorrer um conjunto de
+#: lados diferente do que o dimensionamento mediu.
+from .dimensionamento import LADOS  # noqa: E402
+
 #: Os regimes que podem ser calibrados. `indefinido` nao pode ter fechamento,
 #: override nem revalidacao - e nao por disciplina: os `CHECK` das tres
 #: tabelas recusam.
@@ -243,6 +250,13 @@ def _agora() -> str:
 
 @dataclass(frozen=True)
 class EstimativaDeRegime:
+    """O resultado de UM regime, ja agregado pelos DOIS lados. ADR 0042.
+
+    Os campos sem sufixo sao os CONSERVADORES - `p10` do lado que exige mais
+    correcao, `n` do gargalo -, e `por_lado` guarda de onde vieram. Publicar
+    so o agregado esconderia a origem.
+    """
+
     regime: str
     n: int
     n_efetivo: float
@@ -251,6 +265,11 @@ class EstimativaDeRegime:
     estado: str
     motivo: str | None
     spread_bps_x1000: int | None
+    #: Um dicionario por lado: `n`, `n_efetivo`, `p10_mili_bps` e o
+    #: `spread_bps_x1000` que AQUELE lado pediria. O gravado e o maior.
+    por_lado: dict | None = None
+    #: O lado cuja correcao venceu. `None` quando nao ha override.
+    lado_que_exigiu_mais: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,7 +357,7 @@ def estimar(
         p10_mili_bps=ic.ponto, n_necessario=necessario.n_efetivo,
         por_regime=estimar_por_regime(
             conn, contrato=contrato, venue=venue, symbol=symbol,
-            config=config, config_version_id=config_version_id, lado=lado,
+            config=config, config_version_id=config_version_id,
             de_ms=de_ms, ate_ms_exclusive=ate_ms_exclusive,
             n_necessario=necessario.n_efetivo,
         ),
@@ -364,49 +383,70 @@ def _alcance_da_calibracao(
     return de_ms if ultimo is None else int(ultimo) + 1
 
 
-def estimar_por_regime(
+def _serie_por_lado_e_regime(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
-    config: ExperimentConfig, config_version_id: int, lado: str,
-    de_ms: int, ate_ms_exclusive: int, n_necessario: int,
-) -> list[EstimativaDeRegime]:
-    """Um resultado por regime. Quem nao alcanca fica `nao_calibrado`.
-
-    Garantia 4, e ela e literal no ADR 0027: **sem herdar parametro de outro
-    regime, sem agrupamento, sem interpolacao**. Um regime que nunca acumular
-    amostra propria permanece nao calibrado nesta fase, e isso vira condicao
-    de validade de todo resultado obtido nele.
-    """
-    series: dict[str, list[float]] = {r: [] for r in REGIMES}
+    de_ms: int, ate_ms_exclusive: int,
+) -> dict[str, dict[str, list[float]]]:
+    """E2 da CALIBRACAO, por lado e por regime. Os dois lados, sempre."""
+    series = {x: {r: [] for r in REGIMES} for x in LADOS}
     for linha in conn.execute(
         # `finalidade = 'calibracao'` como LITERAL: o mesmo desenho de
         # `acesso = 'agente'` do incremento 9. Nenhum argumento faz este
         # caminho alcancar observacao do piloto.
         #
         # E o REGIME vem da COLUNA, e nao do detector rodado de novo aqui.
-        # Rodar o detector na leitura fazia o regime de um instante depender de
-        # QUANDO se lia: uma barra nova adiante podia mudar a classificacao de
-        # um instante ja medido, e a serie que calibrou deixaria de ser a serie
-        # que se le. Gravado, o instante fica com o regime que tinha.
-        "SELECT regime, e2_mili_bps FROM calibracao_observacao"
+        # Rodar o detector na leitura fazia o regime de um instante depender
+        # de QUANDO se lia: uma barra nova adiante podia mudar a classificacao
+        # de um instante ja medido, e a serie que calibrou deixaria de ser a
+        # serie que se le. Gravado, o instante fica com o regime que tinha.
+        "SELECT lado, regime, e2_mili_bps FROM calibracao_observacao"
         " WHERE finalidade = 'calibracao'"
-        "   AND contrato = ? AND venue = ? AND symbol = ? AND lado = ?"
+        "   AND contrato = ? AND venue = ? AND symbol = ?"
         "   AND dentro_do_l1 = 1"
         "   AND t_grid_ms >= ? AND t_grid_ms < ?"
         " ORDER BY t_grid_ms",
-        (contrato, venue, symbol, lado, de_ms, ate_ms_exclusive),
+        (contrato, venue, symbol, de_ms, ate_ms_exclusive),
     ):
-        series[str(linha["regime"])].append(float(linha["e2_mili_bps"]))
+        lado = str(linha["lado"])
+        if lado in series:
+            series[lado][str(linha["regime"])].append(
+                float(linha["e2_mili_bps"])
+            )
+    return series
+
+
+def estimar_por_regime(
+    conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
+    config: ExperimentConfig, config_version_id: int,
+    de_ms: int, ate_ms_exclusive: int, n_necessario: int,
+) -> list[EstimativaDeRegime]:
+    """Um resultado por regime, medido nos DOIS LADOS. ADR 0042.
+
+    Garantia 4, literal no ADR 0027: **sem herdar parametro de outro regime,
+    sem agrupamento, sem interpolacao**. Um regime que nunca acumular amostra
+    propria permanece nao calibrado, e isso vira condicao de validade de todo
+    resultado obtido nele.
+
+    **E sem `lado` na assinatura** (ADR 0042): o override e um `spread_bps` so
+    aplicado aos dois lados, entao ele sai da **maior** correcao exigida entre
+    eles - nunca da media, que deixaria um lado bom esconder o ruim.
+    """
+    series = _serie_por_lado_e_regime(
+        conn, contrato=contrato, venue=venue, symbol=symbol,
+        de_ms=de_ms, ate_ms_exclusive=ate_ms_exclusive,
+    )
 
     saida: list[EstimativaDeRegime] = []
     for regime in REGIMES:
-        s = series[regime]
+        amostras = {x: series[x][regime] for x in LADOS}
+        n_gargalo = min(len(s) for s in amostras.values())
 
         if regime == "indefinido":
             # NAO e um regime da taxonomia. Ele existe na tabela para que a
             # contagem feche e para que "quantas observacoes nao puderam ser
             # atribuidas" seja visivel - e nao para ser calibrado.
             saida.append(EstimativaDeRegime(
-                regime=regime, n=len(s), n_efetivo=float(len(s)),
+                regime=regime, n=n_gargalo, n_efetivo=float(n_gargalo),
                 p10_mili_bps=None, n_necessario=None,
                 estado="nao_calibrado",
                 motivo="`indefinido` nao e regime: classificar exige 672 "
@@ -416,18 +456,38 @@ def estimar_por_regime(
             ))
             continue
 
-        if len(s) < 10:
+        curtos = [
+            x for x, s in amostras.items()
+            if len(s) < bootstrap.MINIMO_PARA_O_QUANTIL
+        ]
+        if curtos:
             saida.append(EstimativaDeRegime(
-                regime=regime, n=len(s), n_efetivo=float(len(s)),
+                regime=regime, n=n_gargalo, n_efetivo=float(n_gargalo),
                 p10_mili_bps=None, n_necessario=n_necessario,
                 estado="nao_calibrado",
-                motivo=f"{len(s)} observacoes: nem o bootstrap roda. Sem "
-                       f"herdar parametro de outro regime",
+                motivo=f"lados sem amostra para o bootstrap: {curtos}. O ADR"
+                       f" 0042 exige os DOIS - um lado bom nao cobre o outro -"
+                       f" e sem herdar parametro de outro regime",
                 spread_bps_x1000=None,
             ))
             continue
 
-        ic = bootstrap.limite_inferior_do_quantil(s, 0.10)
+        ics = {
+            x: bootstrap.limite_inferior_do_quantil(s, 0.10)
+            for x, s in amostras.items()
+        }
+        por_lado = {
+            x: {
+                "lado": x,
+                "n": ic.n,
+                "n_efetivo": round(ic.n_efetivo, 1),
+                "p10_mili_bps": round(ic.ponto, 1),
+                "spread_bps_x1000_que_este_lado_pediria":
+                    _spread_necessario_x1000(ic.ponto, config),
+            }
+            for x, ic in ics.items()
+        }
+        n_ef_gargalo = min(ic.n_efetivo for ic in ics.values())
 
         # A REGUA E O FECHAMENTO, E NAO UM NUMERO RECOMPUTADO AQUI.
         #
@@ -446,23 +506,40 @@ def estimar_por_regime(
         )
         if fechou is None:
             saida.append(EstimativaDeRegime(
-                regime=regime, n=ic.n, n_efetivo=ic.n_efetivo,
-                p10_mili_bps=ic.ponto, n_necessario=n_necessario,
+                regime=regime, n=min(ic.n for ic in ics.values()),
+                n_efetivo=n_ef_gargalo,
+                p10_mili_bps=min(ic.ponto for ic in ics.values()),
+                n_necessario=n_necessario,
                 estado="nao_calibrado",
                 motivo=f"o regime nao FECHOU: sem linha em"
                        f" `calibracao_regime_fechamento` ele nao alcancou o"
-                       f" proprio `n_exigido` congelado. **δ NAO e relaxado**,"
-                       f" e o diagnostico desta leitura e"
-                       f" n_efetivo {ic.n_efetivo:.1f} contra {n_necessario}",
+                       f" proprio `n_exigido` congelado nos DOIS lados. delta"
+                       f" NAO e relaxado, e o diagnostico desta leitura e"
+                       f" n_efetivo {n_ef_gargalo:.1f} contra {n_necessario}",
                 spread_bps_x1000=None,
+                por_lado=por_lado,
             ))
             continue
 
+        # A MAIOR CORRECAO ENTRE OS LADOS. Nunca media, nunca combinacao:
+        # "um lado bom nao pode esconder o ruim" (ADR 0042).
+        vence = max(
+            por_lado.values(),
+            key=lambda v: (v["spread_bps_x1000_que_este_lado_pediria"],
+                           v["lado"]),
+        )
         saida.append(EstimativaDeRegime(
-            regime=regime, n=ic.n, n_efetivo=ic.n_efetivo,
-            p10_mili_bps=ic.ponto, n_necessario=n_necessario,
+            regime=regime, n=min(ic.n for ic in ics.values()),
+            n_efetivo=n_ef_gargalo,
+            # O `p10` publicado e o do lado que VENCEU - e o p10 que produziu
+            # o spread gravado. Publicar o do outro lado ao lado do spread
+            # deste faria a conta nao fechar para quem conferisse a mao.
+            p10_mili_bps=por_lado[vence["lado"]]["p10_mili_bps"],
+            n_necessario=n_necessario,
             estado="calibrado", motivo=None,
-            spread_bps_x1000=_spread_necessario_x1000(ic.ponto, config),
+            spread_bps_x1000=vence["spread_bps_x1000_que_este_lado_pediria"],
+            por_lado=por_lado,
+            lado_que_exigiu_mais=vence["lado"],
         ))
     return saida
 
@@ -719,6 +796,7 @@ def selar_calibracao(
 def fechar_regime(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     regime: str, n_efetivo: float, ultimo_t_grid_ms: int,
+    por_lado: dict | None = None,
 ) -> dict:
     """Fecha a calibracao DE UM regime, quando ele alcanca o proprio `n_exigido`.
 
@@ -760,6 +838,32 @@ def fechar_regime(
             f" escolher o tamanho olhando o que ja se mediu"
         )
     n_exigido = int(regra["n_exigido_calibracao"])
+    # OS DOIS LADOS, CADA UM POR SI. ADR 0042.
+    #
+    # `n_efetivo` ja e o gargalo, entao a comparacao abaixo bastaria. Mas ela
+    # nao DIRIA qual lado ficou curto, e `por_lado` tambem confere que o
+    # gargalo e mesmo o minimo - duas derivacoes do mesmo fato tem de
+    # concordar, e e assim que este projeto as mantem honestas.
+    if por_lado:
+        curtos = {
+            x: round(v["n_efetivo"], 1) for x, v in por_lado.items()
+            if v["n_efetivo"] < n_exigido
+        }
+        menor = min(v["n_efetivo"] for v in por_lado.values())
+        if abs(menor - n_efetivo) > 1e-6:
+            raise ValueError(
+                f"o `n_efetivo` recebido ({n_efetivo}) nao e o minimo dos"
+                f" lados ({menor}). Fechar exige os DOIS, e o numero que"
+                f" decide tem de ser o do gargalo"
+            )
+        if curtos:
+            raise AmostraInsuficienteNoRegime(
+                f"regime {regime!r}: os lados {curtos} nao alcancaram o"
+                f" `n_exigido` de {n_exigido}. O ADR 0042 exige compra E venda"
+                f" separadamente - um lado bom nao cobre o outro. **delta NAO"
+                f" e relaxado** e o calendario nao encerra: o regime permanece"
+                f" NAO CALIBRADO ate os dois alcancarem"
+            )
     if n_efetivo < n_exigido:
         raise AmostraInsuficienteNoRegime(
             f"n_efetivo {n_efetivo:.1f} < {n_exigido} exigido para o regime"
@@ -1097,7 +1201,12 @@ def ler_revalidacao(
 def aplicar(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     config: ExperimentConfig, config_version_id: int, autor: str,
-    settings, lado: str = "compra",
+    settings,
+    # `lado` SO para os campos GLOBAIS de diagnostico da `Estimativa` (o `n`,
+    # o `sigma_e` e o `p10` da janela inteira). O OVERRIDE nao sai daqui: ele
+    # vem de `por_regime`, que percorre os dois lados e grava a maior correcao
+    # (ADR 0042). Nenhuma rota passa este argumento.
+    lado: str = "compra",
 ) -> dict:
     """Estima, deriva e grava a versao de calibracao.
 
@@ -1368,9 +1477,12 @@ def ler_finalizacao(
 def revalidar(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     config: ExperimentConfig, config_version_id: int,
-    calibracao_id: int, regime: str, lado: str = "compra",
+    calibracao_id: int, regime: str,
 ) -> dict:
     """Confirma na janela DAQUELE regime, **sem novo ajuste**. Uso UNICO.
+
+    **Passa nos DOIS lados ou nao passa** (ADR 0042): o simulador executa
+    compra e venda, e confirmar um lado so confirmaria metade dele.
 
     ## O criterio muda entre as duas janelas, e isso e do ADR 0027
 
@@ -1417,22 +1529,52 @@ def revalidar(
     # instante. Sem o filtro, um instante de `vol_alta` caido dentro da janela
     # de `vol_baixa` confirmaria o override de `vol_baixa` - um regime
     # confirmando outro, que e o que o ADR 0027 proibe ao vedar heranca.
-    e2 = observacao.serie_e2_da_revalidacao(
-        conn, contrato=contrato, venue=venue, symbol=symbol, lado=lado,
-        de_ms=int(janela["de_ms"]),
-        ate_ms_exclusive=int(janela["ate_ms_exclusive"]),
-        regime=regime,
-    )
-    if len(e2) < 10:
+    series = {}
+    for um_lado in LADOS:
+        series[um_lado] = [
+            float(v) for v in observacao.serie_e2_da_revalidacao(
+                conn, contrato=contrato, venue=venue, symbol=symbol,
+                lado=um_lado,
+                de_ms=int(janela["de_ms"]),
+                ate_ms_exclusive=int(janela["ate_ms_exclusive"]),
+                regime=regime,
+            )
+        ]
+    curtos = {
+        x: len(s) for x, s in series.items()
+        if len(s) < bootstrap.MINIMO_PARA_O_QUANTIL
+    }
+    if curtos:
         raise NadaACalibrar(
-            f"{len(e2)} observacoes na janela de revalidacao. **A janela NAO e "
-            f"consumida** - ela continua selada ate haver dado nela, e "
-            f"consumi-la vazia seria gastar a confirmacao sem confirmar nada"
+            f"lados sem amostra na janela de revalidacao: {curtos}. **A "
+            f"janela NAO e consumida** - ela continua selada ate haver dado "
+            f"nos DOIS lados, e consumi-la assim seria gastar a confirmacao "
+            f"confirmando metade do simulador"
         )
 
-    serie = [float(v) for v in e2]
-    ic = bootstrap.limite_inferior_do_quantil(serie, 0.10)
-    passou = ic.limite_inferior >= 0
+    ics = {
+        x: bootstrap.limite_inferior_do_quantil(s, 0.10)
+        for x, s in series.items()
+    }
+    # A CONJUNCAO, e nao o agregado: `LB95 >= 0` tem de valer em CADA lado.
+    # Juntar as duas series numa so antes do bootstrap deixaria um lado bom
+    # puxar a cauda do outro, que e exatamente o que o ADR 0042 proibe.
+    por_lado = {
+        x: {
+            "lado": x,
+            "n": ic.n,
+            "n_efetivo": round(ic.n_efetivo, 1),
+            "p10_mili_bps": round(ic.ponto, 1),
+            "limite_inferior_95_mili_bps": round(ic.limite_inferior, 1),
+            "passou": ic.limite_inferior >= 0,
+        }
+        for x, ic in ics.items()
+    }
+    passou = all(v["passou"] for v in por_lado.values())
+    # O GRAVADO e o lado PIOR - o que determinou o veredito. Gravar o melhor
+    # faria `revalidacao_uso` registrar um numero que nao explica o `passou`.
+    pior_lado = min(ics, key=lambda x: ics[x].limite_inferior)
+    ic = ics[pior_lado]
 
     with bloco_atomico(conn, "revalidacao_uso"):
         conn.execute(
@@ -1447,7 +1589,10 @@ def revalidar(
     log.info("calibracao.revalidada", extra={
         "janela_id": janela["id"], "calibracao_id": calibracao_id,
         "lb95": round(ic.limite_inferior, 1), "p10": round(ic.ponto, 1),
-        "n": ic.n, "passou": passou,
+        "n": ic.n, "passou": passou, "lado_pior": pior_lado,
+        "lb95_por_lado": {
+            x: v["limite_inferior_95_mili_bps"] for x, v in por_lado.items()
+        },
     })
     return {
         "janela_id": janela["id"],
@@ -1458,7 +1603,13 @@ def revalidar(
         "n_efetivo": round(ic.n_efetivo, 1),
         "p10_mili_bps": round(ic.ponto, 1),
         "limite_inferior_95_mili_bps": round(ic.limite_inferior, 1),
-        "criterio": "LB95(p10(E2)) >= 0",
+        "por_lado": por_lado,
+        "lado_pior": pior_lado,
+        "criterio": "LB95(p10(E2)) >= 0 em CADA lado (ADR 0042)",
+        "o_que_foi_gravado": (
+            "o lado PIOR - o que determinou o veredito. Gravar o melhor faria"
+            " `revalidacao_uso` registrar um numero que nao explica o `passou`"
+        ),
         "passou": passou,
         "sem_novo_ajuste": True,
         "uso_unico": "esta janela nao pode ser revalidada de novo",
@@ -1621,12 +1772,16 @@ def estado_por_regime(
 def medir_regime(
     conn: sqlite3.Connection, *, contrato: str, venue: str, symbol: str,
     config: ExperimentConfig, config_version_id: int, regime: str,
-    lado: str = "compra",
 ) -> dict:
-    """`n_efetivo` do regime na janela de CALIBRACAO. **Medido, nunca recebido.**
+    """`n_efetivo` do regime na janela de CALIBRACAO, NOS DOIS LADOS.
 
-    A rota de fechamento nao aceita `n_efetivo` no corpo: um numero vindo de
-    quem pede seria a parada escolhida por quem pede. Aqui ele sai do dado.
+    **Medido, nunca recebido.** A rota de fechamento nao aceita `n_efetivo` no
+    corpo: um numero vindo de quem pede seria a parada escolhida por quem pede.
+
+    **E nao aceita `lado`** (ADR 0042). Os dois sao sempre percorridos, e o
+    `n_efetivo` devolvido e o do **gargalo** - o menor entre eles. Com ele
+    contra o mesmo `n_exigido`, "o minimo alcancou" **e** "os dois
+    alcancaram", e a condicao fica aritmetica em vez de lembrada.
     """
     if regime not in REGIMES_CALIBRAVEIS:
         raise ValueError(f"{regime!r} nao e regime calibravel")
@@ -1636,19 +1791,34 @@ def medir_regime(
     if janela is None:
         raise SemJanelaDeCalibracao("nao ha janela de calibracao selada")
 
-    serie: list[float] = []
-    # `regime = ?` no SQL, contra a COLUNA gravada. A versao anterior lia a
-    # janela inteira e filtrava em Python pelo detector rodado de novo - duas
-    # derivacoes do mesmo fato, e a que decide a PARADA era a mais nova.
-    for e2 in conn.execute(
-        "SELECT e2_mili_bps FROM calibracao_observacao"
-        " WHERE finalidade = 'calibracao' AND contrato = ? AND venue = ?"
-        "   AND symbol = ? AND lado = ? AND dentro_do_l1 = 1"
-        "   AND regime = ? AND t_grid_ms >= ?"
-        " ORDER BY t_grid_ms",
-        (contrato, venue, symbol, lado, regime, int(janela["de_ms"])),
-    ):
-        serie.append(float(e2["e2_mili_bps"]))
+    por_lado: dict[str, dict] = {}
+    for um_lado in LADOS:
+        serie: list[float] = []
+        # `regime = ?` no SQL, contra a COLUNA gravada. A versao anterior lia
+        # a janela inteira e filtrava em Python pelo detector rodado de novo -
+        # duas derivacoes do mesmo fato, e a que decide a PARADA era a mais
+        # nova.
+        for e2 in conn.execute(
+            "SELECT e2_mili_bps FROM calibracao_observacao"
+            " WHERE finalidade = 'calibracao' AND contrato = ? AND venue = ?"
+            "   AND symbol = ? AND lado = ? AND dentro_do_l1 = 1"
+            "   AND regime = ? AND t_grid_ms >= ?"
+            " ORDER BY t_grid_ms",
+            (contrato, venue, symbol, um_lado, regime, int(janela["de_ms"])),
+        ):
+            serie.append(float(e2["e2_mili_bps"]))
+        if len(serie) < bootstrap.MINIMO_PARA_O_QUANTIL:
+            por_lado[um_lado] = {
+                "lado": um_lado, "n": len(serie),
+                "n_efetivo": float(len(serie)), "tau": None,
+                "motivo": "nem o bootstrap roda com menos de dez pontos",
+            }
+            continue
+        ic = bootstrap.limite_inferior_do_quantil(serie, 0.10)
+        por_lado[um_lado] = {
+            "lado": um_lado, "n": ic.n, "n_efetivo": ic.n_efetivo,
+            "tau": ic.tau.tau, "motivo": None,
+        }
 
     # O ULTIMO INSTANTE DO REGIME, e nao o ultimo que ENTROU NA ESTATISTICA.
     #
@@ -1667,12 +1837,25 @@ def medir_regime(
     ).fetchone()
     ultimo = int(janela["de_ms"]) if linha["t"] is None else int(linha["t"])
 
-    if len(serie) < 10:
-        return {"regime": regime, "n": len(serie), "n_efetivo": float(len(serie)),
-                "ultimo_t_grid_ms": ultimo,
-                "motivo": "nem o bootstrap roda com menos de dez pontos"}
-    ic = bootstrap.limite_inferior_do_quantil(serie, 0.10)
+    # O GARGALO: o MENOR `n_efetivo` entre os lados. Com ele contra o mesmo
+    # `n_exigido`, "o minimo alcancou" e exatamente "os dois alcancaram".
+    gargalo = min(por_lado.values(), key=lambda x: x["n_efetivo"])
+    faltando = [x["lado"] for x in por_lado.values() if x["motivo"]]
     return {
-        "regime": regime, "n": ic.n, "n_efetivo": ic.n_efetivo,
-        "tau": ic.tau.tau, "ultimo_t_grid_ms": ultimo, "motivo": None,
+        "regime": regime,
+        "n": min(x["n"] for x in por_lado.values()),
+        "n_efetivo": gargalo["n_efetivo"],
+        "tau": gargalo["tau"],
+        "lado_do_gargalo": gargalo["lado"],
+        "por_lado": por_lado,
+        "ultimo_t_grid_ms": ultimo,
+        "motivo": (
+            f"lados sem amostra para o bootstrap: {faltando}"
+            if faltando else None
+        ),
+        "o_n_efetivo_e": (
+            "o do LADO GARGALO (ADR 0042). Fechar exige compra E venda"
+            " alcancarem o mesmo `n_exigido`, cada um por si - entao o que"
+            " decide e o menor dos dois"
+        ),
     }

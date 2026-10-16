@@ -376,7 +376,9 @@ class PedidoDeAjuste(BaseModel):
     venue: str = "binance"
     symbol: str = "BTCUSDT"
     contrato: str = CONTRATO_PADRAO
-    lado: str = Field(default="compra", pattern="^(compra|venda)$")
+    # `lado` SAIU daqui. ADR 0042: o chamador nao escolhe o lado, e nenhum
+    # default de Python decide por ele - selar, fechar e revalidar percorrem
+    # sempre os dois. Com `extra="forbid"`, mandar `lado` agora e 422.
 
 
 class PedidoPorRegime(PedidoDeAjuste):
@@ -526,7 +528,7 @@ def previa_selamento(
             ),
         },
         "por_lado": por_lado,
-        "o_lado_NAO_TEM_REGRA_DECLARADA": _o_lado_nao_tem_regra(),
+        "a_regra_dos_dois_lados": _a_regra_dos_dois_lados(),
         "o_piso_de_10_NAO_e_autorizacao": _o_piso_de_10(),
         "permanencia_e_cobertura": _permanencia_e_cobertura(),
     }
@@ -580,29 +582,39 @@ def _alvo_e_identidade(conn, versao) -> dict[str, Any]:
     }
 
 
-def _o_lado_nao_tem_regra() -> dict[str, Any]:
+def _a_regra_dos_dois_lados() -> dict[str, Any]:
+    """ADR 0042. O que era defeito aberto virou regra declarada."""
     return {
-        "fato": (
-            "`ajuste.selar_calibracao` chama `dimensionamento.dimensionar`"
-            " SEM passar `lado`, entao o `n_exigido` de cada regime e"
-            " congelado a partir do lado COMPRA - pelo default de Python, e"
-            " nao por regra escrita"
+        "adr": "0042",
+        "premissa": (
+            "compra e venda sao populacoes separadas, e o simulador aplica um"
+            " `spread_bps` so. Medir separado, decidir PELO PIOR"
         ),
-        "e_o_corpo_do_pedido_nao_resolve": (
-            "`PedidoDeAjuste` aceita `lado` e `selar_calibracao` nao tem esse"
-            " parametro: o campo viaja no POST e e DESCARTADO. Ele parece"
-            " escolher e nao escolhe"
+        "dimensionar": "separado, por lado, dentro de cada regime",
+        "n_exigido_gravado": (
+            "o MAIOR entre os dois lados. A media deixaria o lado mais"
+            " ruidoso ser diluido pelo mais limpo, e e o ruidoso que"
+            " determina quanta amostra e precisa"
         ),
-        "e_fechar_regime_usa_o_lado_do_PEDIDO": (
-            "a rota `fechar-regime` passa `lado=pedido.lado` para"
-            " `ajuste.medir_regime`. Entao da para congelar `n_exigido` do"
-            " lado COMPRA e fechar o regime contando observacoes do lado"
-            " VENDA, contra um limiar derivado da outra populacao"
+        "fechar": (
+            "compra E venda, cada um por si, contra o mesmo `n_exigido`"
+            " conservador. Nao e a soma: 2x observacoes de um lado so nao"
+            " medem o outro"
         ),
-        "o_que_falta": (
-            "uma DECISAO declarada - compra, venda, o maior dos dois, ou"
-            " `n_exigido` por lado -, tomada por argumento e nao olhando"
-            " qual lado da o numero menor"
+        "ajustar": (
+            "a MAIOR correcao exigida entre os lados. Nunca media, nunca"
+            " combinacao que permita um lado bom esconder o ruim"
+        ),
+        "revalidar": "LB95(p10(E2)) >= 0 em CADA lado, e nao no agregado",
+        "o_corpo_nao_escolhe": (
+            "`lado` saiu de `PedidoDeAjuste` e de `PedidoPorRegime`. Com"
+            " `extra=forbid`, manda-lo agora e 422 - e nenhum default de"
+            " Python decide por ninguem"
+        ),
+        "por_que_e_seguro_ter_sido_decidido_depois_de_medir": (
+            "as cinco regras andam na MESMA direcao - mais amostra, mais"
+            " tarde, mais pessimista, confirma menos facil, menos escolha."
+            " Nenhuma delas pode ser usada para fazer um regime passar"
         ),
     }
 
@@ -714,7 +726,7 @@ def fechar_regime(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
     conta = ajuste.medir_regime(
         conn, contrato=pedido.contrato, venue=pedido.venue,
         symbol=pedido.symbol, config=versao.config,
-        config_version_id=versao.id, regime=pedido.regime, lado=pedido.lado,
+        config_version_id=versao.id, regime=pedido.regime,
     )
     try:
         fechamento = ajuste.fechar_regime(
@@ -722,6 +734,7 @@ def fechar_regime(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
             symbol=pedido.symbol, regime=pedido.regime,
             n_efetivo=conta["n_efetivo"],
             ultimo_t_grid_ms=conta["ultimo_t_grid_ms"],
+            por_lado=conta.get("por_lado"),
         )
     except (ajuste.SemJanelaDeCalibracao, ajuste.RegraNaoCongelada,
             ajuste.AmostraInsuficienteNoRegime) as e:
@@ -848,7 +861,7 @@ def ajustar(request: Request, pedido: PedidoDeAjuste) -> dict[str, Any]:
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, config=versao.config,
             config_version_id=versao.id, autor=pedido.author,
-            settings=request.app.state.settings, lado=pedido.lado,
+            settings=request.app.state.settings,
         )
     except ajuste.PilotoAberto as e:
         raise HTTPException(
@@ -949,7 +962,7 @@ def revalidar(request: Request, pedido: PedidoPorRegime) -> dict[str, Any]:
             conn, contrato=pedido.contrato, venue=pedido.venue,
             symbol=pedido.symbol, config=versao.config,
             config_version_id=versao.id, calibracao_id=int(ultima["id"]),
-            lado=pedido.lado, regime=pedido.regime,
+            regime=pedido.regime,
         )
     except ajuste.RevalidacaoJaConsumida as e:
         raise HTTPException(
