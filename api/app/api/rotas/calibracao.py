@@ -480,6 +480,43 @@ def previa_selamento(
                     "barras_de_calendario": r.barras_de_calendario,
                     "motivo": r.motivo,
                     "entraria_na_tabela": r.n_exigido is not None,
+                    # O `n` DE CADA LADO, e nao so o conservador gravado.
+                    # ADR 0042: publicar so o agregado esconderia a origem -
+                    # e a origem estava escondida num default de Python.
+                    "por_lado": [
+                        {
+                            "lado": x.lado,
+                            "n": x.n,
+                            "n_efetivo": round(x.n_efetivo, 1),
+                            "sigma_e_mili_bps": (
+                                None if x.sigma_e_mili_bps is None
+                                else round(x.sigma_e_mili_bps, 3)
+                            ),
+                            "tau": None if x.tau is None else round(x.tau, 4),
+                            "n_exigido": x.n_exigido,
+                            "n_bruto_exigido": x.n_bruto_exigido,
+                            "barras_de_calendario": x.barras_de_calendario,
+                            "motivo": x.motivo,
+                        }
+                        for x in r.por_lado
+                    ],
+                    "o_n_exigido_gravado_e": (
+                        "o MAIOR entre compra e venda (ADR 0042). Fechar"
+                        " exige os DOIS alcancarem este mesmo numero, cada um"
+                        " por si"
+                    ),
+                    "condicoes_de_fechamento": {
+                        "amostra": "n_efetivo >= n_exigido em CADA lado",
+                        "permanencia": "o regime precisa de episodio, e"
+                                       " episodio exige 672 barras"
+                                       " consecutivas (ADR 0026)",
+                        "delta_nao_relaxa": "quem nao alcancar dentro da"
+                                            " janela permanece NAO CALIBRADO"
+                                            " e usa a base como hipotese",
+                        "sem_extensao": "a janela termina no fim declarado;"
+                                        " nenhum resultado o altera (ADR"
+                                        " 0043)",
+                    },
                 }
                 for r in d.por_regime
             ],
